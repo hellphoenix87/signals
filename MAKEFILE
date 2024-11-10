@@ -1,0 +1,25 @@
+# Makefile for starting the FastAPI server and running the Black code formatter
+
+# Define variables
+PYTHON=python3
+FASTAPI_SERVER=main:app  # Replace with your FastAPI app location
+PORT=8000
+
+# Default target: start the FastAPI server
+dev:
+    @echo "Starting FastAPI server..."
+    uvicorn $(FASTAPI_SERVER) --reload --host 0.0.0.0 --port $(PORT)
+
+# Run the Black code formatter
+fmt:
+    @echo "Running Black code formatter..."
+    black .
+
+# Check if the code is formatted correctly (dry run)
+check-fmt:
+    @echo "Checking code formatting..."
+    black --check .
+
+# Run the server and format the code
+dev-fmt: format start-server
+

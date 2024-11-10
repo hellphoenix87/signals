@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot WebSocket Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #data {
+            margin-top: 20px;
+        }
+        .log {
+            padding: 10px;
+            border: 1px solid #ccc;
+            margin-bottom: 10px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Trading Bot WebSocket Client</h1>
+    
+    <div>
+        <label for="symbol">Symbol:</label>
+        <input type="text" id="symbol" value="EURUSD" />
+
+        <label for="timeframe">Timeframe:</label>
+        <select id="timeframe">
+            <option value="M1">M1</option>
+            <option value="M5">M5</option>
+            <option value="H1">H1</option>
+            <option value="D1">D1</option>
+        </select>
+
+        <label for="numBars">Number of Bars:</label>
+        <input type="number" id="numBars" value="100" />
+        
+        <button onclick="startWebSocket()">Start Data Feed</button>
+    </div>
+
+    <div id="data" class="log">
+        <h3>Received Data:</h3>
+        <pre id="dataOutput"></pre>
+    </div>
+
+    <script>
+        let socket;
+
+        function startWebSocket() {
+            // Get input values
+            const symbol = document.getElementById('symbol').value;
+            const timeframe = document.getElementById('timeframe').value;
+            const numBars = document.getElementById('numBars').value;
+
+            // Construct WebSocket URL with query parameters
+            const url = `ws://127.0.0.1:8000/ws/signal?symbol=${symbol}&timeframe=${timeframe}&num_bars=${numBars}`;
+            
+            // Initialize WebSocket connection
+            socket = new WebSocket(url);
+
+            socket.onopen = () => {
+                console.log('Connected to WebSocket');
+                document.getElementById('dataOutput').textContent = "Connected to WebSocket. Waiting for data...";
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received data:', data);
+                document.getElementById('dataOutput').textContent = `Signal at ${new Date().toLocaleTimeString()}: ${JSON.stringify(data.signal, null, 2)}`;
+            };
+
+            socket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+            };
+
+            socket.onclose = () => {
+                console.log('WebSocket connection closed');
+                document.getElementById('dataOutput').textContent = "Connection closed. Please reconnect.";
+            };
+        }
+    </script>
+
+</body>
+</html>

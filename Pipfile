@@ -1,0 +1,21 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+metatrader5 = "*"
+pandas = "*"
+ta = "*"
+matplotlib = "*"
+numpy = "<2"
+fastapi = "*"
+uvicorn = "*"
+websockets = "*"
+black = "*"
+
+[dev-packages]
+metatrader5 = "*"
+
+[requires]
+python_version = "3.10"
