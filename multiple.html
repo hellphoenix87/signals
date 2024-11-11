@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot WebSocket Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #data {
+            margin-top: 20px;
+        }
+        .log {
+            padding: 10px;
+            border: 1px solid #ccc;
+            margin-bottom: 10px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .symbol-section {
+            margin-top: 20px;
+        }
+        .symbol-data {
+            margin-top: 10px;
+            padding: 5px;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Trading Bot WebSocket Client</h1>
+    
+    <div>
+        <label for="symbols">Symbols (comma separated):</label>
+        <input type="text" id="symbols" value="EURUSD,GBPUSD" />
+
+        <label for="timeframe">Timeframe:</label>
+        <select id="timeframe">
+            <option value="M1">M1</option>
+            <option value="M5">M5</option>
+            <option value="H1">H1</option>
+            <option value="D1">D1</option>
+        </select>
+
+        <label for="numBars">Number of Bars:</label>
+        <input type="number" id="numBars" value="100" />
+        
+        <button onclick="startWebSocket()">Start Data Feed</button>
+    </div>
+
+    <div id="data" class="log">
+        <h3>Received Data:</h3>
+        <div id="signals"></div>
+    </div>
+
+    <script>
+        let socket;
+
+        function startWebSocket() {
+            // Get input values
+            const symbols = document.getElementById('symbols').value;
+            const timeframe = document.getElementById('timeframe').value;
+            const numBars = document.getElementById('numBars').value;
+
+            // Construct WebSocket URL with query parameters
+            const url = `ws://127.0.0.1:8000/ws/signal?symbols=${symbols}&timeframe=${timeframe}&num_bars=${numBars}`;
+            
+            // Initialize WebSocket connection
+            socket = new WebSocket(url);
+
+            socket.onopen = () => {
+                console.log('Connected to WebSocket');
+                document.getElementById('signals').innerHTML = "Connected to WebSocket. Waiting for data...";
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received data:', data);
+                displaySignals(data.signals);
+            };
+
+            socket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+            };
+
+            socket.onclose = () => {
+                console.log('WebSocket connection closed');
+                document.getElementById('signals').innerHTML = "Connection closed. Please reconnect.";
+            };
+        }
+
+        function displaySignals(signals) {
+            const signalsContainer = document.getElementById('signals');
+            signalsContainer.innerHTML = ''; // Clear previous signals
+
+            // Loop through each symbol and display its signal and timestamp
+            for (const symbol in signals) {
+                const signal = signals[symbol];
+                const symbolDiv = document.createElement('div');
+                symbolDiv.classList.add('symbol-section');
+                symbolDiv.innerHTML = `
+                    <div class="symbol-data">
+                        <strong>${symbol}</strong>: Signal = ${signal.signal} <br/>
+                        <strong>Timestamp:</strong> ${signal.timestamp}
+                    </div>
+                `;
+                signalsContainer.appendChild(symbolDiv);
+            }
+        }
+    </script>
+
+</body>
+</html>
