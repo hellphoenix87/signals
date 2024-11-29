@@ -34,21 +34,23 @@ def generate_combined_signal(sma_signal, data, rsi_period=14, rsi_overbought=70,
     Returns the final trading signal.
     """
     # Calculate RSI for the data
-    rsi = calculate_rsi(data, rsi_period)
+    rsi_value = calculate_rsi(data, rsi_period)
     
     # Use only the latest SMA signal and the corresponding RSI value
-    latest_rsi = rsi[-1]
+    latest_rsi = rsi_value[-1]
     
-    logging.info(f"Latest RSI: {latest_rsi}, {rsi_overbought}, {rsi_oversold}")
+    logging.info(f"Latest SMA Signal: {sma_signal}")
+    logging.info(f"Latest RSI: {latest_rsi}, Overbought: {rsi_overbought}, Oversold: {rsi_oversold}")
 
-    # Confirm the SMA signal with RSI
     if sma_signal == "buy" and latest_rsi < rsi_oversold:
-        with open("signals.txt", "a") as f:
-            f.write("buy")
-        return "buy"  # Confirmed buy signal
+        final_signal = "buy"
     elif sma_signal == "sell" and latest_rsi > rsi_overbought:
-        with open("signals.txt", "a") as f:
-            f.write("sell")
-        return "sell"  # Confirmed sell signal
+        final_signal = "sell"
     else:
-        return "hold"  # No confirmed signal
+        final_signal = "hold"
+
+    return {
+        "sma_signal": sma_signal,
+        "rsi": latest_rsi,
+        "final_signal": final_signal
+    }

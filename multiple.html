@@ -16,7 +16,7 @@
             padding: 10px;
             border: 1px solid #ccc;
             margin-bottom: 10px;
-            max-height: 400px;
+            max-height: auto;
             overflow-y: auto;
         }
         .symbol-section {
@@ -78,7 +78,7 @@
 
             socket.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                console.log('Received data:', data);
+                console.log('Received data2:', data.signals);
                 displaySignals(data.signals);
             };
 
@@ -96,19 +96,29 @@
             const signalsContainer = document.getElementById('signals');
             signalsContainer.innerHTML = ''; // Clear previous signals
 
-            // Loop through each symbol and display its signal and timestamp
-            for (const symbol in signals) {
-                const signal = signals[symbol];
-                const symbolDiv = document.createElement('div');
-                symbolDiv.classList.add('symbol-section');
-                symbolDiv.innerHTML = `
-                    <div class="symbol-data">
-                        <strong>${symbol}</strong>: Signal = ${signal.signal} <br/>
-                        <strong>Timestamp:</strong> ${signal.timestamp}
-                    </div>
-                `;
-                signalsContainer.appendChild(symbolDiv);
+            // Validate that 'signals' is a valid object
+            if (!signals || typeof signals !== 'object') {
+                signalsContainer.innerHTML = '<p>No valid signals received.</p>';
+                return;
             }
+            console.log(`Signals received:`, signals);
+
+            // Iterate over the keys of the 'signals' object
+            Object.entries(signals).forEach(([symbol, signalData]) => {
+                if (signalData && signalData.signal && signalData.timestamp) {
+                    const symbolDiv = document.createElement('div');
+                    symbolDiv.classList.add('symbol-section');
+                    symbolDiv.innerHTML = `
+                        <div class="symbol-data">
+                            <strong>${signalData.symbol}</strong>: Signal = ${signalData.signal.final_signal} <br/>
+                            <strong>Timestamp:</strong> ${signalData.timestamp}
+                        </div>
+                    `;
+                    signalsContainer.appendChild(symbolDiv);
+                } else {
+                    console.warn(`Invalid data for symbol ${symbol}:`, signalData);
+                }
+            });
         }
     </script>
 
