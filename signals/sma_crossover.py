@@ -27,33 +27,41 @@ def generate_sma_signal(data, short_window=50, long_window=200, threshold=0.0001
     Returns:
         str: "buy", "sell", or "hold" based on the SMA crossover.
     """
-    # Ensure there are enough data points for the short and long SMA calculation
-    if len(data) < long_window:
-        logging.error(f"Not enough data to calculate SMA. Need at least {long_window} data points.")
-        return "hold"  # Return "hold" or another default value
-    
-    # Extract closing prices
-    closing_prices = [item['close'] for item in data]
+    try:
+        # Ensure there are enough data points for the SMA calculation
+        if len(data) < long_window:
+            logging.error(f"Not enough data to calculate SMA. Need at least {long_window} data points.")
+            return "hold"
+        
+        # Extract closing prices
+        closing_prices = [item['close'] for item in data if item['close'] is not None]
+        
+        # Calculate short and long moving averages
+        short_sma = calculate_sma(closing_prices, short_window)
+        long_sma = calculate_sma(closing_prices, long_window)
 
-    # Calculate short and long moving averages
-    short_sma = calculate_sma(closing_prices, short_window)
-    long_sma = calculate_sma(closing_prices, long_window)
+        # Ensure there are enough SMA values to compare
+        if len(short_sma) < 2 or len(long_sma) < 2:
+            logging.error("Not enough SMA values to generate a signal.")
+            return "hold"
 
-    # Log the latest SMA values for debugging
-    logging.info(f"Short SMA: {short_sma[-1]}, Long SMA: {long_sma[-1]}")
+        # Log the latest SMA values
+        logging.info(f"Short SMA: {short_sma[-1]}, Long SMA: {long_sma[-1]}")
 
-    # Calculate the difference between the short and long SMAs
-    sma_diff = short_sma[-1] - long_sma[-1]
+        # Calculate the difference between the short and long SMAs
+        sma_diff = short_sma[-1] - long_sma[-1]
+        logging.debug(f"SMA Diff: {sma_diff}, Previous Diff: {short_sma[-2] - long_sma[-2]}")
 
-    # Check for crossover signal (buy or sell)
-    if sma_diff > threshold and short_sma[-2] <= long_sma[-2]:
-        logging.info("Generated 'buy' signal")
-        return "buy"
-    elif sma_diff < -threshold and short_sma[-2] >= long_sma[-2]:
-        logging.info("Generated 'sell' signal")
-        return "sell"
-    else:
-        logging.info("Generated 'hold' signal")
-        return "hold"
-
-
+        # Check for crossover signal (buy or sell)
+        if sma_diff > threshold and short_sma[-2] <= long_sma[-2]:
+            logging.info("Generated 'buy' signal")
+            return "buy"
+        elif sma_diff < -threshold and short_sma[-2] >= long_sma[-2]:
+            logging.info("Generated 'sell' signal")
+            return "sell"
+        else:
+            logging.info("Generated 'hold' signal")
+            return "hold"
+    except Exception as e:
+        logging.error(f"Error in generate_sma_signal: {str(e)}")
+        return "error"
