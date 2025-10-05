@@ -2,7 +2,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from contextlib import asynccontextmanager
 import MetaTrader5 as mt5
 from utils.connection import initialize_mt5, shutdown_mt5  # Import connection setup
-from data.market_data import get_account_info, get_symbol_data  # Example function for data retrieval
+from data.market_data import (
+    get_account_info,
+    get_symbol_data,
+)  # Example function for data retrieval
 import asyncio
 import logging
 import time
@@ -14,31 +17,40 @@ logger = logging.getLogger(__name__)
 # Valid timeframes for trading data
 valid_timeframes = ["M1", "M5", "H1", "D1"]
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize MT5 connection
+    logger.info("Initializing MT5 connection...")
     if not initialize_mt5():
         logger.error("Failed to initialize MT5 connection")
+    logger.info("MT5 connection initialized.")
     yield
-    # Shutdown: disconnect MT5 connection
     shutdown_mt5()
 
+
 app = FastAPI(lifespan=lifespan)
+
 
 @app.get("/")
 async def root():
     return {"message": "Welcome to the MT5 Trading Bot API!"}
+
 
 @app.get("/account_info")
 async def account_info():
     # Endpoint to get account information
     return get_account_info()
 
-async def fetch_data_continuously(websocket: WebSocket, symbol: str, timeframe: str, num_bars: int):
+
+async def fetch_data_continuously(
+    websocket: WebSocket, symbol: str, timeframe: str, num_bars: int
+):
     """
     Function to fetch data continuously from MT5 and send it to the WebSocket client.
     """
-    logger.info(f"Started fetching data for {symbol} with timeframe {timeframe} and num_bars {num_bars}")
+    logger.info(
+        f"Started fetching data for {symbol} with timeframe {timeframe} and num_bars {num_bars}"
+    )
     last_fetch_time = 0
     interval = 60  # Fetch new data every 60 seconds
 
@@ -46,7 +58,9 @@ async def fetch_data_continuously(websocket: WebSocket, symbol: str, timeframe: 
         while True:
             # Validate timeframe
             if timeframe not in valid_timeframes:
-                await websocket.send_text(f"Invalid timeframe. Valid options are: {', '.join(valid_timeframes)}")
+                await websocket.send_text(
+                    f"Invalid timeframe. Valid options are: {', '.join(valid_timeframes)}"
+                )
                 return
 
             # Map the timeframe string to MT5 constant
@@ -64,7 +78,7 @@ async def fetch_data_continuously(websocket: WebSocket, symbol: str, timeframe: 
                 data = get_symbol_data(symbol, mt5_timeframe, num_bars)
                 # Convert datetime objects to strings
                 for item in data:
-                    item['time'] = item['time'].isoformat()
+                    item["time"] = item["time"].isoformat()
                 await websocket.send_json(data)  # Send data to the client
                 logger.info(f"Fetched data: {data}")  # Optionally, log the data
                 last_fetch_time = current_time  # Update last fetch time
@@ -76,15 +90,24 @@ async def fetch_data_continuously(websocket: WebSocket, symbol: str, timeframe: 
     finally:
         logger.info(f"Stopped fetching data for {symbol}")
 
+
 @app.websocket("/ws/symbol_data")
-async def websocket_endpoint(websocket: WebSocket, symbol: str = "EURUSD", timeframe: str = "M1", num_bars: int = 100):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    symbol: str = "EURUSD",
+    timeframe: str = "M1",
+    num_bars: int = 100,
+):
     """
     WebSocket endpoint to fetch symbol data continuously.
     """
     # Validate parameters
     if timeframe not in valid_timeframes:
-        raise HTTPException(status_code=400, detail="Invalid timeframe. Valid options are: M1, M5, H1, D1")
-    
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid timeframe. Valid options are: M1, M5, H1, D1",
+        )
+
     # Accept WebSocket connection
     await websocket.accept()
 

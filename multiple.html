@@ -67,6 +67,8 @@
 
             // Construct WebSocket URL with query parameters
             const url = `ws://127.0.0.1:8000/ws/signal?symbols=${symbols}&timeframe=${timeframe}&num_bars=${numBars}`;
+
+            console.log('Connecting to:', url);
             
             // Initialize WebSocket connection
             socket = new WebSocket(url);
