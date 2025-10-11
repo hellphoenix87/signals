@@ -1,13 +1,14 @@
 from datetime import time
+import MetaTrader5 as mt5
 
 
 class Config:
     # === Symbols ===
     MAX_SYMBOLS = 10  # Maximum number of symbols to trade
-    SYMBOLS = []  # Dynamic list, can be updated at runtime
+    SYMBOLS = ["EURUSD"]
 
     # === Timeframe ===
-    TIMEFRAME = "H1"  # Analysis timeframe (1-hour candles)
+    TIMEFRAME = TIMEFRAME = mt5.TIMEFRAME_M5  # Analysis timeframe (5-minute candles)
 
     # === Daily limits ===
     DAILY_TARGET_PROFIT = 200  # Max profit per day in account currency
@@ -31,3 +32,7 @@ class Config:
     # === Logging / Debugging ===
     LOG_FILE = "trading_bot.log"
     LOG_LEVEL = "INFO"
+
+    CANDLE_COUNT = 10000
+    MIN_CANDLES_FOR_INDICATORS = 202
+    CONFIDENCE_THRESHOLD = 0.5

@@ -1,4 +1,3 @@
-# app/risk/risk_manager.py
 import MetaTrader5 as mt5
 
 

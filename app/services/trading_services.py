@@ -12,6 +12,7 @@ class TradingService:
         self.last_reset = datetime.now()
 
     def tick(self):
+        print(f"TradingService.tick called at {datetime.now()}")
         """Single iteration of trading logic."""
         now = datetime.now()
         self._reset_daily_if_needed(now)
@@ -21,6 +22,7 @@ class TradingService:
 
         # 1. Generate signals with risk-spread
         signals = self.strategy.generate_signals(account_balance)
+        print(f"Generated {len(signals)} signals")
 
         # 2. Execute signals via broker (moved here)
         for s in signals:
@@ -46,13 +48,10 @@ class TradingService:
 
     def _calculate_daily_profit(self):
         positions = self.broker.get_open_positions()
-        if self.broker.demo_mode:
+        if getattr(self.broker, "mode", None) in ("demo", "backtest"):
             # Simulated positions are dicts
             profit = sum(pos["profit"] for pos in positions)
         else:
             # Real MT5 positions are objects
             profit = sum(pos.profit for pos in positions)
         return profit
-
-    def _close_all_trades(self):
-        self.broker.close_all_positions()

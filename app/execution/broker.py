@@ -1,66 +1,46 @@
+from logging import info
 import MetaTrader5 as mt5
 
 
 class Broker:
-    def __init__(self, demo_mode=True):
-        self.demo_mode = demo_mode
-        self.open_positions_sim = []  # For paper trading simulation
+    def __init__(self, mode):
+        self.mode = mode
+        self.open_positions_sim = []
 
-        if not demo_mode:
+        if self.mode in ("live", "backtest"):
             if not mt5.initialize():
                 raise RuntimeError("MT5 initialization failed")
+        info(f"Broker initialized in {self.mode} mode")
 
-    def place_buy(self, symbol, lot, sl, tp):
-        if self.demo_mode:
+    def place_buy(self, symbol, lot, sl, tp, price=None):
+        if self.mode == "backtest":
+            self._backtest_trade(symbol, "BUY", lot, sl, tp, price)
+        elif self.mode == "demo":
             self._simulate_trade(symbol, "BUY", lot, sl, tp)
         else:
             self._mt5_place_order(symbol, "BUY", lot, sl, tp)
 
-    def place_sell(self, symbol, lot, sl, tp):
-        if self.demo_mode:
+    def place_sell(self, symbol, lot, sl, tp, price=None):
+        if self.mode == "backtest":
+            self._backtest_trade(symbol, "SELL", lot, sl, tp, price)
+        elif self.mode == "demo":
             self._simulate_trade(symbol, "SELL", lot, sl, tp)
         else:
             self._mt5_place_order(symbol, "SELL", lot, sl, tp)
 
     def get_open_positions(self, symbol=None):
-        if self.demo_mode:
+        if self.mode == "demo" or self.mode == "backtest":
             if symbol:
                 return [p for p in self.open_positions_sim if p["symbol"] == symbol]
             return self.open_positions_sim
         else:
+            import MetaTrader5 as mt5
+
             return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
 
-    def close_all_positions(self):
-        if self.demo_mode:
-            print("Paper trading: closing all positions")
-            self.open_positions_sim.clear()
-        else:
-            positions = mt5.positions_get()
-            if positions:
-                for pos in positions:
-                    mt5.order_close(
-                        pos.ticket, pos.volume, mt5.symbol_info_tick(pos.symbol).bid, 5
-                    )
-
-    def calculate_sl_tp_prices(self, direction, price, sl_pips, tp_pips, symbol):
-        point = self._get_symbol_point(symbol)
-        if direction == "BUY":
-            sl_price = price - sl_pips * point
-            tp_price = price + tp_pips * point
-        else:
-            sl_price = price + sl_pips * point
-            tp_price = price - tp_pips * point
-        return sl_price, tp_price
-
-    def get_lot_value(self, symbol):
-        info = mt5.symbol_info(symbol)
-        if info is None:
-            return 100_000  # fallback
-        return info.trade_contract_size  # usually 100k for Forex
-
     def _simulate_trade(self, symbol, direction, lot, sl, tp):
-        """Simulate a trade in paper trading mode."""
-        price = 1.0  # default placeholder, can use last tick
+        # DEMO mode: use current tick price
+        price = 1.0
         tick = mt5.symbol_info_tick(symbol)
         if tick:
             price = tick.ask if direction == "BUY" else tick.bid
@@ -75,7 +55,26 @@ class Broker:
             "profit": 0.0,
         }
         self.open_positions_sim.append(trade)
-        print(f"Paper trading: {direction} {symbol} {lot} lots at {price}")
+        print(f"Demo mode: {direction} {symbol} {lot} lots at {price}")
+
+    def _backtest_trade(self, symbol, direction, lot, sl, tp, price):
+        # BACKTEST mode: use provided historical price
+        if price is None:
+            raise ValueError(
+                "Backtest mode requires a historical price for simulation."
+            )
+
+        trade = {
+            "symbol": symbol,
+            "direction": direction,
+            "lot": lot,
+            "open_price": price,
+            "sl": sl,
+            "tp": tp,
+            "profit": 0.0,
+        }
+        self.open_positions_sim.append(trade)
+        print(f"Backtest mode: {direction} {symbol} {lot} lots at {price}")
 
     def _get_symbol_point(self, symbol):
         info = mt5.symbol_info(symbol)
@@ -84,3 +83,62 @@ class Broker:
         if "JPY" in symbol:
             return 0.01
         return info.point
+
+    def _mt5_place_order(self, symbol, direction, lot, sl, tp):
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            print(f"Symbol {symbol} not found")
+            return None
+
+        step = info.volume_step
+        lot = max(info.volume_min, min(info.volume_max, round(lot / step) * step))
+        lot = float(f"{lot:.2f}")
+
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            print(f"Failed to get tick for {symbol}")
+            return None
+        price = tick.ask if direction == "BUY" else tick.bid
+
+        min_dist = info.trade_stops_level * info.point
+        if sl and abs(price - sl) < min_dist:
+            print(f"SL too close for {symbol}, adjusting")
+            sl = price - min_dist if direction == "BUY" else price + min_dist
+        if tp and abs(price - tp) < min_dist:
+            print(f"TP too close for {symbol}, adjusting")
+            tp = price + min_dist if direction == "BUY" else price - min_dist
+
+        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+
+        for filling_mode in [
+            mt5.ORDER_FILLING_FOK,
+            mt5.ORDER_FILLING_RETURN,
+            mt5.ORDER_FILLING_IOC,
+        ]:
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": lot,
+                "type": order_type,
+                "price": price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 5,
+                "magic": 123456,
+                "comment": "Placed by Python",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            result = mt5.order_send(request)
+            print(
+                f"MT5 order result for {symbol} with filling_mode {filling_mode}: {result}"
+            )
+            if (
+                result.retcode == mt5.TRADE_RETCODE_DONE
+                or result.retcode == mt5.TRADE_RETCODE_PLACED
+            ):
+                return result
+            if result.comment != "Unsupported filling mode":
+                return result
+        print(f"All filling modes failed for {symbol}")
+        return None
