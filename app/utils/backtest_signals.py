@@ -10,9 +10,9 @@ def backtest_signals(strategy, candles, min_window):
         results.append(
             {
                 "index": i,
-                "time": candles[i]["time"],  # Adjust if your candle dict has 'time'
+                "time": candles[i]["time"],
                 "signal": signal.get("final_signal"),
-                "confidence": signal.get("confidence"),
+                "confidence": round(signal.get("confidence", 0), 2),
             }
         )
     return results

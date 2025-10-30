@@ -16,8 +16,8 @@ def write_log_to_file(message):
 
 def generate_sma_signal(
     data,
-    short_window=50,
-    long_window=200,
+    short_window=10,
+    long_window=40,
     slope_threshold=0.00005,
     diff_threshold=0.0001,
 ):

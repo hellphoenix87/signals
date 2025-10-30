@@ -8,7 +8,7 @@ class Config:
     SYMBOLS = ["EURUSD"]
 
     # === Timeframe ===
-    TIMEFRAME = TIMEFRAME = mt5.TIMEFRAME_M5  # Analysis timeframe (5-minute candles)
+    TIMEFRAME = mt5.TIMEFRAME_M1  # Analysis timeframe (5-minute candles)
 
     # === Daily limits ===
     DAILY_TARGET_PROFIT = 200  # Max profit per day in account currency
@@ -33,6 +33,6 @@ class Config:
     LOG_FILE = "trading_bot.log"
     LOG_LEVEL = "INFO"
 
-    CANDLE_COUNT = 10000
+    CANDLE_COUNT = 2000
     MIN_CANDLES_FOR_INDICATORS = 202
     CONFIDENCE_THRESHOLD = 0.5
