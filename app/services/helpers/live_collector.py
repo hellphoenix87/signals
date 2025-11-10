@@ -6,6 +6,24 @@ from app.data.market_data import MarketData
 import datetime
 
 
+def create_live_candle_collector(
+    symbol: str = "EURUSD",
+    timeframe=None,
+    count=None,
+    interval: int = 60,
+):
+    """
+    Provider for DI wiring of LiveCandleCollector.
+    Returns a LiveCandleCollector instance (does not start it).
+    """
+    return LiveCandleCollector(
+        symbol=symbol,
+        timeframe=timeframe,
+        count=count,
+        interval=interval,
+    )
+
+
 class LiveCandleCollector:
     def __init__(self, symbol="EURUSD", timeframe=None, count=None, interval=None):
         self.symbol = symbol
@@ -29,14 +47,23 @@ class LiveCandleCollector:
             self._thread.join()
 
     def _collect(self):
+        last_candle_time = None
         while self._running:
             try:
-                self.latest_candles = self.market_data.get_historical_candles(
+                candles = self.market_data.get_historical_candles(
                     self.symbol,
                     timeframe=self.timeframe,
                     start_pos=0,
                     count=self.count,
                 )
+                self.latest_candles = candles
+                if candles and (
+                    last_candle_time is None or candles[-1]["time"] != last_candle_time
+                ):
+                    print(
+                        f"[{self.symbol}] get_historical_candles fetched: {len(candles)} candles"
+                    )
+                    last_candle_time = candles[-1]["time"]
             except Exception as e:
                 print(f"[LiveCandleCollector] Error fetching candles: {e}")
 

@@ -3,16 +3,10 @@ import time
 import datetime
 import MetaTrader5 as mt5
 from typing import Optional, Any
-from app.services.live_collector import LiveCandleCollector
-
-
-def create_collector(
-    symbol: str, timeframe, count: int, interval: int = 60
-) -> LiveCandleCollector:
-    """Factory that returns a LiveCandleCollector instance (does not start it)."""
-    return LiveCandleCollector(
-        symbol=symbol, timeframe=timeframe, count=count, interval=interval
-    )
+from app.services.helpers.live_collector import (
+    LiveCandleCollector,
+    create_live_candle_collector,
+)  # <-- import provider
 
 
 def create_orchestrator(
@@ -115,9 +109,9 @@ class SignalOrchestrator:
 
     def _run(self):
         """Main loop: sync with server time, read collector candles, generate signals, log and delegate execution."""
+        last_signal_minute = None
         while self._running:
             try:
-                # synchronize to next candle using broker tick time (preferred)
                 tick = None
                 try:
                     tick = mt5.symbol_info_tick(self.collector.symbol)
@@ -126,6 +120,11 @@ class SignalOrchestrator:
 
                 if tick and getattr(tick, "time", None):
                     server_time = datetime.datetime.fromtimestamp(tick.time)
+                    current_minute = server_time.minute
+                    if last_signal_minute == current_minute:
+                        time.sleep(1)
+                        continue
+                    last_signal_minute = current_minute
                     seconds_to_next = 60 - server_time.second
                     sleep_time = max(1, seconds_to_next)
                     time.sleep(sleep_time)
@@ -153,7 +152,14 @@ class SignalOrchestrator:
                 if not log_time:
                     log_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-                entry = f"{log_time} | {self.collector.symbol} | {signal}\n"
+                conf = signal.get("confidence")
+                if conf is not None:
+                    conf_str = f"{conf:.10f}"
+                    signal_str = dict(signal)
+                    signal_str["confidence"] = conf_str
+                else:
+                    signal_str = signal
+                entry = f"{log_time} | {self.collector.symbol} | {signal_str}\n"
                 try:
                     with open("orchestrator_signals.log", "a") as f:
                         f.write(entry)
