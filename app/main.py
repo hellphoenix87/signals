@@ -1,21 +1,18 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.data.market_data import MarketData
-from app.execution.mode import TradingMode as Mode
-from app.risk.risk_manager import RiskManager
-from app.execution.broker import Broker
-from app.strategies.breakout_strategy import BreakoutStrategy
-from app.services.trading_services import TradingService
 import MetaTrader5 as mt5
 
+from app.factory import (
+    signal_orchestrator,
+    trade_executor,
+    strategy,
+    br,
+    rm,
+    md,
+)
 from app.utils.backtest_signals import backtest_signals
 
-# Initialize dependencies
-md = MarketData()
-br = Broker(mode=Mode.BACKTEST)
-rm = RiskManager(br)
-strategy = BreakoutStrategy(md, rm, br)
-trading_service = TradingService(strategy, rm, br, md)
+orchestrator_started = False
 
 
 @asynccontextmanager
@@ -31,11 +28,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/status")
 def get_status():
-    if getattr(br, "mode", None) == Mode.DEMO:
+    if getattr(br, "mode", None) == br.mode.DEMO:
         print(f"Paper trading mode: {len(br.open_positions_sim)} open positions")
     return {
-        "daily_profit": getattr(trading_service, "daily_profit", None),
-        "last_reset": getattr(trading_service, "last_reset", None),
+        "daily_profit": getattr(trade_executor, "daily_profit", None),
+        "last_reset": getattr(trade_executor, "last_reset", None),
         "active_symbols": strategy.get_last_scanned_symbols(),
     }
 
@@ -43,22 +40,22 @@ def get_status():
 @app.post("/tick")
 def manual_tick():
     print("manual_tick endpoint called")
-    trading_service.tick()
-    if getattr(br, "mode", None) == Mode.DEMO:
+    trade_executor.tick()
+    if getattr(br, "mode", None) == br.mode.DEMO:
         print(f"Paper trading mode: {len(br.open_positions_sim)} open positions")
     return {"status": "tick executed"}
 
 
 @app.get("/simulated_positions")
 def get_simulated_positions():
-    if getattr(br, "mode", None) == Mode.DEMO:
+    if getattr(br, "mode", None) == br.mode.DEMO:
         print(f"Paper trading mode: {len(br.open_positions_sim)} open positions")
     return br.open_positions_sim
 
 
 @app.post("/close_all")
 def close_all_trades():
-    trading_service._close_all_trades()
+    trade_executor._close_all_trades()
     return {"status": "all trades closed"}
 
 
@@ -77,8 +74,8 @@ def test_historical():
     return {"candles": candles}
 
 
-@app.get("/backtest_signals")
-def backtest_signals_endpoint():
+@app.get("/backtest_signals_historical")
+def backtest_signals_endpoint_historical():
     from app.config.settings import Config
     from app.strategies.breakout_strategy import BreakoutStrategy
 
@@ -88,10 +85,31 @@ def backtest_signals_endpoint():
         start_pos=0,
         count=Config.CANDLE_COUNT,
     )
-    strategy = BreakoutStrategy(market_data=md, risk_manager=rm, broker=br)
+    strategy_instance = BreakoutStrategy(market_data=md, risk_manager=rm, broker=br)
     results = backtest_signals(
-        strategy.strong_signal_strategy,
+        strategy_instance.strong_signal_strategy,
         candles,
         min_window=Config.MIN_CANDLES_FOR_INDICATORS,
     )
     return {"signals": results}
+
+
+@app.get("/live_signal")
+def live_signal():
+    global orchestrator_started
+    if not orchestrator_started:
+        signal_orchestrator.start()
+        orchestrator_started = True
+    signal = signal_orchestrator.get_latest_signal()
+    return {"signal": signal}
+
+
+@app.post("/stop_orchestrator")
+def stop_orchestrator():
+    global orchestrator_started
+    if orchestrator_started:
+        signal_orchestrator.stop()
+        orchestrator_started = False
+        return {"status": "orchestrator stopped"}
+    else:
+        return {"status": "orchestrator was not running"}

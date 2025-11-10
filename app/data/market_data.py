@@ -2,6 +2,11 @@ import MetaTrader5 as mt5
 from datetime import datetime
 
 
+def create_market_data():
+    """Provider for DI wiring of MarketData."""
+    return MarketData()
+
+
 class MarketData:
     def __init__(self):
         pass

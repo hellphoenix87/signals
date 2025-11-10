@@ -1,5 +1,10 @@
 from app.config.settings import Config
-from app.strategies.strong_signal import StrongSignalStrategy
+from app.services.helpers.strong_signal import StrongSignalStrategy
+
+
+def create_breakout_strategy(market_data, risk_manager, broker):
+    """Provider for DI wiring of BreakoutStrategy."""
+    return BreakoutStrategy(market_data, risk_manager, broker)
 
 
 class BreakoutStrategy:

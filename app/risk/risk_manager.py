@@ -1,6 +1,11 @@
 import MetaTrader5 as mt5
 
 
+def create_risk_manager(broker):
+    """Provider for DI wiring of RiskManager."""
+    return RiskManager(broker)
+
+
 class RiskManager:
     def __init__(self, broker):
         self.broker = broker

@@ -16,17 +16,17 @@ def write_log_to_file(message):
 
 def generate_sma_signal(
     data,
-    short_window=5,  # More responsive
-    long_window=20,  # More responsive
-    slope_threshold=0.00002,  # Lower threshold
-    diff_threshold=0.00005,  # Lower threshold
-    price_jump_threshold=0.00025,  # New: 25 pips
+    short_window=10,
+    long_window=40,
+    slope_threshold=0.00005,
+    diff_threshold=0.0001,
 ):
     """
-    Generate trading signals based on SMA trend slope, crossover, and price jump.
+    Generate trading signals based on SMA trend slope and crossover.
+
+    Option B logic:
     - Use SMA slope (momentum) to detect trend direction.
     - Use SMA crossover to confirm trend reversal.
-    - Use price jump to catch sharp moves.
     - Generate 'buy', 'sell', or 'hold'.
     """
     try:
@@ -70,22 +70,14 @@ def generate_sma_signal(
         # Determine signal
         signal = "hold"
 
-        # Price jump logic
-        if abs(closing_prices[-1] - closing_prices[-2]) > price_jump_threshold:
-            signal = "buy" if closing_prices[-1] > closing_prices[-2] else "sell"
-            logging.info(f"Price jump detected, generated '{signal}' signal")
-            write_log_to_file(
-                f"[sma_crossover] Price jump detected, generated '{signal}' signal"
-            )
-
         # Trend-following: SMA slope
-        elif short_slope > slope_threshold and long_slope > 0:
+        if short_slope > slope_threshold and long_slope > 0:
             signal = "buy"
         elif short_slope < -slope_threshold and long_slope < 0:
             signal = "sell"
 
         # Confirm with crossover
-        elif diff > diff_threshold and prev_diff <= 0:
+        if diff > diff_threshold and prev_diff <= 0:
             signal = "buy"  # bullish crossover
         elif diff < -diff_threshold and prev_diff >= 0:
             signal = "sell"  # bearish crossover

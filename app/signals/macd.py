@@ -43,9 +43,11 @@ def calculate_macd(data):
             return {"MACD": [], "SignalLine": []}
 
         # Log the latest MACD and Signal Line values
-        logger.info(f"MACD: {macd_line.iloc[-1]}, SignalLine: {signal_line.iloc[-1]}")
+        logger.info(
+            f"MACD: {macd_line.iloc[-1]:.10f}, SignalLine: {signal_line.iloc[-1]:.10f}"
+        )
         write_log_to_file(
-            f"[macd] MACD: {macd_line.iloc[-1]}, SignalLine: {signal_line.iloc[-1]}"
+            f"[macd] MACD: {macd_line.iloc[-1]:.10f}, SignalLine: {signal_line.iloc[-1]:.10f}"
         )
 
         return {"MACD": macd_line.tolist(), "SignalLine": signal_line.tolist()}

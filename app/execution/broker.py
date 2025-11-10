@@ -2,6 +2,11 @@ from logging import info
 import MetaTrader5 as mt5
 
 
+def create_broker(mode):
+    """Provider for DI wiring of Broker."""
+    return Broker(mode)
+
+
 class Broker:
     def __init__(self, mode):
         self.mode = mode
