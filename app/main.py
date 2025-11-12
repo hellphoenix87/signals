@@ -37,13 +37,12 @@ def get_status():
     }
 
 
-@app.post("/tick")
-def manual_tick():
-    print("manual_tick endpoint called")
-    trade_executor.tick()
-    if getattr(br, "mode", None) == br.mode.DEMO:
-        print(f"Paper trading mode: {len(br.open_positions_sim)} open positions")
-    return {"status": "tick executed"}
+@app.get("/tick")
+def get_tick():
+    print(f"start tick collection")
+    tick = signal_orchestrator.get_tick()
+    print(f"tick: {tick}")
+    return {"tick": str(tick)}
 
 
 @app.get("/simulated_positions")
@@ -77,7 +76,7 @@ def test_historical():
 @app.get("/backtest_signals_historical")
 def backtest_signals_endpoint_historical():
     from app.config.settings import Config
-    from app.strategies.breakout_strategy import BreakoutStrategy
+    from app.strategies.enter_trade import BreakoutStrategy
 
     candles = md.get_historical_candles(
         "EURUSD",

@@ -3,16 +3,13 @@ import time
 import datetime
 import MetaTrader5 as mt5
 from typing import Optional, Any
-from app.services.helpers.live_collector import (
-    LiveCandleCollector,
-    create_live_candle_collector,
-)  # <-- import provider
 
 
 def create_orchestrator(
-    collector: LiveCandleCollector,
+    collector,
     signal_generator: Any,
     trading_service: Optional[Any] = None,
+    tick_collector: Optional[Any] = None,
 ) -> "SignalOrchestrator":
     """
     Provider that creates and returns a SignalOrchestrator.
@@ -24,6 +21,7 @@ def create_orchestrator(
         collector=collector,
         signal_generator=signal_generator,
         trading_service=trading_service,
+        tick_collector=tick_collector,
     )
 
 
@@ -41,14 +39,16 @@ class SignalOrchestrator:
 
     def __init__(
         self,
-        collector: LiveCandleCollector,
+        collector,
         signal_generator: Any,
         trading_service: Optional[Any] = None,
+        tick_collector: Optional[Any] = None,
     ):
         # dependencies injected, no side-effects here
         self.collector = collector
         self.signal_generator = signal_generator
         self.trading_service = trading_service
+        self.tick_collector = tick_collector
 
         self.latest_signal: Optional[dict] = None
         self._running = False
@@ -95,6 +95,20 @@ class SignalOrchestrator:
         with self._lock:
             self.latest_signal = signal
         return signal
+
+    def get_tick(self):
+        """
+        Starts tick collection if not running, sets up callback, and returns latest tick.
+        """
+        if self.tick_collector:
+            # Set up callback only once
+            if self.tick_collector.on_tick != self._store_tick:
+                self.tick_collector.on_tick = self._store_tick
+            # Start collecting if not running
+            if not getattr(self.tick_collector, "_running", False):
+                self.tick_collector.start_collecting()
+            return self._latest_tick
+        return None
 
     def _call_signal_generator(self, candles: list) -> dict:
         """Support callable generators and objects with generate_signal(candles)."""
@@ -182,3 +196,7 @@ class SignalOrchestrator:
                 # log and backoff briefly to avoid tight-error loops
                 print(f"[Orchestrator] unexpected error: {exc}")
                 time.sleep(1)
+
+    def _store_tick(self, tick):
+        """Private helper to store the latest tick."""
+        self._latest_tick = tick
