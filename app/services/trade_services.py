@@ -3,10 +3,10 @@ import time
 import datetime
 import MetaTrader5 as mt5
 from typing import Optional, Any
-from app.services.helpers.live_collector import (
+from app.services.helpers.candles import (
     LiveCandleCollector,
     create_live_candle_collector,
-)  # <-- import provider
+)
 
 
 def create_orchestrator(

@@ -1,5 +1,5 @@
 from app.config.settings import Config
-from app.services.helpers.strong_signal import StrongSignalStrategy
+from app.services.helpers.signals import StrongSignalStrategy
 
 
 def create_breakout_strategy(market_data, risk_manager, broker):

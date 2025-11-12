@@ -77,7 +77,7 @@ def test_historical():
 @app.get("/backtest_signals_historical")
 def backtest_signals_endpoint_historical():
     from app.config.settings import Config
-    from app.strategies.breakout_strategy import BreakoutStrategy
+    from app.strategies.enter_trade import BreakoutStrategy
 
     candles = md.get_historical_candles(
         "EURUSD",
