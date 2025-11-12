@@ -9,11 +9,13 @@ from app.services.helpers.candles import (
     create_live_candle_collector,
 )
 from app.services.trade_services import create_orchestrator
+from app.services.helpers.tick_collector import create_tick_collector
 
 md = create_market_data()
 br = create_broker(Mode.BACKTEST)
 rm = create_risk_manager(br)
 strategy = create_breakout_strategy(md, rm, br)
+tick = create_tick_collector(symbol="EURUSD", interval=1)
 
 collector = create_live_candle_collector(
     symbol="EURUSD",
@@ -27,4 +29,5 @@ signal_orchestrator = create_orchestrator(
     collector=collector,
     signal_generator=strategy.strong_signal_strategy,
     trading_service=trade_executor,
+    tick_collector=tick,
 )

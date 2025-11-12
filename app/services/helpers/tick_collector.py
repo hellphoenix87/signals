@@ -19,13 +19,13 @@ class TickCollector:
         self._running = False
         self._thread = None
 
-    def start(self):
+    def start_collecting(self):
         if not self._running:
             self._running = True
             self._thread = threading.Thread(target=self._collect, daemon=True)
             self._thread.start()
 
-    def stop(self):
+    def stop_collecting(self):
         self._running = False
         if self._thread:
             self._thread.join()
