@@ -8,7 +8,7 @@ from app.services.helpers.trade_execution import create_trade_executor
 from app.services.helpers.candles import (
     create_live_candle_collector,
 )
-from app.services.trade_services import create_orchestrator
+from app.services.trade_services import SignalOrchestrator, create_orchestrator
 from app.services.helpers.tick_collector import create_tick_collector
 
 md = create_market_data()
@@ -25,7 +25,7 @@ collector = create_live_candle_collector(
 )
 
 trade_executor = create_trade_executor(rm, br, md)
-signal_orchestrator = create_orchestrator(
+signal_orchestrator: SignalOrchestrator = create_orchestrator(
     collector=collector,
     signal_generator=strategy.strong_signal_strategy,
     trading_service=trade_executor,
