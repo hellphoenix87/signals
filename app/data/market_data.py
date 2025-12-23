@@ -33,33 +33,40 @@ class MarketData:
             return None
         return account_info
 
-    def get_symbol_data(self, symbol, timeframe, num_bars):
+    def get_symbol_data(self, symbol, timeframe, num_bars, *, closed_only: bool = True):
         """Fetch recent OHLC data for a given symbol and timeframe."""
         self._ensure_symbol_selected(symbol)
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_bars)
+
+        # MT5: start_pos=0 is the current (forming) bar, start_pos=1 is the last CLOSED bar.
+        start_pos = 1 if closed_only else 0
+
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, start_pos, num_bars)
         if rates is None:
             raise RuntimeError(f"Failed to fetch data for symbol: {symbol}")
         return self._rates_to_dict_list(rates)
 
-    def get_historical_candles(self, symbol, timeframe, start_pos, count):
+    def get_historical_candles(
+        self, symbol, timeframe, start_pos, count, verbose: bool = False
+    ):
         """
-        Fetch historical candles for backtesting.
-        :param symbol: str, e.g. "EURUSD"
-        :param timeframe: mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15, etc.
-        :param start_pos: int, position to start from (0 = most recent)
-        :param count: int, number of candles to fetch
-        :return: list of dicts with open, high, low, close, time
+        Fetch historical candles.
         """
         self._ensure_symbol_selected(symbol)
         rates = mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count)
         if rates is None or len(rates) == 0:
-            print(
-                f"Failed to fetch historical data for {symbol} ({timeframe}) count={count}"
-            )
-            print("MT5 error:", mt5.last_error())
+            if verbose:
+                print(
+                    f"Failed to fetch historical data for {symbol} ({timeframe}) count={count}"
+                )
+                print("MT5 error:", mt5.last_error())
             return []
+
         candles = self._rates_to_dict_list(rates)
-        print(f"[{symbol}] get_historical_candles fetched: {len(candles)} candles")
+
+        # Only print when explicitly asked
+        if verbose:
+            print(f"[{symbol}] get_historical_candles fetched: {len(candles)} candles")
+
         return candles
 
     def calculate_dynamic_sl_tp(self, candles, risk_reward_ratio=1.2):
