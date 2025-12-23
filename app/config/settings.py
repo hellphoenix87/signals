@@ -77,3 +77,16 @@ class Config:
 
     # Spread gate (0 disables). Requires candles include spread_points (preferred) or spread.
     MAX_SPREAD_POINTS: float = 0.0
+
+    OCO_ENABLED: bool = True
+    OCO_FALLBACK_TO_MARKET: bool = True
+
+    # Distance from current price to place BUY STOP / SELL STOP
+    OCO_OFFSET_PIPS: float = 2.0
+
+    # Cancel both pending orders if not filled within this time
+    OCO_EXPIRY_SECONDS: int = 120
+
+    MAGIC: int = 123456
+    DEVIATION: int = 5
+    FILLING_MODE: int = 0

@@ -1,7 +1,5 @@
 import threading
 import time
-import datetime
-import MetaTrader5 as mt5
 from typing import Optional, Any
 
 
@@ -11,12 +9,18 @@ def create_orchestrator(
     trading_service: Optional[Any] = None,
     tick_collector: Optional[Any] = None,
     exit_trade: Optional[Any] = None,
+    oco_manager: Optional[Any] = None,
 ) -> "SignalOrchestrator":
     """
     Provider that creates and returns a SignalOrchestrator.
+
     - collector: LiveCandleCollector instance (injected, not started)
     - signal_generator: callable(candles)->dict or object with generate_signal(candles)
-    - trading_service: optional execution service with process_signal(signal, candles)
+                       OR object with generate_signals(account_balance)->list[dict]
+    - trading_service: optional execution service with process_signal(signals, candles)
+    - tick_collector: optional TickCollector that calls orchestrator._store_tick
+    - exit_trade: optional ExitTrade that returns ExitAction(s)
+    - oco_manager: optional OCOStraddleManager (or any object with on_tick())
     """
     return SignalOrchestrator(
         collector=collector,
@@ -24,6 +28,7 @@ def create_orchestrator(
         trading_service=trading_service,
         tick_collector=tick_collector,
         exit_trade=exit_trade,
+        oco_manager=oco_manager,
     )
 
 
@@ -32,12 +37,12 @@ class SignalOrchestrator:
     Service-layer orchestrator (DI-ready).
 
     Responsibilities:
-    - coordinate synchronization with broker/server time
     - read latest candles from injected LiveCandleCollector
     - call injected signal_generator to produce signals
-    - log signals with exact time
     - delegate actionable signals to injected trading_service.process_signal
-    - process ticks via injected tick_collector and feed exit_trade (if provided)
+    - process ticks via injected tick_collector and feed:
+        - oco_manager.on_tick() (if provided)
+        - exit_trade.on_tick(tick) (if provided)
     """
 
     def __init__(
@@ -47,6 +52,7 @@ class SignalOrchestrator:
         trading_service: Optional[Any] = None,
         tick_collector: Optional[Any] = None,
         exit_trade: Optional[Any] = None,
+        oco_manager: Optional[Any] = None,
     ):
         # dependencies injected, no side-effects here
         self.collector = collector
@@ -54,6 +60,7 @@ class SignalOrchestrator:
         self.trading_service = trading_service
         self.exit_trade = exit_trade
         self.tick_collector = tick_collector
+        self.oco_manager = oco_manager
 
         self.latest_signal: Optional[dict] = None
         self._latest_tick: Any = None
@@ -168,6 +175,16 @@ class SignalOrchestrator:
         """TickCollector callback."""
         self._latest_tick = tick
 
+        # OCO maintenance should run on every tick (best-effort)
+        if self.oco_manager:
+            on_tick = getattr(self.oco_manager, "on_tick", None)
+            if callable(on_tick):
+                try:
+                    on_tick()
+                except Exception:
+                    pass
+
+        # Exit logic (per tick)
         if not self.exit_trade:
             return
 
@@ -282,8 +299,6 @@ class SignalOrchestrator:
                 time.sleep(1)
 
     def _get_account_balance(self):
-        # Implement this to fetch account balance from broker or risk manager
-        # Example:
         getter = getattr(self.trading_service, "get_account_balance", None)
         if callable(getter):
             return getter()

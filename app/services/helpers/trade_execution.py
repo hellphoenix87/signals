@@ -2,20 +2,30 @@ from datetime import datetime, timedelta
 import re
 from app.config.settings import Config
 
+# NEW
+from app.services.oco_straddle import OCOStraddleManager
 
-def create_trade_executor(risk_manager, broker, market_data):
+
+def create_trade_executor(risk_manager, broker, market_data, oco_manager=None):
     """Provider for DI wiring of TradeExecutor."""
-    return TradeExecutor(risk_manager, broker, market_data)
+    return TradeExecutor(risk_manager, broker, market_data, oco_manager=oco_manager)
 
 
 class TradeExecutor:
-    def __init__(self, risk_manager, broker, market_data):
+    def __init__(self, risk_manager, broker, market_data, oco_manager=None):
         self.risk_manager = risk_manager
         self.broker = broker
         self.market_data = market_data
         self.daily_profit = 0
         self.last_reset = datetime.now()
         self._last_exit_attempt_at = {}
+
+        # NEW: OCO manager (shared instance preferred)
+        self.oco_manager = oco_manager
+
+        # NEW: if not injected, create one (still works, but you should share it with orchestrator for on_tick())
+        if self.oco_manager is None and bool(getattr(Config, "OCO_ENABLED", False)):
+            self.oco_manager = OCOStraddleManager(broker=self.broker)
 
     def process_signal(self, signal, candles=None):
         if isinstance(signal, list):
@@ -28,129 +38,110 @@ class TradeExecutor:
 
     def execute_signals(self, signals):
         print(f"TradeExecutor.execute_signals called at {datetime.now()}")
-        if signals:
-            for s in signals:
-                symbol = s.get("symbol")
-                direction = s.get("direction")
-                lot = s.get("lot")
-                if not symbol or not direction or lot is None:
-                    print(f"Skipping malformed signal: {s}")
-                    continue
-                print(f"Executing trade: {symbol} {direction} lot={lot}")
-                if direction.upper() == "BUY":
-                    self.broker.place_buy(symbol, lot, s.get("sl"), s.get("tp"))
-                else:
-                    self.broker.place_sell(symbol, lot, s.get("sl"), s.get("tp"))
-        else:
+
+        if not signals:
             print("No actionable signals, no trades executed.")
-
-    def execute_exit(self, action):
-        """
-        Executes an exit action by closing the position via the broker.
-        """
-        import MetaTrader5 as mt5
-
-        ticket = action.ticket
-        volume = float(action.volume)
-        symbol = action.symbol
-
-        # Debounce: do not spam order_send every tick for the same ticket
-        now = datetime.now()
-        last_try = self._last_exit_attempt_at.get(ticket)
-        if last_try and (now - last_try).total_seconds() < 2.0:
-            return None
-        self._last_exit_attempt_at[ticket] = now
-
-        positions = self.broker.get_open_positions(symbol)
-        if not positions:
-            print(
-                f"Position with ticket {ticket} not found for exit (no open positions)."
-            )
             return None
 
-        position = None
-        for pos in positions:
-            pos_ticket = getattr(pos, "ticket", None) or (
-                pos.get("ticket") if isinstance(pos, dict) else None
-            )
-            if pos_ticket == ticket:
-                position = pos
-                break
-
-        if not position:
-            print(f"Position with ticket {ticket} not found for exit.")
-            return None
-
-        # MT5: position.type -> 0=BUY, 1=SELL
-        pos_type = getattr(position, "type", None)
-        if pos_type is None:
-            print(f"Cannot determine position type for ticket {ticket}; aborting exit.")
-            return None
-
-        close_is_sell = int(pos_type) == 0  # close BUY with SELL
-        order_type = mt5.ORDER_TYPE_SELL if close_is_sell else mt5.ORDER_TYPE_BUY
-
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            print(
-                f"Failed to get tick for {symbol} while exiting ticket {ticket}. MT5 error: {mt5.last_error()}"
-            )
-            return None
-
-        price = tick.bid if close_is_sell else tick.ask
-        try:
-            price = self.broker._normalize_price(symbol, float(price))
-        except Exception:
-            price = float(price)
-
-        filling_modes = (
-            mt5.ORDER_FILLING_FOK,
-            mt5.ORDER_FILLING_RETURN,
-            mt5.ORDER_FILLING_IOC,
+        use_oco = (
+            bool(getattr(Config, "OCO_ENABLED", False)) and self.oco_manager is not None
         )
+        fallback_to_market = bool(getattr(Config, "OCO_FALLBACK_TO_MARKET", True))
 
-        for filling in filling_modes:
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": volume,
-                "type": order_type,
-                "position": ticket,
-                "price": price,
-                "deviation": 5,
-                "magic": 123456,
-                # "comment": "...",  # OMIT: some brokers/terminals reject comments
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": filling,
-            }
+        for s in signals:
+            symbol = s.get("symbol")
+            direction = (s.get("direction") or "").upper()
+            lot = s.get("lot")
 
-            result = mt5.order_send(request)
-            if result is None:
-                print(
-                    f"Exit order_send returned None for {symbol} ticket {ticket} filling={filling}. MT5 error: {mt5.last_error()}"
-                )
+            if not symbol or direction not in ("BUY", "SELL") or lot is None:
+                print(f"Skipping malformed signal: {s}")
                 continue
 
-            print(
-                f"Exit order result for {symbol} ticket {ticket} filling={filling}: {result}"
-            )
+            # If OCO enabled: place straddle instead of market order
+            if use_oco:
+                grp = self.oco_manager.place_straddle(
+                    symbol=symbol,
+                    volume=float(lot),
+                    offset_pips=float(getattr(Config, "OCO_OFFSET_PIPS", 2.0) or 2.0),
+                    expiry_seconds=int(
+                        getattr(Config, "OCO_EXPIRY_SECONDS", 120) or 120
+                    ),
+                    comment_prefix=f"OCO_{direction}",
+                )
+                if grp is not None:
+                    print(
+                        f"[OCO] Placed straddle for {symbol} vol={lot} "
+                        f"(buy_ticket={grp.buy_stop_ticket}, sell_ticket={grp.sell_stop_ticket}, id={grp.group_id})"
+                    )
+                    continue
 
-            if result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
-                return result
+                print(
+                    f"[OCO] Failed to place straddle for {symbol} (dir={direction}, lot={lot})"
+                )
+                if not fallback_to_market:
+                    continue  # skip trade entirely
 
-            if getattr(result, "comment", "") != "Unsupported filling mode":
-                return result
+            # Default: market execution (existing behavior)
+            print(f"Executing trade: {symbol} {direction} lot={lot}")
+            if direction == "BUY":
+                self.broker.place_buy(symbol, lot, s.get("sl"), s.get("tp"))
+            else:
+                self.broker.place_sell(symbol, lot, s.get("sl"), s.get("tp"))
 
         return None
 
-    def _safe_mt5_comment(self, text: str, *, max_len: int = 31) -> str:
+    def execute_exit(self, action) -> None:
         """
-        MT5/brokers often require comment <= 31 chars and ASCII-ish.
+        Execute an ExitAction produced by ExitTrade.
+        Expected fields: ticket, symbol, side ('buy'/'sell'), volume, reason
         """
-        s = str(text or "")
-        s = s.encode("ascii", "ignore").decode("ascii")  # drop non-ascii
-        s = re.sub(r"[^A-Za-z0-9 _:\-\.]", "", s)  # keep a conservative set
-        s = s.strip()
-        if not s:
-            s = "EXIT"
-        return s[:max_len]
+        if action is None:
+            return
+
+        ticket = (
+            getattr(action, "ticket", None)
+            if not isinstance(action, dict)
+            else action.get("ticket")
+        )
+        symbol = (
+            getattr(action, "symbol", None)
+            if not isinstance(action, dict)
+            else action.get("symbol")
+        )
+        side = (
+            getattr(action, "side", None)
+            if not isinstance(action, dict)
+            else action.get("side")
+        )
+        volume = (
+            getattr(action, "volume", None)
+            if not isinstance(action, dict)
+            else action.get("volume")
+        )
+        reason = (
+            getattr(action, "reason", "")
+            if not isinstance(action, dict)
+            else (action.get("reason") or "")
+        )
+
+        if ticket is None or not symbol or not side:
+            print(f"[TradeExecutor] Skipping malformed exit action: {action}")
+            return
+
+        close_side = str(side).upper()  # BUY/SELL
+        try:
+            res = self.broker.close_position(
+                ticket=ticket,
+                symbol=symbol,
+                side=close_side,
+                volume=float(volume) if volume is not None else None,
+                comment=f"Exit:{reason}" if reason else "Exit",
+            )
+            print(
+                f"[TradeExecutor] Exit executed: ticket={ticket} {symbol} {close_side} vol={volume} reason={reason} res={res}"
+            )
+        except Exception as e:
+            print(
+                f"[TradeExecutor] Exit failed: ticket={ticket} {symbol} side={close_side} err={e}"
+            )
+            return
