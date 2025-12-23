@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+
 from app.factory import (
     signal_orchestrator,
     trade_executor,
@@ -12,7 +13,6 @@ from app.config.settings import Config
 from app.strategies.enter_trade import BreakoutStrategy
 
 router = APIRouter()
-orchestrator_started = False
 
 
 @router.get("/status")
@@ -20,17 +20,45 @@ def get_status():
     if getattr(br, "mode", None) == br.mode.DEMO:
         print(f"Paper trading mode: {len(br.open_positions_sim)} open positions")
     return {
+        "orchestrator_running": signal_orchestrator.is_running(),
         "daily_profit": getattr(trade_executor, "daily_profit", None),
         "last_reset": getattr(trade_executor, "last_reset", None),
         "active_symbols": strategy.get_last_scanned_symbols(),
     }
 
 
+@router.post("/trading/start")
+def trading_start():
+    # Explicitly start the background trading loop (and ticks, via orchestrator.start()).
+    signal_orchestrator.start()
+    return {"status": "trading started", "orchestrator_running": True}
+
+
+@router.post("/trading/stop")
+def trading_stop():
+    signal_orchestrator.stop()
+    return {"status": "trading stopped", "orchestrator_running": False}
+
+
+@router.get("/signal/latest")
+def signal_latest():
+    # Read-only: does not start orchestrator.
+    signal = signal_orchestrator.get_latest_signal()
+    return {"signal": signal}
+
+
+@router.get("/live_signal")
+def live_signal():
+    # Backward-compatible: now read-only (no side-effects).
+    signal = signal_orchestrator.get_latest_signal()
+    return {"signal": signal}
+
+
 @router.get("/tick")
 def get_tick():
-    print(f"start tick collection")
+    # Debug/inspection:
+    # If orchestrator is running, ticks should already be running. This also ensures ticks if called standalone.
     tick = signal_orchestrator.get_tick()
-    print(f"tick: {tick}")
     return {"tick": str(tick)}
 
 
@@ -49,20 +77,17 @@ def close_all_trades():
 
 @router.get("/test_historical")
 def test_historical():
-    print("Testing historical data fetch...")
     candles = md.get_historical_candles(
         "EURUSD",
         timeframe=Config.TIMEFRAME,
         start_pos=0,
         count=getattr(Config, "CANDLE_COUNT", 500),
     )
-    print(f"[EURUSD] test_historical fetched: {len(candles)} candles")
     return {"candles": candles}
 
 
 @router.get("/backtest_signals_historical")
 def backtest_signals_endpoint_historical():
-
     candles = md.get_historical_candles(
         "EURUSD",
         timeframe=Config.TIMEFRAME,
@@ -78,22 +103,8 @@ def backtest_signals_endpoint_historical():
     return {"signals": results}
 
 
-@router.get("/live_signal")
-def live_signal():
-    global orchestrator_started
-    if not orchestrator_started:
-        signal_orchestrator.start()
-        orchestrator_started = True
-    signal = signal_orchestrator.get_latest_signal()
-    return {"signal": signal}
-
-
 @router.post("/stop_orchestrator")
 def stop_orchestrator():
-    global orchestrator_started
-    if orchestrator_started:
-        signal_orchestrator.stop()
-        orchestrator_started = False
-        return {"status": "orchestrator stopped"}
-    else:
-        return {"status": "orchestrator was not running"}
+    # Backward-compatible alias for older clients.
+    signal_orchestrator.stop()
+    return {"status": "orchestrator stopped", "orchestrator_running": False}

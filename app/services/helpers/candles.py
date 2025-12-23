@@ -29,53 +29,85 @@ class LiveCandleCollector:
         self.symbol = symbol
         self.timeframe = timeframe or Config.TIMEFRAME
         self.count = count or Config.MIN_CANDLES_FOR_INDICATORS
-        self.interval = interval or 60  # seconds, default for M1
+        self.interval = interval or 60
+
         self.market_data = MarketData()
         self.latest_candles = []
+
         self._running = False
         self._thread = None
+        self._lock = threading.Lock()
 
-    def start(self):
-        if not self._running:
-            self._running = True
-            self._thread = threading.Thread(target=self._collect, daemon=True)
-            self._thread.start()
+    def start(self) -> None:
+        """Idempotent start."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._collect, daemon=True)
+        self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
+        """Stop background collection thread."""
         self._running = False
-        if self._thread:
-            self._thread.join()
+        t = self._thread
+        self._thread = None
+        if t:
+            t.join(timeout=5)
+
+    def get_latest_candles(self):
+        """Return a snapshot of the latest candles (thread-safe)."""
+        with self._lock:
+            return list(self.latest_candles)
+
+    def _timeframe_seconds(self) -> int:
+        # Minimal mapping; extend if you use other timeframes.
+        tf = self.timeframe
+        mapping = {
+            mt5.TIMEFRAME_M1: 60,
+            mt5.TIMEFRAME_M5: 5 * 60,
+            mt5.TIMEFRAME_M15: 15 * 60,
+            mt5.TIMEFRAME_M30: 30 * 60,
+            mt5.TIMEFRAME_H1: 60 * 60,
+        }
+        return int(mapping.get(tf, self.interval or 60))
 
     def _collect(self):
         last_candle_time = None
+        tf_seconds = self._timeframe_seconds()
+
         while self._running:
             try:
                 candles = self.market_data.get_historical_candles(
                     self.symbol,
                     timeframe=self.timeframe,
-                    start_pos=0,
+                    start_pos=1,
                     count=self.count,
+                    verbose=False,
                 )
-                self.latest_candles = candles
-                if candles and (
-                    last_candle_time is None or candles[-1]["time"] != last_candle_time
-                ):
-                    print(
-                        f"[{self.symbol}] get_historical_candles fetched: {len(candles)} candles"
-                    )
-                    last_candle_time = candles[-1]["time"]
+
+                with self._lock:
+                    self.latest_candles = candles
+
+                if candles:
+                    # candles MUST be chronological for this to work (oldest->newest)
+                    newest_time = candles[-1]["time"]
+                    if last_candle_time is None or newest_time != last_candle_time:
+                        print(
+                            f"[{self.symbol}] New candle: {newest_time} (count={len(candles)})"
+                        )
+                        last_candle_time = newest_time
+
             except Exception as e:
                 print(f"[LiveCandleCollector] Error fetching candles: {e}")
 
-            tick = mt5.symbol_info_tick("EURUSD")
-            if tick:
-                server_time = datetime.datetime.fromtimestamp(tick.time)
-                seconds_to_next_minute = 60 - server_time.second
-                sleep_time = max(1, seconds_to_next_minute)
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick and getattr(tick, "time", None):
+                # Align to next bar boundary using server epoch seconds
+                now_epoch = int(tick.time)
+                seconds_to_next_bar = tf_seconds - (now_epoch % tf_seconds)
+                sleep_time = max(
+                    1, int(seconds_to_next_bar) + 1
+                )  # +1s to let bar close
                 time.sleep(sleep_time)
             else:
-                # fallback if tick is None
-                time.sleep(60)
-
-    def get_latest_candles(self):
-        return self.latest_candles
+                time.sleep(tf_seconds)
