@@ -19,11 +19,24 @@ class TickCollector:
         self._running = False
         self._thread = None
 
+    def set_callback(self, cb):
+        """Set the callback to be called on every tick."""
+        self.on_tick = cb
+
+    def start(self, cb=None):
+        """Start collecting ticks. Optionally set callback."""
+        if cb is not None:
+            self.set_callback(cb)
+        self.start_collecting()
+
     def start_collecting(self):
         if not self._running:
             self._running = True
             self._thread = threading.Thread(target=self._collect, daemon=True)
             self._thread.start()
+
+    def stop(self):
+        self.stop_collecting()
 
     def stop_collecting(self):
         self._running = False

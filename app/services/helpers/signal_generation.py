@@ -1,5 +1,9 @@
-from typing import Any, Callable, List, Optional
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime
+
+import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.utils.configure_logging import logger as default_logger
@@ -26,6 +30,18 @@ def create_strong_signal_strategy(
         rsi_fn=rsi_fn,
         log_file=log_file,
         min_candles=min_candles,
+    )
+
+
+def create_multi_timeframe_signal_strategy(
+    base: "StrongSignalStrategy",
+    tf_bias: int = mt5.TIMEFRAME_M15,
+    tf_confirm: int = mt5.TIMEFRAME_M5,
+    tf_entry: int = mt5.TIMEFRAME_M1,
+):
+    """Provider: wraps StrongSignalStrategy to produce a multi-timeframe decision."""
+    return MultiTimeframeStrongSignalStrategy(
+        base=base, tf_bias=tf_bias, tf_confirm=tf_confirm, tf_entry=tf_entry
     )
 
 
@@ -165,22 +181,22 @@ class StrongSignalStrategy:
         except Exception:
             return None
 
-    def _passes_entry_filters(self, *, candles: List[dict], raw_signal: str) -> bool:
-        """
-        Filters designed to reduce 'signal then immediate reverse':
-        - optional spread max
-        - require a meaningful close-to-close move relative to ATR
-        """
+    def _passes_entry_filters(
+        self, *, candles: List[dict], raw_signal: str
+    ) -> tuple[bool, str, dict]:
         if raw_signal not in ("buy", "sell"):
-            return True
+            return True, "not_applicable", {}
 
         if not candles or len(candles) < 2:
-            return False
+            return (
+                False,
+                "not_enough_candles",
+                {"candles": len(candles) if candles else 0},
+            )
 
         last = candles[-1]
         prev = candles[-2]
 
-        # Optional spread gate (only if candle provides it)
         if self.max_spread_points > 0:
             sp = (
                 self._spread_points_from_candle(last)
@@ -188,37 +204,51 @@ class StrongSignalStrategy:
                 else None
             )
             if sp is not None and sp > self.max_spread_points:
-                return False
+                return (
+                    False,
+                    "spread_too_high",
+                    {"spread_points": sp, "max_spread_points": self.max_spread_points},
+                )
 
         try:
             last_close = float(last.get("close"))
             prev_close = float(prev.get("close"))
         except Exception:
-            return False
+            return False, "bad_close_values", {}
 
-        # Directional close-to-close move
         delta = last_close - prev_close
         if raw_signal == "buy" and delta <= 0:
-            return False
+            return False, "wrong_direction", {"delta": delta}
         if raw_signal == "sell" and delta >= 0:
-            return False
+            return False, "wrong_direction", {"delta": delta}
 
-        # ATR-based magnitude requirement
         atr = self._atr(candles, self.atr_period)
         if atr is None or atr <= 0:
-            # If ATR cannot be computed, don't block entries (or set to False if you prefer strict).
-            return True
+            return True, "atr_unavailable", {}
 
-        if abs(delta) < (self.atr_move_mult * atr):
-            return False
+        required = self.atr_move_mult * atr
+        if abs(delta) < required:
+            return (
+                False,
+                "atr_move_too_small",
+                {
+                    "delta": delta,
+                    "atr": atr,
+                    "required": required,
+                    "atr_period": self.atr_period,
+                    "atr_move_mult": self.atr_move_mult,
+                },
+            )
 
-        return True
+        return True, "ok", {"delta": delta, "atr": atr, "required": required}
 
     # -----------------------
     # Main
     # -----------------------
 
-    def generate_signal(self, candles: List[dict]) -> dict:
+    def generate_signal(
+        self, candles: List[dict], *, apply_entry_filters: bool = True
+    ) -> dict:
         try:
             if not candles or len(candles) < self.min_candles:
                 self.logger.error(
@@ -307,25 +337,33 @@ class StrongSignalStrategy:
 
             # Stronger entry filters
             final_signal = raw_signal
-            if not self._passes_entry_filters(candles=candles_i, raw_signal=raw_signal):
-                final_signal = "hold"
+            entry_reason = "not_applied"
+            entry_meta: dict = {}
+
+            if apply_entry_filters:
+                entry_ok, entry_reason, entry_meta = self._passes_entry_filters(
+                    candles=candles_i, raw_signal=raw_signal
+                )
+                if not entry_ok:
+                    final_signal = "hold"
 
             # Logging
             try:
+                extra = (
+                    f", EntryFilter={entry_reason}"
+                    if apply_entry_filters and raw_signal in ("buy", "sell")
+                    else ""
+                )
                 self.logger.info(
                     f"Signal summary: Symbol={symbol}, SMA={sma_trend}, MACD={macd_trend}, RSI={rsi_trend}, "
-                    f"Raw={raw_signal}, Final={final_signal}, Confidence={confidence:.2f}"
+                    f"Raw={raw_signal}, Final={final_signal}, Confidence={confidence:.2f}{extra}"
                 )
-            except Exception:
-                pass
-
-            try:
-                ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                with open(self.log_file, "a") as f:
-                    f.write(
-                        f"{ts} | Symbol={symbol} | SMA={sma_trend}, MACD={macd_trend}, RSI={rsi_trend}, "
-                        f"Raw={raw_signal}, Final={final_signal}, Confidence={confidence:.6f}\n"
-                    )
+                if (
+                    apply_entry_filters
+                    and raw_signal in ("buy", "sell")
+                    and final_signal == "hold"
+                ):
+                    self.logger.info(f"EntryFilter details: {entry_meta}")
             except Exception:
                 pass
 
@@ -334,6 +372,8 @@ class StrongSignalStrategy:
                 "raw_signal": raw_signal,
                 "confidence": confidence,
                 "symbol": symbol,
+                "entry_filter_reason": entry_reason,
+                "entry_filter_meta": entry_meta,
             }
 
         except Exception as e:
@@ -342,3 +382,129 @@ class StrongSignalStrategy:
             except Exception:
                 pass
             return {"error": str(e)}
+
+
+class MultiTimeframeStrongSignalStrategy:
+    """
+    Multi-timeframe gating:
+      - tf_bias (default M15) sets directional bias
+      - tf_confirm (default M5) confirms
+      - tf_entry (default M1) triggers the entry
+
+    Output is a single final_signal ("buy"/"sell"/"hold") plus per-TF signals.
+    """
+
+    def __init__(
+        self,
+        *,
+        base: StrongSignalStrategy,
+        tf_bias: int = mt5.TIMEFRAME_M15,
+        tf_confirm: int = mt5.TIMEFRAME_M5,
+        tf_entry: int = mt5.TIMEFRAME_M1,
+    ):
+        self.base = base
+        self.tf_bias = int(tf_bias)
+        self.tf_confirm = int(tf_confirm)
+        self.tf_entry = int(tf_entry)
+
+    def generate_signal(self, candles_by_tf: Dict[int, List[dict]]) -> dict:
+        # Accept collectors that key by int (1/5/15) OR by strings ("m1"/"m5"/"m15"/"1"/"5"/"15")
+        lower_map: Dict[str, Any] = {
+            str(k).lower(): v for k, v in (candles_by_tf or {}).items()
+        }
+
+        def _get(tf: int) -> List[dict]:
+            if candles_by_tf and tf in candles_by_tf:
+                return candles_by_tf.get(tf, []) or []
+            # string versions
+            v = lower_map.get(str(tf).lower())
+            if v is not None:
+                return v or []
+            v = lower_map.get(f"m{int(tf)}")
+            if v is not None:
+                return v or []
+            return []
+
+        c_bias = _get(self.tf_bias)
+        c_conf = _get(self.tf_confirm)
+        c_entry = _get(self.tf_entry)
+
+        s_bias = (
+            self.base.generate_signal(c_bias, apply_entry_filters=False)
+            if c_bias
+            else {"final_signal": "hold", "raw_signal": "hold"}
+        )
+        s_conf = (
+            self.base.generate_signal(c_conf, apply_entry_filters=False)
+            if c_conf
+            else {"final_signal": "hold", "raw_signal": "hold"}
+        )
+        s_entry = (
+            self.base.generate_signal(c_entry, apply_entry_filters=True)
+            if c_entry
+            else {"final_signal": "hold", "raw_signal": "hold"}
+        )
+
+        # Resolve symbol early so early-returns are not "missing symbol"
+        symbol = (
+            (s_entry.get("symbol") if isinstance(s_entry, dict) else None)
+            or (s_conf.get("symbol") if isinstance(s_conf, dict) else None)
+            or (s_bias.get("symbol") if isinstance(s_bias, dict) else None)
+            or self.base.config.SYMBOLS[0]
+        )
+
+        # If any timeframe returns an error or is waiting for a closed candle -> hold
+        for s in (s_bias, s_conf, s_entry):
+            if isinstance(s, dict) and s.get("error"):
+                return {
+                    "symbol": symbol,
+                    "final_signal": "hold",
+                    "raw_signal": "hold",
+                    "reason": "tf_error",
+                    "details": {"m15": s_bias, "m5": s_conf, "m1": s_entry},
+                }
+            if isinstance(s, dict) and s.get("reason") == "waiting_for_closed_candle":
+                return {
+                    "symbol": symbol,
+                    "final_signal": "hold",
+                    "raw_signal": "hold",
+                    "reason": "waiting_for_closed_candle",
+                    "details": {"m15": s_bias, "m5": s_conf, "m1": s_entry},
+                }
+
+        # Bias/confirm should be directional (use raw), entry should be executable (use final)
+        bias = (s_bias.get("raw_signal", "hold") or "hold").lower()
+        confirm = (s_conf.get("raw_signal", "hold") or "hold").lower()
+        entry = (s_entry.get("final_signal", "hold") or "hold").lower()
+
+        # --- Pullback logic: require pullback_completed for entry ---
+        c_entry = _get(self.tf_entry)
+        pullback_ok = self._pullback_completed(c_entry) if c_entry else False
+
+        final_signal = "hold"
+        if bias == "buy" and confirm == "buy" and entry == "buy" and pullback_ok:
+            final_signal = "buy"
+        elif bias == "sell" and confirm == "sell" and entry == "sell" and pullback_ok:
+            final_signal = "sell"
+
+        return {
+            "symbol": symbol,
+            "final_signal": final_signal,
+            "raw_signal": final_signal,
+            "confidence": float(s_entry.get("confidence", 0.0) or 0.0),
+            "m15_bias": bias,
+            "m5_confirm": confirm,
+            "m1_entry": entry,
+            "pullback_completed": pullback_ok,
+            "details": {"m15": s_bias, "m5": s_conf, "m1": s_entry},
+        }
+
+    def _pullback_completed(self, candles: list[dict]) -> bool:
+        # Example: last close above 20-period SMA after being below it
+        closes = [c["close"] for c in candles if "close" in c]
+        if len(closes) < 21:
+            return False
+        sma20 = sum(closes[-20:]) / 20
+        was_below = any(c < sma20 for c in closes[-25:-20])
+        now_above = closes[-1] > sma20
+        return was_below and now_above

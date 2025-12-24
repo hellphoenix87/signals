@@ -1,58 +1,208 @@
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+from datetime import datetime
 import re
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 from app.config.settings import Config
 
 
-def create_trade_executor(risk_manager, broker, market_data):
+def create_trade_executor(
+    risk_manager: Any, broker: Any, market_data: Any
+) -> "TradeExecutor":
     """Provider for DI wiring of TradeExecutor."""
     return TradeExecutor(risk_manager, broker, market_data)
 
 
 class TradeExecutor:
-    def __init__(self, risk_manager, broker, market_data):
+    def __init__(self, risk_manager: Any, broker: Any, market_data: Any):
         self.risk_manager = risk_manager
         self.broker = broker
         self.market_data = market_data
         self.daily_profit = 0
         self.last_reset = datetime.now()
-        self._last_exit_attempt_at = {}
+        self._last_exit_attempt_at: Dict[Any, datetime] = {}
 
-    def process_signal(self, signal, candles=None):
+    # -------------------------
+    # Entry execution
+    # -------------------------
+
+    def process_signal(self, signal: Any, candles: Any = None):
+        """
+        Accepts:
+          - list[dict]
+          - dict with {"signals": list[dict]}
+          - dict (single signal)
+        """
         if isinstance(signal, list):
-            return self.execute_signals(signal)
+            return self.execute_signals(signal, candles=candles)
         if isinstance(signal, dict) and isinstance(signal.get("signals"), list):
-            return self.execute_signals(signal["signals"])
+            return self.execute_signals(signal["signals"], candles=candles)
         if isinstance(signal, dict):
-            return self.execute_signals([signal])
+            return self.execute_signals([signal], candles=candles)
         return None
 
-    def execute_signals(self, signals):
+    def execute_signals(
+        self, signals: Iterable[Dict[str, Any]], candles: Any = None
+    ) -> None:
+        _ = candles  # reserved for future sizing/sl/tp based on context
         print(f"TradeExecutor.execute_signals called at {datetime.now()}")
-        if signals:
-            for s in signals:
-                symbol = s.get("symbol")
-                direction = s.get("direction")
-                lot = s.get("lot")
-                if not symbol or not direction or lot is None:
-                    print(f"Skipping malformed signal: {s}")
-                    continue
-                print(f"Executing trade: {symbol} {direction} lot={lot}")
-                if direction.upper() == "BUY":
-                    self.broker.place_buy(symbol, lot, s.get("sl"), s.get("tp"))
-                else:
-                    self.broker.place_sell(symbol, lot, s.get("sl"), s.get("tp"))
-        else:
-            print("No actionable signals, no trades executed.")
 
-    def execute_exit(self, action):
+        any_actionable = False
+
+        for s in signals or []:
+            if not isinstance(s, dict):
+                print(f"Skipping malformed signal (not a dict): {s!r}")
+                continue
+
+            symbol = s.get("symbol")
+            if not symbol:
+                print(f"Skipping malformed signal (missing symbol): {s!r}")
+                continue
+
+            direction = self._extract_direction(s)
+            if direction is None:
+                continue
+
+            lot = self._extract_lot(symbol=str(symbol), signal=s)
+            if lot is None:
+                print(f"Skipping signal (could not determine lot): {s!r}")
+                continue
+
+            sl = s.get("sl")
+            tp = s.get("tp")
+
+            # --- Fallback: compute SL/TP from pips if not provided ---
+            if (sl is None or tp is None) and (
+                s.get("sl_pips") is not None or s.get("tp_pips") is not None
+            ):
+                price = s.get("open_price") or s.get("price")
+                direction_str = s.get("direction") or direction
+                sl_pips = s.get("sl_pips")
+                tp_pips = s.get("tp_pips")
+                if price is not None and direction_str and symbol:
+                    # Use broker's helper if available
+                    calc = getattr(self.broker, "calculate_sl_tp_prices", None)
+                    if callable(calc):
+                        sl_calc, tp_calc = calc(
+                            direction_str,
+                            price,
+                            sl_pips or 0,
+                            tp_pips or 0,
+                            symbol,
+                            units="pips",
+                        )
+                        if sl is None:
+                            sl = sl_calc
+                        if tp is None:
+                            tp = tp_calc
+
+            any_actionable = True
+            print(f"Executing trade: {symbol} {direction} lot={lot} sl={sl} tp={tp}")
+
+            if direction == "BUY":
+                self.broker.place_buy(str(symbol), float(lot), sl, tp)
+            else:
+                self.broker.place_sell(str(symbol), float(lot), sl, tp)
+
+        if not any_actionable:
+            print("No actionable signals (buy/sell), no trades executed.")
+
+    def _extract_direction(self, s: Dict[str, Any]) -> Optional[str]:
+        """
+        Returns "BUY" / "SELL" / None.
+        """
+        # Old format
+        direction = s.get("direction")
+        if isinstance(direction, str) and direction.strip():
+            d = direction.strip().upper()
+            if d in ("BUY", "SELL"):
+                return d
+
+        # New generator format(s)
+        side = (
+            s.get("final_signal")
+            or s.get("signal")
+            or s.get("side")
+            or s.get("action")
+            or "hold"
+        )
+        side = str(side).strip().lower()
+
+        if side == "hold":
+            return None
+        if side == "buy":
+            return "BUY"
+        if side == "sell":
+            return "SELL"
+
+        print(f"Skipping malformed signal (unknown direction/side={side!r}): {s!r}")
+        return None
+
+    def _extract_lot(self, *, symbol: str, signal: Dict[str, Any]) -> Optional[float]:
+        """
+        Determine lot size:
+          1) explicit lot in signal
+          2) ask risk_manager via common method names
+          3) fallback to config LOT_SIZE / DEFAULT_LOT / 0.01
+        """
+        lot = signal.get("lot")
+        if lot is not None:
+            try:
+                return float(lot)
+            except Exception:
+                return None
+
+        # Common risk manager method names (best-effort)
+        for name in (
+            "calculate_lot",
+            "calculate_lot_size",
+            "get_lot",
+            "get_lot_size",
+            "position_size",
+            "compute_lot",
+        ):
+            fn = getattr(self.risk_manager, name, None)
+            if callable(fn):
+                try:
+                    # try (symbol, signal)
+                    try:
+                        v = fn(symbol, signal)
+                    except TypeError:
+                        # try (symbol)
+                        v = fn(symbol)
+                    if v is not None:
+                        return float(v)
+                except Exception:
+                    pass
+
+        # Config fallback
+        for k in ("LOT_SIZE", "DEFAULT_LOT", "MIN_LOT"):
+            v = getattr(Config, k, None)
+            if v is not None:
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+
+        return 0.01
+
+    # -------------------------
+    # Exit execution (used by hybrid ExitTrade)
+    # -------------------------
+
+    def execute_exit(self, action: Any):
         """
         Executes an exit action by closing the position via the broker.
         """
         import MetaTrader5 as mt5
 
-        ticket = action.ticket
-        volume = float(action.volume)
-        symbol = action.symbol
+        ticket = getattr(action, "ticket", None)
+        volume = float(getattr(action, "volume", 0.0) or 0.0)
+        symbol = getattr(action, "symbol", None)
+
+        if ticket is None or not symbol or volume <= 0:
+            return None
 
         # Debounce: do not spam order_send every tick for the same ticket
         now = datetime.now()
@@ -117,8 +267,8 @@ class TradeExecutor:
                 "type": order_type,
                 "position": ticket,
                 "price": price,
-                "deviation": 5,
-                "magic": 123456,
+                "deviation": int(getattr(Config, "MAX_DEVIATION", 5) or 5),
+                "magic": int(getattr(Config, "MAGIC_NUMBER", 123456) or 123456),
                 # "comment": "...",  # OMIT: some brokers/terminals reject comments
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": filling,

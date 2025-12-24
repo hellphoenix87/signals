@@ -1,100 +1,70 @@
 import logging
 import numpy as np
 
-LOG_FILE = "signals_log.txt"
-
 
 def calculate_sma(data, window_size):
-    """Calculate Simple Moving Average (SMA) for the given data and window size."""
     return np.convolve(data, np.ones(window_size), "valid") / window_size
-
-
-def write_log_to_file(message):
-    with open(LOG_FILE, "a") as f:
-        f.write(message + "\n")
 
 
 def generate_sma_signal(
     data,
-    short_window=5,  # More responsive
-    long_window=20,  # More responsive
-    slope_threshold=0.00002,  # Lower threshold
-    diff_threshold=0.00005,  # Lower threshold
-    price_jump_threshold=0.00025,  # New: 25 pips
+    *,
+    short_window=5,
+    long_window=20,
+    slope_threshold=0.00002,
+    diff_threshold=0.00005,
+    price_jump_threshold=0.00025,
+    logger: logging.Logger | None = None,
 ):
     """
-    Generate trading signals based on SMA trend slope, crossover, and price jump.
-    - Use SMA slope (momentum) to detect trend direction.
-    - Use SMA crossover to confirm trend reversal.
-    - Use price jump to catch sharp moves.
-    - Generate 'buy', 'sell', or 'hold'.
+    Pure-ish: no file I/O. Caller decides logging.
     """
+    log = logger or logging.getLogger(__name__)
+
     try:
         if len(data) < long_window + 2:
-            logging.error(
-                f"Not enough data to calculate SMA. Need at least {long_window+2} data points."
-            )
-            write_log_to_file(
-                f"[sma_crossover] Not enough data. Need {long_window+2} points."
+            log.error(
+                "Not enough data to calculate SMA. Need at least %s data points.",
+                long_window + 2,
             )
             return "hold"
 
-        closing_prices = [item["close"] for item in data if item["close"] is not None]
+        closing_prices = [
+            item["close"] for item in data if item.get("close") is not None
+        ]
         short_sma = calculate_sma(closing_prices, short_window)
         long_sma = calculate_sma(closing_prices, long_window)
 
         if len(short_sma) < 2 or len(long_sma) < 2:
-            logging.error("Not enough SMA values to generate signal.")
-            write_log_to_file("[sma_crossover] Not enough SMA values.")
+            log.error("Not enough SMA values to generate signal.")
             return "hold"
 
-        # Latest SMA values
         s_sma, l_sma = short_sma[-1], long_sma[-1]
         prev_s_sma, prev_l_sma = short_sma[-2], long_sma[-2]
 
-        # Calculate slopes
         short_slope = s_sma - prev_s_sma
         long_slope = l_sma - prev_l_sma
         diff = s_sma - l_sma
         prev_diff = prev_s_sma - prev_l_sma
 
-        logging.info(f"Short SMA: {s_sma}, Long SMA: {l_sma}")
-        write_log_to_file(f"[sma_crossover] Short SMA: {s_sma}, Long SMA: {l_sma}")
-        logging.debug(
-            f"SMA Diff: {diff}, Prev Diff: {prev_diff}, Short slope: {short_slope}, Long slope: {long_slope}"
-        )
-        write_log_to_file(
-            f"[sma_crossover] Diff: {diff}, Prev Diff: {prev_diff}, Short slope: {short_slope}, Long slope: {long_slope}"
-        )
-
-        # Determine signal
         signal = "hold"
 
         # Price jump logic
         if abs(closing_prices[-1] - closing_prices[-2]) > price_jump_threshold:
             signal = "buy" if closing_prices[-1] > closing_prices[-2] else "sell"
-            logging.info(f"Price jump detected, generated '{signal}' signal")
-            write_log_to_file(
-                f"[sma_crossover] Price jump detected, generated '{signal}' signal"
-            )
-
-        # Trend-following: SMA slope
+            log.info("Price jump detected -> %s", signal)
         elif short_slope > slope_threshold and long_slope > 0:
             signal = "buy"
         elif short_slope < -slope_threshold and long_slope < 0:
             signal = "sell"
-
-        # Confirm with crossover
         elif diff > diff_threshold and prev_diff <= 0:
-            signal = "buy"  # bullish crossover
+            signal = "buy"
         elif diff < -diff_threshold and prev_diff >= 0:
-            signal = "sell"  # bearish crossover
+            signal = "sell"
 
-        logging.info(f"Generated '{signal}' signal")
-        write_log_to_file(f"[sma_crossover] Generated '{signal}' signal")
+        log.info("Generated '%s' signal", signal)
         return signal
 
     except Exception as e:
-        logging.error(f"Error in generate_sma_signal: {str(e)}")
-        write_log_to_file(f"[sma_crossover] Error: {str(e)}")
+        log.error("Error in generate_sma_signal: %s", e)
         return "error"

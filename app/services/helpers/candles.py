@@ -1,9 +1,10 @@
+import datetime
 import threading
 import time
 import MetaTrader5 as mt5
+from typing import Any, Optional
 from app.config.settings import Config
 from app.data.market_data import MarketData
-import datetime
 
 
 def create_live_candle_collector(
@@ -21,6 +22,22 @@ def create_live_candle_collector(
         timeframe=timeframe,
         count=count,
         interval=interval,
+    )
+
+
+# NEW
+def create_multi_timeframe_candle_collector(
+    symbol: str = "EURUSD",
+    timeframes=None,
+    count=None,
+):
+    """
+    Provider for DI wiring of MultiTimeframeCandleCollector.
+    """
+    return MultiTimeframeCandleCollector(
+        symbol=symbol,
+        timeframes=timeframes,
+        count=count,
     )
 
 
@@ -89,7 +106,6 @@ class LiveCandleCollector:
                     self.latest_candles = candles
 
                 if candles:
-                    # candles MUST be chronological for this to work (oldest->newest)
                     newest_time = candles[-1]["time"]
                     if last_candle_time is None or newest_time != last_candle_time:
                         print(
@@ -102,7 +118,6 @@ class LiveCandleCollector:
 
             tick = mt5.symbol_info_tick(self.symbol)
             if tick and getattr(tick, "time", None):
-                # Align to next bar boundary using server epoch seconds
                 now_epoch = int(tick.time)
                 seconds_to_next_bar = tf_seconds - (now_epoch % tf_seconds)
                 sleep_time = max(
@@ -111,3 +126,193 @@ class LiveCandleCollector:
                 time.sleep(sleep_time)
             else:
                 time.sleep(tf_seconds)
+
+
+# NEW
+class MultiTimeframeCandleCollector:
+    """
+    Collects candles for multiple MT5 timeframes for a single symbol.
+
+    - Uses GTC polling aligned to each timeframe close (server epoch).
+    - get_latest_candles() returns dict[timeframe] -> list[candles]
+    """
+
+    def __init__(self, symbol="EURUSD", timeframes=None, count=None):
+        self.symbol = symbol
+        self.timeframes = list(
+            timeframes
+            or getattr(
+                Config,
+                "TIMEFRAMES",
+                [mt5.TIMEFRAME_M1, mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M15],
+            )
+        )
+        self.count = int(count or Config.MIN_CANDLES_FOR_INDICATORS)
+
+        self.market_data = MarketData()
+        self._running = False
+        self._thread = None
+        self._lock = threading.Lock()
+
+        self._latest_by_tf: dict[int, list[dict]] = {tf: [] for tf in self.timeframes}
+        self._last_bar_time_by_tf: dict[int, Any] = {tf: None for tf in self.timeframes}
+
+        # schedule: next epoch second when we should refresh each tf
+        self._next_due_by_tf: dict[int, int] = {tf: 0 for tf in self.timeframes}
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._collect, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        t = self._thread
+        self._thread = None
+        if t:
+            t.join(timeout=5)
+
+    def get_latest_candles(self, timeframe: int | None = None):
+        """
+        - If timeframe is None: returns dict[tf] -> candles
+        - Else: returns candles list for that timeframe
+        """
+        with self._lock:
+            if timeframe is None:
+                return {tf: list(cs) for tf, cs in self._latest_by_tf.items()}
+            return list(self._latest_by_tf.get(timeframe, []))
+
+    def _timeframe_seconds(self, tf: int) -> int:
+        mapping = {
+            mt5.TIMEFRAME_M1: 60,
+            mt5.TIMEFRAME_M5: 5 * 60,
+            mt5.TIMEFRAME_M15: 15 * 60,
+            mt5.TIMEFRAME_M30: 30 * 60,
+            mt5.TIMEFRAME_H1: 60 * 60,
+        }
+        return int(mapping.get(tf, 60))
+
+    def _align_next_due(self, now_epoch: int, tf: int) -> int:
+        tf_seconds = self._timeframe_seconds(tf)
+        # next bar boundary + 1 second to allow bar to close
+        return int(now_epoch - (now_epoch % tf_seconds) + tf_seconds + 1)
+
+    def _candle_time_to_epoch(self, t: Any) -> Optional[int]:
+        if t is None:
+            return None
+        if isinstance(t, (int, float)):
+            return int(t)
+
+        if isinstance(t, datetime.datetime):
+            # IMPORTANT: treat naive datetimes as UTC (not local machine time)
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=datetime.timezone.utc)
+            else:
+                t = t.astimezone(datetime.timezone.utc)
+            return int(t.timestamp())
+
+        if isinstance(t, datetime.date):
+            # date without time -> midnight UTC best-effort
+            return int(
+                datetime.datetime(
+                    t.year, t.month, t.day, tzinfo=datetime.timezone.utc
+                ).timestamp()
+            )
+
+        try:
+            ts = getattr(t, "timestamp", None)
+            if callable(ts):
+                return int(ts())
+        except Exception:
+            return None
+        return None
+
+    def _stamp_is_closed(self, candles: list[dict], tf: int, now_epoch: int) -> None:
+        tf_seconds = self._timeframe_seconds(tf)
+        for c in candles or []:
+            if not isinstance(c, dict):
+                continue
+            te = self._candle_time_to_epoch(c.get("time"))
+            if te is None:
+                # if unknown, don't block trading (match your strategy’s default)
+                c.setdefault("is_closed", True)
+                continue
+            c["is_closed"] = bool((te + tf_seconds) <= now_epoch)
+
+    def _collect(self):
+        for tf in self.timeframes:
+            self._next_due_by_tf[tf] = 0
+
+        while self._running:
+            wall_epoch = int(time.time())
+            tick = mt5.symbol_info_tick(self.symbol)
+            tick_epoch = int(getattr(tick, "time", 0) or 0)
+
+            now_epoch = wall_epoch
+            stamp_epoch = tick_epoch or wall_epoch
+
+            for tf in self.timeframes:
+                if now_epoch < int(self._next_due_by_tf.get(tf, 0) or 0):
+                    continue
+
+                try:
+                    candles = self.market_data.get_historical_candles(
+                        self.symbol,
+                        timeframe=tf,
+                        start_pos=1,
+                        count=self.count,
+                        verbose=False,
+                    )
+                    for c in candles:
+                        c["symbol"] = self.symbol
+                    if candles:
+                        self._stamp_is_closed(candles, tf, stamp_epoch)
+
+                    with self._lock:
+                        self._latest_by_tf[tf] = candles
+
+                    if candles:
+                        newest_closed_time = None
+                        for c in reversed(candles):
+                            if isinstance(c, dict) and c.get("is_closed") is True:
+                                newest_closed_time = c.get("time")
+                                break
+
+                        newest_time = newest_closed_time or candles[-1].get("time")
+                        last_time = self._last_bar_time_by_tf.get(tf)
+
+                        # NEW: detect time jumps
+                        last_ep = self._candle_time_to_epoch(last_time)
+                        new_ep = self._candle_time_to_epoch(newest_time)
+                        tf_s = self._timeframe_seconds(tf)
+                        if (
+                            last_ep is not None
+                            and new_ep is not None
+                            and (new_ep - last_ep) > tf_s
+                        ):
+                            print(
+                                f"[{self.symbol}] TF={tf} candle jump: last={last_time} new={newest_time} "
+                                f"(delta={new_ep - last_ep}s, tick_epoch={tick_epoch}, wall_epoch={wall_epoch})"
+                            )
+
+                        if last_time is None or newest_time != last_time:
+                            print(
+                                f"[{self.symbol}] New candle tf={tf}: {newest_time} (count={len(candles)})"
+                            )
+                            self._last_bar_time_by_tf[tf] = newest_time
+
+                except Exception as e:
+                    print(
+                        f"[MultiTimeframeCandleCollector] Error fetching candles tf={tf}: {e}"
+                    )
+
+                self._next_due_by_tf[tf] = self._align_next_due(now_epoch, tf)
+
+            next_due = (
+                min(self._next_due_by_tf.values())
+                if self._next_due_by_tf
+                else (now_epoch + 1)
+            )
+            time.sleep(max(1, int(next_due - now_epoch)))

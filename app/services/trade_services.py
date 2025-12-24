@@ -1,311 +1,669 @@
+from __future__ import annotations
+
 import threading
 import time
-import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
 import MetaTrader5 as mt5
-from typing import Optional, Any
+
+from app.config.settings import Config
 
 
 def create_orchestrator(
-    collector,
+    collector: Any,
     signal_generator: Any,
+    broker: Optional[Any] = None,
     trading_service: Optional[Any] = None,
     tick_collector: Optional[Any] = None,
     exit_trade: Optional[Any] = None,
+    enter_trade: Optional[Any] = None,
+    logger: Optional[Any] = None,
 ) -> "SignalOrchestrator":
     """
     Provider that creates and returns a SignalOrchestrator.
-    - collector: LiveCandleCollector instance (injected, not started)
-    - signal_generator: callable(candles)->dict or object with generate_signal(candles)
-    - trading_service: optional execution service with process_signal(signal, candles)
+
+    - collector: LiveCandleCollector or MultiTimeframeCandleCollector (injected, not started)
+    - signal_generator: object with generate_signal(candles_snapshot)->dict OR ->list[dict]
+    - broker: execution adapter (used if trading_service not provided)
+    - trading_service: optional execution service with process_signal(signals, candles_snapshot)
+    - tick_collector: optional tick feed (calls protective exits)
+    - exit_trade: optional ExitTrade (tick protective + candle-close profit exits)
+    - enter_trade: optional EnterTrade (if you execute entries directly here)
     """
     return SignalOrchestrator(
         collector=collector,
         signal_generator=signal_generator,
+        broker=broker,
         trading_service=trading_service,
         tick_collector=tick_collector,
         exit_trade=exit_trade,
+        enter_trade=enter_trade,
+        logger=logger,
     )
 
 
 class SignalOrchestrator:
     """
-    Service-layer orchestrator (DI-ready).
+    Signal orchestrator (HYBRID exits):
 
-    Responsibilities:
-    - coordinate synchronization with broker/server time
-    - read latest candles from injected LiveCandleCollector
-    - call injected signal_generator to produce signals
-    - log signals with exact time
-    - delegate actionable signals to injected trading_service.process_signal
-    - process ticks via injected tick_collector and feed exit_trade (if provided)
+    - Candle loop (cadence = TF_ENTRY, typically M1):
+        * once per NEW CLOSED M1 candle (per symbol):
+            1) generate signals (and update HTF bias into exit_trade)
+            2) run candle-close PROFIT exits (ExitTrade.on_candle_close)
+            3) execute entries (trading_service OR enter_trade/broker fallback)
+
+    - Tick path:
+        * on every tick: run protective exits (ExitTrade.on_tick)
+        * on every tick: check pending entries for pullback completion (and trigger entry if ready)
     """
 
     def __init__(
         self,
-        collector,
+        *,
+        collector: Any,
         signal_generator: Any,
+        broker: Optional[Any] = None,
         trading_service: Optional[Any] = None,
         tick_collector: Optional[Any] = None,
         exit_trade: Optional[Any] = None,
-    ):
-        # dependencies injected, no side-effects here
+        enter_trade: Optional[Any] = None,
+        logger: Optional[Any] = None,
+        pending_entries: Optional[dict[str, dict]] = None,  # symbol -> signal dict
+    ) -> None:
         self.collector = collector
         self.signal_generator = signal_generator
+        self.broker = broker
         self.trading_service = trading_service
-        self.exit_trade = exit_trade
+
         self.tick_collector = tick_collector
+        self.exit_trade = exit_trade
+        self.enter_trade = enter_trade
+        self.logger = logger
 
-        self.latest_signal: Optional[dict] = None
-        self._latest_tick: Any = None
-
-        self._running = False
+        self._running: bool = False
         self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
 
-    def start(self):
-        """Idempotent start: starts candle collector, tick collector, and orchestrator loop in background thread."""
+        # Track per-symbol last closed entry candle time to ensure we trigger once per candle.
+        self._last_closed_time_by_symbol: Dict[str, datetime] = {}
+
+        # Entry cadence timeframes (prefer strategy-provided attributes)
+        self._tf_entry: int = int(
+            getattr(
+                signal_generator,
+                "tf_entry",
+                getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1),
+            )
+        )
+        self._tf_confirm: int = int(
+            getattr(
+                signal_generator,
+                "tf_confirm",
+                getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5),
+            )
+        )
+        self._tf_bias: int = int(
+            getattr(
+                signal_generator,
+                "tf_bias",
+                getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15),
+            )
+        )
+        self.pending_entries: Dict[str, dict] = pending_entries or {}
+
+    # -------------------------
+    # Lifecycle
+    # -------------------------
+
+    def start(self) -> None:
         if self._running:
             return
 
-        # start candle collector (expected to be idempotent)
-        self.collector.start()
-
-        # start tick collection so exit_trade can run without requiring /tick endpoint
-        self._ensure_ticks_started()
+        self._safe_call(self.collector, "start")
+        self._wire_tick_callback()
 
         self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="SignalOrchestrator", daemon=True
+        )
         self._thread.start()
 
-    def stop(self):
-        """Stop orchestrator and collectors; join background thread with timeout."""
-        if not self._running:
-            return
-
+    def stop(self) -> None:
         self._running = False
+        self._safe_call(self.tick_collector, "stop")
+        self._safe_call(self.collector, "stop")
 
-        # stop candle collector
-        try:
-            self.collector.stop()
-        except Exception:
-            pass
+    # -------------------------
+    # Tick path (protective exits + pending entry pullback check)
+    # -------------------------
 
-        # stop tick collector (best-effort)
-        try:
-            if self.tick_collector:
-                stopper = getattr(self.tick_collector, "stop_collecting", None)
-                if callable(stopper):
-                    stopper()
-                else:
-                    stopper2 = getattr(self.tick_collector, "stop", None)
-                    if callable(stopper2):
-                        stopper2()
-        except Exception:
-            pass
-
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def is_running(self) -> bool:
-        return self._running
-
-    def get_latest_signal(self) -> dict:
-        """Return last generated signal snapshot (signals list + candle_time) or generate on demand."""
-        with self._lock:
-            if self.latest_signal:
-                return self.latest_signal
-
-        candles = self.collector.get_latest_candles()
-        if not candles or len(candles) < self.collector.count:
-            return {"error": "Not enough candle data for signal generation"}
-
-        candle_time = None
-        try:
-            last = candles[-1]
-            candle_time = (
-                last.get("time") or last.get("timestamp") or last.get("datetime")
-                if isinstance(last, dict)
-                else getattr(last, "time", None)
-            )
-        except Exception:
-            pass
-
-        # Prefer multi-symbol generator API if available
-        sg = self.signal_generator
-        gen_signals = getattr(sg, "generate_signals", None)
-        if callable(gen_signals):
-            account_balance = self._get_account_balance()
-            signals = gen_signals(account_balance)
-            snapshot = {"signals": signals, "candle_time": candle_time}
-            with self._lock:
-                self.latest_signal = snapshot
-            return snapshot
-
-        # Fallback to single-symbol generator API
-        signal = self._call_signal_generator(candles)
-        snapshot = {"signal": signal, "candle_time": candle_time}
-        with self._lock:
-            self.latest_signal = snapshot
-        return snapshot
-
-    def _ensure_ticks_started(self) -> None:
-        """Attach tick callback and start tick collector if available."""
+    def _wire_tick_callback(self) -> None:
         if not self.tick_collector:
+            self._log("[Orchestrator] tick_collector is None (tick exits disabled)")
             return
 
-        # attach callback
-        if getattr(self.tick_collector, "on_tick", None) != self._store_tick:
-            self.tick_collector.on_tick = self._store_tick
-
-        # start collecting if not running
-        if not getattr(self.tick_collector, "_running", False):
-            starter = getattr(self.tick_collector, "start_collecting", None)
-            if callable(starter):
-                starter()
-
-    def _store_tick(self, tick: Any) -> None:
-        """TickCollector callback."""
-        self._latest_tick = tick
-
-        if not self.exit_trade:
-            return
-
-        actions = self.exit_trade.on_tick(tick)  # returns list[ExitAction]
-        if not actions:
-            return
-
-        self._execute_exit_actions(actions)
-
-    def _execute_exit_actions(self, actions: list[Any]) -> None:
-        """
-        Hand exit actions to execution layer.
-        Expected:
-        - trading_service.execute_exit(action), OR
-        - trading_service.execute_trade(symbol, side, volume)
-        """
-        if not self.trading_service:
-            return
-
-        exec_exit = getattr(self.trading_service, "execute_exit", None)
-        if callable(exec_exit):
-            for action in actions:
-                exec_exit(action)
-            return
-
-        exec_trade = getattr(self.trading_service, "execute_trade", None)
-        if callable(exec_trade):
-            for action in actions:
-                exec_trade(symbol=action.symbol, side=action.side, volume=action.volume)
-            return
-
-        print(
-            "[SignalOrchestrator] No supported exit execution method on trading_service"
+        self._log(
+            f"[Orchestrator] wiring tick_collector={type(self.tick_collector).__name__}"
         )
 
-    def get_tick(self):
-        """
-        Debug/inspection:
-        Ensure tick collection is running, then return latest tick.
-        """
-        self._ensure_ticks_started()
-        return self._latest_tick
+        set_cb = getattr(self.tick_collector, "set_callback", None)
+        start = getattr(self.tick_collector, "start", None)
+        self._log(
+            f"[Orchestrator] tick_collector methods: set_callback_callable={callable(set_cb)} start_callable={callable(start)}"
+        )
 
-    def _run(self):
-        """
-        Main loop:
-        - Tick exit logic runs per-tick via TickCollector callback (_store_tick).
-        - Signal generation runs only when a NEW candle appears.
-        """
-
-        def _extract_candle_time(candle):
-            if isinstance(candle, dict):
-                return (
-                    candle.get("time")
-                    or candle.get("timestamp")
-                    or candle.get("datetime")
+        if callable(set_cb):
+            try:
+                set_cb(self._on_tick)
+                self._log("[Orchestrator] tick_collector.set_callback OK")
+            except Exception as exc:
+                self._log_exception(
+                    f"[Orchestrator] tick_collector.set_callback error: {exc!r}"
                 )
-            return getattr(candle, "time", None)
 
-        # Seed last_candle_time so we do NOT generate immediately on startup
-        last_candle_time = None
-        try:
-            candles0 = self.collector.get_latest_candles()
-            if candles0:
-                last0 = candles0[-1]
-                last_candle_time = _extract_candle_time(last0)
-        except Exception:
-            last_candle_time = None
+        if callable(start):
+            try:
+                start(self._on_tick)
+                self._log("[Orchestrator] tick_collector.start(cb) OK")
+            except TypeError:
+                try:
+                    start()
+                    self._log("[Orchestrator] tick_collector.start() OK")
+                except Exception as exc:
+                    self._log_exception(
+                        f"[Orchestrator] tick_collector.start() error: {exc!r}"
+                    )
+            except Exception as exc:
+                self._log_exception(
+                    f"[Orchestrator] tick_collector.start error: {exc!r}"
+                )
+
+    def _on_tick(self, tick: Any) -> None:
+        # 1. Run protective exits
+        if self.exit_trade:
+            try:
+                actions = self.exit_trade.on_tick(tick)
+            except Exception as exc:
+                self._log_exception(f"[Orchestrator] exit_trade.on_tick error: {exc!r}")
+                actions = []
+            if actions:
+                self._execute_exit_actions(actions)
+
+        # 2. Check pending entries for pullback completion
+        symbol = getattr(tick, "symbol", None)
+        if symbol and symbol in self.pending_entries:
+            # Get latest candles for entry timeframe
+            candles = self._extract_tf_candles(
+                self._get_latest_candles(symbol=symbol), self._tf_entry
+            )
+            # Use your signal generator's pullback check
+            pullback_ok = False
+            if hasattr(self.signal_generator, "_pullback_completed"):
+                try:
+                    pullback_ok = self.signal_generator._pullback_completed(candles)
+                except Exception as exc:
+                    self._log_exception(f"[Orchestrator] pullback check error: {exc!r}")
+            if pullback_ok:
+                sig = self.pending_entries.pop(symbol)
+                # Execute trade as in _run_entries
+                if self.enter_trade:
+                    fn = (
+                        getattr(self.enter_trade, "on_signal", None)
+                        or getattr(self.enter_trade, "execute", None)
+                        or getattr(self.enter_trade, "enter", None)
+                    )
+                    if callable(fn):
+                        try:
+                            fn(sig)
+                        except Exception as exc:
+                            self._log_exception(
+                                f"[Orchestrator] enter_trade execution error: {exc!r}"
+                            )
+                elif self.broker:
+                    place = (
+                        getattr(self.broker, "place_market_order", None)
+                        or getattr(self.broker, "place_order", None)
+                        or getattr(self.broker, "open_position", None)
+                    )
+                    if callable(place):
+                        try:
+                            place(symbol=str(symbol), side=sig.get("final_signal"))
+                        except Exception as exc:
+                            self._log_exception(
+                                f"[Orchestrator] broker.place_* error: {exc!r}"
+                            )
+
+    # -------------------------
+    # Candle loop (entries + candle-close profit exits)
+    # -------------------------
+
+    def _run(self) -> None:
+        poll_sleep = float(getattr(self.collector, "interval", 1) or 1)
 
         while self._running:
             try:
-                candles = self.collector.get_latest_candles()
-                if not candles or len(candles) < self.collector.count:
-                    time.sleep(1)
-                    continue
+                symbols = self._symbols_to_process()
+                did_work = False
 
-                last = candles[-1]
-                candle_time = _extract_candle_time(last)
+                for symbol in symbols:
+                    snapshot = self._get_latest_candles(symbol=symbol)
+                    if not snapshot:
+                        continue
 
-                if candle_time is None:
-                    time.sleep(self.collector.interval or 60)
-                    continue
+                    entry_candles = self._extract_tf_candles(snapshot, self._tf_entry)
+                    closed_candle = self._last_closed_candle(entry_candles)
+                    closed_time = self._candle_time(closed_candle)
+                    if closed_time is None:
+                        continue
 
-                if candle_time == last_candle_time:
-                    time.sleep(1)
-                    continue
-                last_candle_time = candle_time
+                    sym = self._resolve_symbol_from_candle_or_fallback(
+                        closed_candle, fallback=symbol
+                    )
+                    if not sym:
+                        continue
 
-                account_balance = self._get_account_balance()
-                signals = self.signal_generator.generate_signals(account_balance)
-                if not signals:
-                    continue
+                    # Trigger once per NEW closed candle
+                    last_t = self._last_closed_time_by_symbol.get(sym)
+                    if last_t is None:
+                        # baseline only (avoid firing immediately on startup)
+                        self._last_closed_time_by_symbol[sym] = closed_time
+                        continue
+                    if closed_time <= last_t:
+                        continue
 
-                # store last signals snapshot
-                with self._lock:
-                    self.latest_signal = {
-                        "signals": signals,
-                        "candle_time": candle_time,
-                    }
+                    self._last_closed_time_by_symbol[sym] = closed_time
+                    did_work = True
 
-                # execute once per candle (process_signal already accepts list)
-                if self.trading_service:
-                    proc = getattr(self.trading_service, "process_signal", None)
-                    if callable(proc):
-                        try:
-                            proc(signals, candles)
-                        except Exception as e:
-                            print(f"[Orchestrator] Error processing signals: {e}")
+                    # 1) signals first (this updates bias via exit_trade.update_bias)
+                    self._run_entries(snapshot=snapshot, asof=closed_time)
+
+                    # 2) then candle-close profit exits (now bias is current)
+                    self._run_candle_close_profit_exits(
+                        symbol=sym,
+                        closed_candle=closed_candle,
+                        closed_time=closed_time,
+                    )
+
+                time.sleep(0.1 if did_work else poll_sleep)
 
             except Exception as exc:
-                print(f"[Orchestrator] unexpected error: {exc}")
+                self._log_exception(f"[Orchestrator] loop error: {exc!r}")
                 time.sleep(1)
 
-    def _get_account_balance(self):
-        # Implement this to fetch account balance from broker or risk manager
-        # Example:
-        getter = getattr(self.trading_service, "get_account_balance", None)
-        if callable(getter):
-            return getter()
-        return 10000  # fallback default
+    def _run_candle_close_profit_exits(
+        self,
+        *,
+        symbol: str,
+        closed_candle: Optional[dict],
+        closed_time: datetime,
+    ) -> None:
+        if not self.exit_trade:
+            return
 
-    def _call_signal_generator(self, candles: list[dict]) -> dict:
-        """
-        Backward-compatible adapter for different signal_generator styles.
+        on_close = getattr(self.exit_trade, "on_candle_close", None)
+        if not callable(on_close):
+            return
 
-        Supports:
-        - generator.generate_signal(candles) -> dict
-        - generator(candles) -> dict
-        """
+        close_px = None
+        if isinstance(closed_candle, dict):
+            close_px = closed_candle.get("close")
+
+        try:
+            close_px_f = float(close_px) if close_px is not None else None
+        except Exception:
+            close_px_f = None
+
+        if close_px_f is None:
+            return
+
+        try:
+            actions = on_close(
+                symbol=str(symbol),
+                close_price=float(close_px_f),
+                asof_epoch=float(closed_time.timestamp()),
+            )
+        except Exception as exc:
+            self._log_exception(
+                f"[Orchestrator] exit_trade.on_candle_close error: {exc!r}"
+            )
+            return
+
+        if actions:
+            self._execute_exit_actions(actions)
+
+    def _run_entries(self, *, snapshot: Any, asof: datetime) -> None:
         sg = self.signal_generator
 
-        gen_signal = getattr(sg, "generate_signal", None)
-        if callable(gen_signal):
-            return gen_signal(candles)
-
-        if callable(sg):
-            return sg(candles)
-
-        raise AttributeError(
-            "signal_generator must implement generate_signal(candles) or be callable(candles)."
+        # Accept multiple generator APIs (backwards/forwards compatible)
+        gen = (
+            getattr(sg, "generate_signal", None)
+            or getattr(sg, "generate_signals", None)
+            or getattr(sg, "__call__", None)
         )
+        if not callable(gen):
+            self._log(
+                f"[Orchestrator] signal_generator has no callable generate_signal()/generate_signals()/__call__: {type(sg).__name__}"
+            )
+            return
+
+        # Call the generator with best-effort signature matching
+        try:
+            try:
+                sig_out = gen(snapshot)
+            except TypeError:
+                try:
+                    sig_out = gen(candles_snapshot=snapshot)
+                except TypeError:
+                    try:
+                        sig_out = gen()
+                    except TypeError:
+                        # Last fallback: some generators use account_balance; try to fetch from broker if possible
+                        bal = None
+                        get_bal = (
+                            getattr(self.broker, "get_account_balance", None)
+                            if self.broker
+                            else None
+                        )
+                        if callable(get_bal):
+                            try:
+                                bal = float(get_bal())
+                            except Exception:
+                                bal = None
+                        if bal is None:
+                            raise
+                        sig_out = gen(account_balance=bal)
+        except Exception as exc:
+            self._log_exception(f"[Orchestrator] signal generator call failed: {exc!r}")
+            return
+
+        # Normalize into list[dict]
+        signals: List[dict]
+        if isinstance(sig_out, list):
+            signals = [s for s in sig_out if isinstance(s, dict)]
+        elif isinstance(sig_out, dict):
+            signals = [sig_out]
+        else:
+            self._log(
+                f"[Orchestrator] signal generator returned unsupported type: {type(sig_out).__name__}"
+            )
+            return
+
+        if not signals:
+            self._log("[Orchestrator] signal generator returned 0 dict signals")
+            return
+
+        self._log(
+            f"[Orchestrator] signals={len(signals)} asof={asof.isoformat()} sample={signals[0]}"
+        )
+
+        # Update HTF context for profit-exit gating (best-effort)
+        if self.exit_trade:
+            for sig in signals:
+                try:
+                    symbol = sig.get("symbol")
+                    if not symbol:
+                        continue
+                    self.exit_trade.update_bias(
+                        str(symbol),
+                        m5=sig.get("m5_confirm"),
+                        m15=sig.get("m15_bias"),
+                        asof_epoch=float(asof.timestamp()),
+                    )
+                except Exception as exc:
+                    self._log_exception(
+                        f"[Orchestrator] exit_trade.update_bias error: {exc!r}"
+                    )
+
+        # If trading_service exists, let it handle execution
+        if self.trading_service:
+            proc = getattr(self.trading_service, "process_signal", None)
+            if callable(proc):
+                try:
+                    proc(signals, snapshot)
+                except Exception as exc:
+                    self._log_exception(
+                        f"[Orchestrator] trading_service.process_signal error: {exc!r}"
+                    )
+            return
+
+        # Otherwise execute here (enter_trade preferred, broker fallback)
+        if not self.enter_trade and not self.broker:
+            self._log("[Orchestrator] No enter_trade and no broker; skipping execution")
+            return
+
+        for sig in signals:
+            symbol = sig.get("symbol")
+            final_signal = (sig.get("final_signal") or "hold").lower()
+            pullback_completed = sig.get("pullback_completed", True)
+            if not symbol or final_signal not in ("buy", "sell"):
+                continue
+
+            # --- Pending entry logic ---
+            if final_signal in ("buy", "sell") and not pullback_completed:
+                self.pending_entries[symbol] = sig
+                continue  # Do not execute trade yet
+
+            if self.enter_trade:
+                fn = (
+                    getattr(self.enter_trade, "on_signal", None)
+                    or getattr(self.enter_trade, "execute", None)
+                    or getattr(self.enter_trade, "enter", None)
+                )
+                if callable(fn):
+                    try:
+                        fn(sig)
+                        continue
+                    except Exception as exc:
+                        self._log_exception(
+                            f"[Orchestrator] enter_trade execution error: {exc!r}"
+                        )
+
+            if not self.broker:
+                continue
+
+            place = (
+                getattr(self.broker, "place_market_order", None)
+                or getattr(self.broker, "place_order", None)
+                or getattr(self.broker, "open_position", None)
+            )
+            if callable(place):
+                try:
+                    place(symbol=str(symbol), side=final_signal)
+                except TypeError:
+                    try:
+                        place(symbol=str(symbol), signal=final_signal)
+                    except Exception as exc:
+                        self._log_exception(
+                            f"[Orchestrator] broker.place_* TypeError fallback failed: {exc!r}"
+                        )
+                except Exception as exc:
+                    self._log_exception(f"[Orchestrator] broker.place_* error: {exc!r}")
+
+    # -------------------------
+    # Broker execution helpers
+    # -------------------------
+
+    def _execute_exit_actions(self, actions: List[Any]) -> None:
+        # Prefer trading_service (TradeExecutor) for exits if available
+        if self.trading_service and hasattr(self.trading_service, "execute_exit"):
+            for a in actions:
+                self.trading_service.execute_exit(a)
+            return
+
+        # Fallback: call broker directly
+        if not self.broker:
+            return
+
+        for a in actions:
+            ticket = (
+                getattr(a, "ticket", None)
+                if not isinstance(a, dict)
+                else a.get("ticket")
+            )
+            symbol = (
+                getattr(a, "symbol", None)
+                if not isinstance(a, dict)
+                else a.get("symbol")
+            )
+            side = (
+                getattr(a, "side", None) if not isinstance(a, dict) else a.get("side")
+            )
+            volume = (
+                getattr(a, "volume", None)
+                if not isinstance(a, dict)
+                else a.get("volume")
+            )
+
+            closer = (
+                getattr(self.broker, "close_position", None)
+                or getattr(self.broker, "close_trade", None)
+                or getattr(self.broker, "close_order", None)
+            )
+            if not callable(closer):
+                continue
+
+            try:
+                if ticket is not None:
+                    closer(ticket=ticket, symbol=symbol, side=side, volume=volume)
+                else:
+                    closer(symbol=symbol, side=side, volume=volume)
+            except TypeError:
+                try:
+                    closer(ticket, symbol, side, volume)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    # -------------------------
+    # Candle snapshot helpers
+    # -------------------------
+
+    def _symbols_to_process(self) -> List[str]:
+        sym = getattr(self.collector, "symbol", None)
+        if sym:
+            return [str(sym)]
+
+        syms = getattr(Config, "SYMBOLS", None)
+        if isinstance(syms, list) and syms:
+            max_syms = int(getattr(Config, "MAX_SYMBOLS", len(syms)) or len(syms))
+            return [str(s) for s in syms[:max_syms] if s]
+        return []
+
+    def _get_latest_candles(self, *, symbol: Optional[str]) -> Any:
+        """
+        Supports:
+          - collector.get_latest_candles()
+          - collector.get_latest_candles(symbol="EURUSD")
+        """
+        fn = getattr(self.collector, "get_latest_candles", None) or getattr(
+            self.collector, "get_candles", None
+        )
+        if not callable(fn):
+            return None
+        try:
+            try:
+                return fn(symbol=symbol) if symbol else fn()
+            except TypeError:
+                return fn()
+        except Exception:
+            return None
+
+    def _extract_tf_candles(self, snapshot: Any, tf: int) -> List[dict]:
+        if isinstance(snapshot, dict):
+            v = snapshot.get(int(tf), []) or []
+            return v if isinstance(v, list) else []
+        if isinstance(snapshot, list):
+            return snapshot
+        return []
+
+    def _last_closed_candle(self, candles: List[dict]) -> Optional[dict]:
+        if not candles:
+            return None
+
+        # Prefer an explicitly-closed candle if flags exist
+        for c in reversed(candles):
+            if isinstance(c, dict) and self._is_candle_closed(c):
+                return c
+
+        # Fallback: assume the last is closed; if collector keeps a forming bar, use prior.
+        return candles[-2] if len(candles) >= 2 else candles[-1]
+
+    def _is_candle_closed(self, candle: dict) -> bool:
+        for k in ("is_closed", "closed", "complete", "is_complete"):
+            if k in candle:
+                return bool(candle.get(k))
+        return True
+
+    def _resolve_symbol_from_candle_or_fallback(
+        self, candle: Optional[dict], fallback: Optional[str]
+    ) -> Optional[str]:
+        if isinstance(candle, dict):
+            s = candle.get("symbol")
+            if s:
+                return str(s)
+        if fallback:
+            return str(fallback)
+        return None
+
+    def _candle_time(self, candle: Optional[dict]) -> Optional[datetime]:
+        if not candle or not isinstance(candle, dict):
+            return None
+
+        t = candle.get("time")
+        if t is None:
+            t = candle.get("timestamp")
+        if t is None:
+            t = candle.get("time_msc")
+
+        if isinstance(t, datetime):
+            return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+        try:
+            if isinstance(t, (int, float)):
+                if float(t) > 10_000_000_000:  # ms-ish
+                    return datetime.fromtimestamp(float(t) / 1000.0, tz=timezone.utc)
+                return datetime.fromtimestamp(float(t), tz=timezone.utc)
+        except Exception:
+            return None
+
+        try:
+            if isinstance(t, str) and t:
+                dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+        return None
+
+    # -------------------------
+    # Misc helpers
+    # -------------------------
+
+    def _safe_call(self, obj: Any, method_name: str) -> None:
+        if not obj:
+            return
+        fn = getattr(obj, method_name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _log(self, msg: str) -> None:
+        try:
+            if self.logger and hasattr(self.logger, "info"):
+                self.logger.info(msg)
+            else:
+                print(msg)
+        except Exception:
+            pass
+
+    def _log_exception(self, msg: str) -> None:
+        try:
+            if self.logger and hasattr(self.logger, "exception"):
+                self.logger.exception(msg)
+            else:
+                print(msg)
+        except Exception:
+            pass
