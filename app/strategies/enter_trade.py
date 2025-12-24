@@ -1,5 +1,8 @@
 from app.config.settings import Config
-from app.services.helpers.signal_generation import StrongSignalStrategy
+from app.services.helpers.signal_generation import (
+    StrongSignalStrategy,
+    MultiTimeframeStrongSignalStrategy,
+)
 import MetaTrader5 as mt5
 
 
@@ -14,13 +17,26 @@ class BreakoutStrategy:
         self.risk_manager = risk_manager
         self.broker = broker
         self._last_scanned_symbols = []
+
+        # Base per-timeframe strategy
         self.strong_signal_strategy = StrongSignalStrategy()
+
+        # Multi-timeframe wrapper (bias/confirm/entry)
+        self.tf_bias = int(getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15))
+        self.tf_confirm = int(getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5))
+        self.tf_entry = int(getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1))
+
+        self.mtf_signal_strategy = MultiTimeframeStrongSignalStrategy(
+            base=self.strong_signal_strategy,
+            tf_bias=self.tf_bias,
+            tf_confirm=self.tf_confirm,
+            tf_entry=self.tf_entry,
+        )
 
     def get_last_scanned_symbols(self):
         return self._last_scanned_symbols
 
     def generate_signals(self, account_balance):
-
         # Check daily profit before generating signals
         daily_profit = 0
         if hasattr(self.broker, "get_daily_profit"):
@@ -31,47 +47,62 @@ class BreakoutStrategy:
         if daily_profit >= Config.DAILY_TARGET_PROFIT:
             print("Daily target profit reached, no new trades will be generated.")
             return []
+
         symbols = Config.SYMBOLS[: Config.MAX_SYMBOLS]
         self._last_scanned_symbols = symbols
         signals = []
 
-        candle_count = getattr(Config, "CANDLE_COUNT", 500)
+        candle_count = int(getattr(Config, "CANDLE_COUNT", 500) or 500)
+        min_candles = int(getattr(Config, "MIN_CANDLES_FOR_INDICATORS", 200) or 200)
 
         for symbol in symbols:
-            # Get candles (live or historical)
-            if getattr(self.broker, "mode", None) == "backtest":
-                candles = self.market_data.get_historical_candles(
-                    symbol,
-                    timeframe=self._mt5_timeframe(),
-                    start_pos=1,
-                    count=candle_count,
-                )
-            else:
-                candles = self.market_data.get_symbol_data(
-                    symbol,
-                    timeframe=self._mt5_timeframe(),
-                    num_bars=candle_count,
-                    closed_only=True,
-                )
+            # --- Fetch candles for each TF ---
+            candles_by_tf: dict[int, list[dict]] = {}
+            for tf in (self.tf_entry, self.tf_confirm, self.tf_bias):
+                if getattr(self.broker, "mode", None) == "backtest":
+                    cs = self.market_data.get_historical_candles(
+                        symbol,
+                        timeframe=int(tf),
+                        start_pos=1,
+                        count=candle_count,
+                    )
+                else:
+                    cs = self.market_data.get_symbol_data(
+                        symbol,
+                        timeframe=int(tf),
+                        num_bars=candle_count,
+                        closed_only=True,
+                    )
 
-            min_candles = getattr(Config, "MIN_CANDLES_FOR_INDICATORS", 200)
-            if not candles or len(candles) < min_candles:
-                print(
-                    f"[{symbol}] Not enough candles: {len(candles)} (required: {min_candles})"
-                )
+                if not cs or len(cs) < min_candles:
+                    print(
+                        f"[{symbol}] Not enough candles tf={tf}: {len(cs) if cs else 0} (required: {min_candles})"
+                    )
+                    candles_by_tf = {}
+                    break
+
+                candles_by_tf[int(tf)] = cs
+
+            if not candles_by_tf:
                 continue
 
-            # Use StrongSignalStrategy to generate signal
-            signal_result = self.strong_signal_strategy.generate_signal(candles)
-            print(f"[{symbol}] Signal result: {signal_result}")
+            # --- Multi-timeframe signal ---
+            signal_result = self.mtf_signal_strategy.generate_signal(candles_by_tf)
+            print(f"[{symbol}] MTF Signal result: {signal_result}")
+
             final_signal = signal_result.get("final_signal")
             if final_signal not in ("buy", "sell"):
                 print(f"[{symbol}] No trading signal generated")
                 continue
 
-            price = candles[-1]["close"]  # Use last candle's close price
+            # Use ENTRY TF candles for price + SL/TP calculations
+            entry_candles = candles_by_tf.get(self.tf_entry, []) or []
+            if not entry_candles:
+                continue
 
-            sl_pips, tp_pips = self._calculate_dynamic_sl_tp(candles, symbol)
+            price = entry_candles[-1]["close"]
+
+            sl_pips, tp_pips = self._calculate_dynamic_sl_tp(entry_candles, symbol)
             direction = "BUY" if final_signal == "buy" else "SELL"
 
             signals.append(
@@ -81,6 +112,11 @@ class BreakoutStrategy:
                     "price": price,
                     "sl_pips": sl_pips,
                     "tp_pips": tp_pips,
+                    # pass HTF context forward (so orchestrator can feed exit_trade.update_bias)
+                    "m15_bias": signal_result.get("m15_bias"),
+                    "m5_confirm": signal_result.get("m5_confirm"),
+                    "m1_entry": signal_result.get("m1_entry"),
+                    "confidence": signal_result.get("confidence"),
                 }
             )
 
@@ -111,7 +147,7 @@ class BreakoutStrategy:
                 s["symbol"],
                 units="pips",
             )
-            # --- Minimum stop distance check (use Broker helper, avoids fallback mismatch) ---
+
             min_stop = self.broker.get_min_stop_distance(s["symbol"])
 
             if abs(s["price"] - sl_price) < min_stop:
@@ -127,7 +163,6 @@ class BreakoutStrategy:
                     if s["direction"] == "SELL"
                     else s["price"] + min_stop
                 )
-            # --- End minimum stop distance check ---
 
             final_signals.append(
                 {
@@ -138,31 +173,21 @@ class BreakoutStrategy:
                     "sl": sl_price,
                     "tp": tp_price,
                     "profit": 0,
+                    # keep HTF context (optional)
+                    "m15_bias": s.get("m15_bias"),
+                    "m5_confirm": s.get("m5_confirm"),
+                    "m1_entry": s.get("m1_entry"),
+                    "confidence": s.get("confidence"),
                 }
             )
-        print(f"Generated {len(final_signals)} trade signals")
 
+        print(f"Generated {len(final_signals)} trade signals")
         return final_signals
 
-    def _can_trade_now(self, current_time, daily_profit):
-        if daily_profit >= Config.DAILY_TARGET_PROFIT:
-            return False
-        if (
-            current_time.time() < Config.SESSION_START_TIME
-            or current_time.time() > Config.SESSION_END_TIME
-        ):
-            return False
-        return True
-
     def _mt5_timeframe(self):
-
         tf = getattr(Config, "TIMEFRAME", mt5.TIMEFRAME_M1)
-
-        # If Config.TIMEFRAME is already an MT5 constant, return it.
         if isinstance(tf, int):
             return tf
-
-        # Otherwise accept strings like "M1", "M5", etc.
         mapping = {
             "M1": mt5.TIMEFRAME_M1,
             "M5": mt5.TIMEFRAME_M5,
@@ -174,17 +199,10 @@ class BreakoutStrategy:
         return mapping.get(str(tf).upper(), mt5.TIMEFRAME_M1)
 
     def _calculate_dynamic_sl_tp(self, candles, symbol: str):
-        """
-        MarketData returns price distances (high-low). Convert to TRUE pips here.
-        """
         sl_price_dist, _tp_price_dist = self.market_data.calculate_dynamic_sl_tp(
             candles
         )
-
-        pip = self.broker.get_pip_size(symbol)  # price value of 1 pip
+        pip = self.broker.get_pip_size(symbol)
         sl_pips = float(sl_price_dist) / pip if pip else float(sl_price_dist)
-
-        # Keep broker TP far away so internal ExitTrade can do the real exiting
         tp_pips = sl_pips * 10.0
-
         return sl_pips, tp_pips

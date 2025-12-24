@@ -277,3 +277,73 @@ class Broker:
         sl_price = self._normalize_price(symbol, sl_price)
         tp_price = self._normalize_price(symbol, tp_price)
         return sl_price, tp_price
+
+    def close_position(self, ticket=None, symbol=None, side=None, volume=None):
+        """
+        Closes a position by ticket (preferred), or by symbol/side if ticket is not provided.
+        """
+        print(
+            f"Broker.close_position called: ticket={ticket}, symbol={symbol}, side={side}, volume={volume}"
+        )
+
+        if self.mode in ("demo", "backtest"):
+            # Simulate closing in demo/backtest mode
+            before = len(self.open_positions_sim)
+            if ticket is not None:
+                self.open_positions_sim = [
+                    p for p in self.open_positions_sim if p.get("ticket") != ticket
+                ]
+            elif symbol:
+                self.open_positions_sim = [
+                    p for p in self.open_positions_sim if p.get("symbol") != symbol
+                ]
+            after = len(self.open_positions_sim)
+            print(f"Simulated close: {before - after} positions closed.")
+            return True
+
+        # Live mode: use MT5
+        if ticket is None:
+            print("No ticket provided for close_position; cannot close.")
+            return False
+
+        position = None
+        positions = mt5.positions_get(ticket=ticket)
+        if positions and len(positions) > 0:
+            position = positions[0]
+        if not position:
+            print(f"No open position found for ticket {ticket}")
+            return False
+
+        symbol = symbol or position.symbol
+        volume = volume or position.volume
+        side = side or ("BUY" if position.type == mt5.POSITION_TYPE_BUY else "SELL")
+        price = (
+            mt5.symbol_info_tick(symbol).bid
+            if side == "SELL"
+            else mt5.symbol_info_tick(symbol).ask
+        )
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": mt5.ORDER_TYPE_SELL if side == "BUY" else mt5.ORDER_TYPE_BUY,
+            "position": ticket,
+            "price": price,
+            "deviation": 5,
+            "magic": 123456,
+            "comment": "Closed by Python",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(request)
+        print(f"MT5 close result for ticket {ticket}: {result}")
+        if result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
+            print(f"Position {ticket} closed successfully.")
+            return True
+        else:
+            print(
+                f"Failed to close position {ticket}: {result.retcode} {getattr(result, 'comment', '')}"
+            )
+            return False

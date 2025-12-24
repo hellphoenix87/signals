@@ -1,10 +1,12 @@
-# -- EXIT ON FIRST REVERSED TICK IF IN PROFIT + SOFT SL (MONEY / PRICE / PIPS) --
+# -- HYBRID EXIT: tick-driven protection + M1 candle-close profit-taking --
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import time
+import threading
 import MetaTrader5 as mt5
 
 from app.config.settings import Config
@@ -20,39 +22,42 @@ def create_exit_trade(
 @dataclass(frozen=True)
 class ExitTradeConfig:
     """
-    Tick-driven exit configuration.
+    Hybrid exit configuration.
 
-    Soft SL (checked first; can exit while losing):
-      - max_loss_money: account-currency loss threshold (exit when profit <= -max_loss_money)
-      - max_loss_price: raw PRICE distance from entry (e.g., EURUSD 0.00020 = 20 points)
-      - max_loss_pips: pip-based distance from entry (used if max_loss_price == 0)
+    Tick-driven (protective):
+      - optional "exit on first tick not favorable" (usually OFF)
+      - soft SL by money/price/pips
+      - early-abort (if never favorable after N ticks and adverse >= X pips)
 
-    Reversal exit:
-      - exit on first tick-to-tick reversal IF in profit (min_profit_pips threshold)
-
-    Notes:
-      - Price used is the "closeable" price: BUY closes at bid, SELL closes at ask.
-      - This strategy does NOT set broker SL/TP. It only returns ExitAction.
+    Profit-taking:
+      - either tick-based OR candle-close based (recommended with MTF entries)
+      - reversal-in-profit + anchor/buffer trailing
+      - optionally HTF-gated (blocks profit exits while HTF supports the position)
     """
 
-    buffer_pips: float = Config.EXIT_BUFFER_PIPS
-    buffer_start_tick: int = Config.EXIT_BUFFER_START_TICK
-    eps_pips: float = Config.EXIT_EPS_PIPS
+    # Trailing buffer (pips)
+    buffer_pips: float = float(getattr(Config, "EXIT_BUFFER_PIPS", 0.5) or 0.5)
+    buffer_start_tick: int = int(getattr(Config, "EXIT_BUFFER_START_TICK", 3) or 3)
+    buffer_start_candle: int = int(getattr(Config, "EXIT_BUFFER_START_CANDLE", 2) or 2)
 
-    exit_on_first_tick_not_favorable: bool = Config.EXIT_ON_FIRST_TICK_NOT_FAVORABLE
+    # Epsilon (pips) to avoid flip-flopping on equal prices
+    eps_pips: float = float(getattr(Config, "EXIT_EPS_PIPS", 0.0) or 0.0)
 
-    # Disabled in this implementation
+    # Tick-only noisy rule (normally OFF)
+    exit_on_first_tick_not_favorable: bool = bool(
+        getattr(Config, "EXIT_ON_FIRST_TICK_NOT_FAVORABLE", False)
+    )
+
+    # Disabled in this implementation (kept for compatibility)
     exit_on_first_profit_tick: bool = False
 
-    # Main rule (config-driven)
+    # Profit rule (reversal in profit)
     exit_on_first_reversal_in_profit: bool = bool(
         getattr(Config, "EXIT_ON_FIRST_REVERSAL_IN_PROFIT", True)
     )
     treat_flat_as_reversal: bool = bool(
         getattr(Config, "EXIT_TREAT_FLAT_AS_REVERSAL", False)
     )
-
-    max_unfavorable_ticks: int = 0
 
     # Soft SL controls
     max_loss_money: float = float(getattr(Config, "EXIT_MAX_LOSS_MONEY", 0.0) or 0.0)
@@ -74,6 +79,26 @@ class ExitTradeConfig:
         getattr(Config, "EXIT_SOFT_SL_MONEY_GRACE_TICKS", 0) or 0
     )
 
+    # ----------------------------
+    # Higher-timeframe gating
+    # ----------------------------
+    # If enabled, only profit-taking exits (reversal/buffer) are gated.
+    # Protective exits (soft SL / early abort) are NOT gated.
+    htf_filter_enabled: bool = bool(getattr(Config, "EXIT_HTF_FILTER_ENABLED", False))
+    htf_stale_seconds: int = int(getattr(Config, "EXIT_HTF_STALE_SECONDS", 180) or 180)
+    htf_use_m15: bool = bool(getattr(Config, "EXIT_HTF_USE_M15", True))
+    htf_use_m5: bool = bool(getattr(Config, "EXIT_HTF_USE_M5", True))
+
+    # ----------------------------
+    # Hybrid mode switches
+    # ----------------------------
+    profit_exits_on_tick: bool = bool(
+        getattr(Config, "EXIT_PROFIT_EXITS_ON_TICK", True)
+    )
+    profit_exits_on_candle_close: bool = bool(
+        getattr(Config, "EXIT_PROFIT_EXITS_ON_CANDLE_CLOSE", False)
+    )
+
 
 @dataclass
 class ExitAction:
@@ -88,24 +113,33 @@ class ExitAction:
 
 @dataclass
 class _PosState:
+    # Tick-based state
     anchor: float
-    prev_price: float  # last observed closeable price for this position (bid for buy, ask for sell)
+    prev_price: float  # last observed closeable tick price (bid for buy, ask for sell)
     ticks_seen: int = 0
     ever_favorable: bool = False
     unfavorable_ticks: int = 0
 
+    # Candle-close profit state
+    anchor_close: float = 0.0
+    prev_close: float = 0.0
+    closes_seen: int = 0
+
 
 class ExitTrade:
     """
-    Tick-driven exit logic with:
-    - optional "exit on first tick not favorable"
-    - "exit on first reversal tick if in profit"
-    - internal trailing anchor + buffer funnel (backup)
-    - soft SL by money/price/pips
+    Hybrid exit logic:
 
-    IMPORTANT:
-    - This does NOT set/modify broker SL/TP.
-    - It only decides when to exit and returns ExitAction(s).
+    - on_tick(): protective exits (soft SL / early abort). Profit exits only if profit_exits_on_tick=True.
+    - on_candle_close(): profit exits (reversal/buffer) on closed M1 candle if profit_exits_on_candle_close=True.
+
+    Improvements:
+    - Debounce/cooldown for repeated exits per ticket.
+    - Dynamic trailing buffer (ATR-based if available).
+    - Partial close support (configurable).
+    - Per-symbol min_profit_pips.
+    - Logging for exit reasons and state.
+    - Graceful handling of MT5/broker errors.
     """
 
     def __init__(
@@ -119,12 +153,98 @@ class ExitTrade:
         self._config = config or ExitTradeConfig()
         self._state_by_ticket: dict[Any, _PosState] = {}
 
+        # HTF context updated externally (orchestrator / strategy)
+        self._bias_by_symbol: dict[str, dict[str, Any]] = {}
+
+        # Improvements
+        self._last_exit_time: dict[Any, float] = {}
+        self._exit_cooldown: float = float(
+            getattr(Config, "EXIT_COOLDOWN_SECONDS", 2.0) or 2.0
+        )
+        self._partial_close_ratio: float = float(
+            getattr(Config, "EXIT_PARTIAL_CLOSE_RATIO", 1.0) or 1.0
+        )
+        self._lock = threading.Lock()
+        self._min_profit_pips_by_symbol: dict[str, float] = getattr(
+            Config, "EXIT_MIN_PROFIT_PIPS_BY_SYMBOL", {}
+        )
+
+    # -------------------------
+    # External HTF context
+    # -------------------------
+
+    def update_bias(
+        self,
+        symbol: str,
+        *,
+        m5: Optional[str] = None,
+        m15: Optional[str] = None,
+        asof_epoch: Optional[float] = None,
+    ) -> None:
+        """Store latest M5/M15 bias/confirmation for symbol."""
+        if not symbol:
+            return
+        sym = str(symbol)
+
+        row = self._bias_by_symbol.get(sym) or {}
+        if m5 is not None:
+            row["m5"] = str(m5).lower()
+        if m15 is not None:
+            row["m15"] = str(m15).lower()
+        row["ts"] = float(asof_epoch if asof_epoch is not None else time.time())
+        self._bias_by_symbol[sym] = row
+
+    def _htf_allows_profit_exit(self, *, symbol: str, position_side: str) -> bool:
+        """
+        Returns False to BLOCK profit-taking exits when HTF bias still supports the trade.
+        Protective exits should NOT use this filter.
+        """
+        if not bool(getattr(self._config, "htf_filter_enabled", False)):
+            return True
+
+        info = self._bias_by_symbol.get(str(symbol))
+        if not info:
+            return True  # no context -> don't block
+
+        # stale context -> don't block
+        ts = float(info.get("ts", 0.0) or 0.0)
+        stale_s = int(getattr(self._config, "htf_stale_seconds", 0) or 0)
+        if stale_s > 0 and (time.time() - ts) > stale_s:
+            return True
+
+        m15 = (info.get("m15") or "hold").lower()
+        m5 = (info.get("m5") or "hold").lower()
+
+        supportive = "buy" if position_side == "buy" else "sell"
+        opposing = "sell" if position_side == "buy" else "buy"
+
+        use_m15 = bool(getattr(self._config, "htf_use_m15", True))
+        use_m5 = bool(getattr(self._config, "htf_use_m5", True))
+
+        # If M15 still supports the position, block profit exits.
+        if use_m15 and m15 == supportive:
+            return False
+
+        # If M15 flipped against, allow profit exits.
+        if use_m15 and m15 == opposing:
+            return True
+
+        # If M15 is neutral/hold (or disabled), optionally require M5 opposing to allow exit.
+        if use_m5:
+            return m5 == opposing
+
+        return True
+
+    # -------------------------
+    # Public API
+    # -------------------------
+
     def on_tick(self, tick: Any) -> list[ExitAction]:
         """
-        Process a tick (or None) and return 0..N exit actions for currently open positions.
+        Process a tick (or None) and return 0..N exit actions for open positions.
 
-        IMPORTANT: We do NOT bail out when tick is None.
-        We will still evaluate each open position by polling mt5.symbol_info_tick(symbol).
+        Protective exits are always evaluated here.
+        Profit exits are evaluated here only if EXIT_PROFIT_EXITS_ON_TICK=True.
         """
         positions = self._safe_get_positions()
         if not positions:
@@ -140,18 +260,147 @@ class ExitTrade:
                 continue
             open_tickets.add(ticket)
 
-            action = self._evaluate_position(pos, tick)
-            if action is not None:
-                actions.append(action)
+            # Debounce exit actions
+            if not self._should_exit(ticket):
+                continue
+
+            try:
+                action = self._evaluate_position_on_tick(pos, tick)
+                if action is not None:
+                    self._log_exit_action(action, pos, tick)
+                    actions.append(action)
+            except Exception as exc:
+                self._log_exit_error(ticket, exc)
 
         self._prune_states(open_tickets)
         return actions
 
+    def on_candle_close(
+        self, *, symbol: str, close_price: float, asof_epoch: Optional[float] = None
+    ) -> list[ExitAction]:
+        """
+        Evaluate PROFIT exits on closed M1 candle for a symbol.
+
+        Call this once per new CLOSED M1 candle (i.e., when candle time changes).
+        """
+        _ = asof_epoch  # reserved for future logging/analytics
+        if not bool(getattr(self._config, "profit_exits_on_candle_close", False)):
+            return []
+
+        if not symbol:
+            return []
+
+        try:
+            close_px = float(close_price)
+        except Exception:
+            return []
+
+        positions = self._safe_get_positions()
+        if not positions:
+            self._state_by_ticket.clear()
+            return []
+
+        actions: list[ExitAction] = []
+        for pos in positions:
+            if str(self._pos_symbol(pos) or "") != str(symbol):
+                continue
+            ticket = self._pos_ticket(pos)
+            if ticket is None or not self._should_exit(ticket):
+                continue
+            try:
+                action = self._evaluate_position_on_candle_close(
+                    pos, close_price=close_px
+                )
+                if action is not None:
+                    self._log_exit_action(action, pos, None)
+                    actions.append(action)
+            except Exception as exc:
+                self._log_exit_error(ticket, exc)
+        return actions
+
+    # --- Debounce/cooldown for repeated exits per ticket ---
+    def _should_exit(self, ticket: Any, cooldown: Optional[float] = None) -> bool:
+        cooldown = cooldown if cooldown is not None else self._exit_cooldown
+        now = time.time()
+        last = self._last_exit_time.get(ticket, 0)
+        if now - last < cooldown:
+            return False
+        self._last_exit_time[ticket] = now
+        return True
+
+    # --- Dynamic trailing buffer (ATR-based if available) ---
+    def _dynamic_buffer(self, symbol: str, fallback_pips: float) -> float:
+        get_atr = getattr(self._broker, "get_atr", None)
+        if callable(get_atr):
+            try:
+                atr = float(get_atr(symbol, period=14))
+                if atr > 0:
+                    return atr
+            except Exception:
+                pass
+        return fallback_pips
+
+    # --- Per-symbol min_profit_pips ---
+    def _get_min_profit_pips(self, symbol: str) -> float:
+        if symbol in self._min_profit_pips_by_symbol:
+            return float(self._min_profit_pips_by_symbol[symbol])
+        return float(getattr(self._config, "min_profit_pips", 0.0) or 0.0)
+
+    # --- Partial close support ---
+    def _exit_action(
+        self,
+        *,
+        ticket: Any,
+        symbol: str,
+        position_side: str,
+        volume: float,
+        reason: str,
+    ) -> ExitAction:
+        close_side = "sell" if position_side == "buy" else "buy"
+        close_volume = float(volume) * self._partial_close_ratio
+        return ExitAction(
+            ticket=ticket,
+            symbol=symbol,
+            side=close_side,
+            volume=close_volume,
+            reason=reason,
+        )
+
+    # --- Logging for exit reasons and state ---
+    def _log_exit_action(self, action: ExitAction, position: Any, tick: Any) -> None:
+        try:
+            msg = (
+                f"[ExitTrade] EXIT: ticket={action.ticket} symbol={action.symbol} "
+                f"side={action.side} volume={action.volume} reason={action.reason} "
+                f"pos={position} tick={getattr(tick, 'time', None)}"
+            )
+            print(msg)
+        except Exception:
+            pass
+
+    def _log_exit_error(self, ticket: Any, exc: Exception) -> None:
+        try:
+            print(f"[ExitTrade] ERROR: ticket={ticket} error={exc}")
+        except Exception:
+            pass
+
+    # --- Graceful handling of MT5/broker errors ---
+    def _safe_get_positions(self):
+        getter = getattr(self._broker, "get_open_positions", None)
+        try:
+            if callable(getter):
+                return getter()
+        except Exception as exc:
+            print(f"[ExitTrade] ERROR: get_open_positions failed: {exc}")
+        return []
+
     # -------------------------
-    # Core rule implementation
+    # Tick: protective + (optional) profit exits
     # -------------------------
 
-    def _evaluate_position(self, position: Any, tick: Any) -> Optional[ExitAction]:
+    def _evaluate_position_on_tick(
+        self, position: Any, tick: Any
+    ) -> Optional[ExitAction]:
         symbol = self._pos_symbol(position)
         side = self._pos_side(position)  # position side: "buy"/"sell"
         ticket = self._pos_ticket(position)
@@ -164,7 +413,10 @@ class ExitTrade:
         # Always ensure we have the correct tick for THIS symbol.
         tick_symbol = getattr(tick, "symbol", None) if tick is not None else None
         if tick is None or (tick_symbol and str(tick_symbol) != str(symbol)):
-            tick = mt5.symbol_info_tick(symbol)
+            try:
+                tick = mt5.symbol_info_tick(symbol)
+            except Exception:
+                return None
             if tick is None:
                 return None
 
@@ -175,7 +427,6 @@ class ExitTrade:
 
         # Create/update per-ticket state first so we can apply grace logic reliably
         st = self._state_by_ticket.get(ticket)
-
         if st is None:
             favorable_now = self._is_favorable_vs_entry(
                 symbol=symbol, position_side=side, entry=entry, price=price
@@ -198,14 +449,36 @@ class ExitTrade:
                 ticks_seen=1,
                 ever_favorable=bool(favorable_now),
                 unfavorable_ticks=0 if favorable_now else 1,
+                anchor_close=0.0,
+                prev_close=0.0,
+                closes_seen=0,
             )
             self._state_by_ticket[ticket] = st
         else:
             st.ticks_seen += 1
 
+        # --- FIX: Update favorable/unfavorable bookkeeping BEFORE early-abort ---
+        min_fav_pips = float(
+            getattr(
+                self._config,
+                "early_abort_min_fav_pips",
+                getattr(Config, "EXIT_EARLY_ABORT_MIN_FAV_PIPS", 1.0),
+            )
+        )
+        pip_price = self._pips_to_price(symbol=symbol, pips=1.0) or 0.0
+        if pip_price > 0:
+            if side == "buy":
+                favorable_move = price - entry
+            else:
+                favorable_move = entry - price
+            favorable_pips = favorable_move / pip_price
+            if favorable_pips >= min_fav_pips:
+                st.ever_favorable = True
+            else:
+                if not st.ever_favorable:
+                    st.unfavorable_ticks += 1
+
         # ---- Soft stop loss (MONEY in account currency) with grace ticks ----
-        # Exit when MT5 position.profit <= -max_loss_money,
-        # but only after N ticks to avoid instant spread-trigger exits.
         max_loss_money = float(getattr(self._config, "max_loss_money", 0.0) or 0.0)
         grace = int(getattr(self._config, "soft_sl_money_grace_ticks", 0) or 0)
         if max_loss_money > 0 and (grace <= 0 or st.ticks_seen >= grace):
@@ -221,17 +494,6 @@ class ExitTrade:
                     volume=volume,
                     reason=f"max_loss_money({max_loss_money})",
                 )
-
-        # "In profit" threshold
-        min_profit_pips = float(getattr(self._config, "min_profit_pips", 0.0) or 0.0)
-        min_profit_price = (
-            self._pips_to_price(symbol=symbol, pips=min_profit_pips) or 0.0
-        )
-
-        def _net_profit_ok() -> bool:
-            if side == "buy":
-                return price > (entry + min_profit_price)
-            return price < (entry - min_profit_price)
 
         # ---- Soft stop loss (RAW PRICE distance) ----
         max_loss_price = float(getattr(self._config, "max_loss_price", 0.0) or 0.0)
@@ -291,16 +553,13 @@ class ExitTrade:
                 getattr(self._config, "early_abort_loss_pips", 0.0) or 0.0
             )
 
-            # Only consider early-abort if we've never been favorable yet (i.e., "immediately wrong" trades)
             if (not st.ever_favorable) and (st.ticks_seen >= n_ticks):
                 pip_price = self._pips_to_price(symbol=symbol, pips=1.0) or 0.0
                 if pip_price > 0:
-                    adverse = 0.0
                     if side == "buy":
                         adverse = max(0.0, float(entry) - float(price))
                     else:
                         adverse = max(0.0, float(price) - float(entry))
-
                     adverse_pips = adverse / pip_price
                     if adverse_pips >= loss_pips_th:
                         return self._exit_action(
@@ -311,7 +570,23 @@ class ExitTrade:
                             reason=f"early_abort({n_ticks}t,{loss_pips_th}p)",
                         )
 
-        # ---- Reversal-in-profit exit ----
+        # If profit exits should NOT be evaluated on tick, stop here.
+        if not bool(getattr(self._config, "profit_exits_on_tick", True)):
+            st.prev_price = float(price)
+            return None
+
+        # "In profit" threshold for profit exits (per-symbol)
+        min_profit_pips = self._get_min_profit_pips(symbol)
+        min_profit_price = (
+            self._pips_to_price(symbol=symbol, pips=min_profit_pips) or 0.0
+        )
+
+        def _net_profit_ok_tick() -> bool:
+            if side == "buy":
+                return float(price) > (float(entry) + float(min_profit_price))
+            return float(price) < (float(entry) - float(min_profit_price))
+
+        # ---- Reversal-in-profit exit (PROFIT; can be HTF-gated) ----
         if bool(getattr(self._config, "exit_on_first_reversal_in_profit", False)):
             prev = float(st.prev_price)
             if bool(getattr(self._config, "treat_flat_as_reversal", False)):
@@ -319,7 +594,11 @@ class ExitTrade:
             else:
                 reversal = (price < prev) if side == "buy" else (price > prev)
 
-            if reversal and _net_profit_ok():
+            if (
+                reversal
+                and _net_profit_ok_tick()
+                and self._htf_allows_profit_exit(symbol=symbol, position_side=side)
+            ):
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
@@ -331,30 +610,7 @@ class ExitTrade:
         # Update prev price after reversal check
         st.prev_price = float(price)
 
-        favorable_now = self._is_favorable_vs_entry(
-            symbol=symbol, position_side=side, entry=entry, price=price
-        )
-        if favorable_now:
-            st.ever_favorable = True
-        else:
-            if not st.ever_favorable:
-                st.unfavorable_ticks += 1
-
-        max_unfav = int(getattr(self._config, "max_unfavorable_ticks", 0) or 0)
-        if (
-            (max_unfav > 0)
-            and (not st.ever_favorable)
-            and (st.unfavorable_ticks >= max_unfav)
-        ):
-            return self._exit_action(
-                ticket=ticket,
-                symbol=symbol,
-                position_side=side,
-                volume=volume,
-                reason=f"max_unfavorable_ticks({max_unfav})",
-            )
-
-        # ---- Anchor update / buffer breach trailing ----
+        # ---- Anchor update / buffer breach trailing (PROFIT; can be HTF-gated) ----
         eps = self._pips_to_price(symbol=symbol, pips=self._config.eps_pips) or 0.0
         if self._is_favorable_vs_anchor(
             position_side=side, anchor=st.anchor, price=price, eps=eps
@@ -365,12 +621,18 @@ class ExitTrade:
         if st.ticks_seen < max(1, int(self._config.buffer_start_tick)):
             return None
 
-        buf = self._pips_to_price(symbol=symbol, pips=self._config.buffer_pips)
+        buf = self._pips_to_price(
+            symbol=symbol, pips=self._dynamic_buffer(symbol, self._config.buffer_pips)
+        )
         if buf is None:
             return None
 
         if side == "buy":
-            if price <= (st.anchor - buf) and _net_profit_ok():
+            if (
+                price <= (st.anchor - buf)
+                and _net_profit_ok_tick()
+                and self._htf_allows_profit_exit(symbol=symbol, position_side=side)
+            ):
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
@@ -379,7 +641,11 @@ class ExitTrade:
                     reason="buffer_breach",
                 )
         else:
-            if price >= (st.anchor + buf) and _net_profit_ok():
+            if (
+                price >= (st.anchor + buf)
+                and _net_profit_ok_tick()
+                and self._htf_allows_profit_exit(symbol=symbol, position_side=side)
+            ):
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
@@ -390,33 +656,135 @@ class ExitTrade:
 
         return None
 
-    def _exit_action(
-        self,
-        *,
-        ticket: Any,
-        symbol: str,
-        position_side: str,
-        volume: float,
-        reason: str,
-    ) -> ExitAction:
-        close_side = "sell" if position_side == "buy" else "buy"
-        return ExitAction(
-            ticket=ticket,
-            symbol=symbol,
-            side=close_side,
-            volume=float(volume),
-            reason=reason,
+    # -------------------------
+    # Candle-close: profit exits
+    # -------------------------
+
+    def _evaluate_position_on_candle_close(
+        self, position: Any, *, close_price: float
+    ) -> Optional[ExitAction]:
+        symbol = self._pos_symbol(position)
+        side = self._pos_side(position)  # "buy"/"sell"
+        ticket = self._pos_ticket(position)
+        entry = self._pos_entry(position)
+        volume = self._pos_volume(position)
+
+        if not symbol or not side or ticket is None or entry is None or volume is None:
+            return None
+
+        st = self._state_by_ticket.get(ticket)
+        if st is None:
+            st = _PosState(
+                anchor=float(close_price),
+                prev_price=float(close_price),
+                ticks_seen=0,
+                ever_favorable=False,
+                unfavorable_ticks=0,
+                anchor_close=float(close_price),
+                prev_close=float(close_price),
+                closes_seen=1,
+            )
+            self._state_by_ticket[ticket] = st
+        else:
+            if st.closes_seen <= 0:
+                st.anchor_close = float(close_price)
+                st.prev_close = float(close_price)
+                st.closes_seen = 1
+            else:
+                st.closes_seen += 1
+
+        # "In profit" threshold at candle close (per-symbol)
+        min_profit_pips = self._get_min_profit_pips(symbol)
+        min_profit_price = (
+            self._pips_to_price(symbol=symbol, pips=min_profit_pips) or 0.0
         )
+
+        def _net_profit_ok_close() -> bool:
+            if side == "buy":
+                return float(close_price) > (float(entry) + float(min_profit_price))
+            return float(close_price) < (float(entry) - float(min_profit_price))
+
+        # ---- Candle-close reversal-in-profit (PROFIT; can be HTF-gated) ----
+        if bool(getattr(self._config, "exit_on_first_reversal_in_profit", False)):
+            prev = float(st.prev_close)
+            if bool(getattr(self._config, "treat_flat_as_reversal", False)):
+                reversal = (
+                    (close_price <= prev) if side == "buy" else (close_price >= prev)
+                )
+            else:
+                reversal = (
+                    (close_price < prev) if side == "buy" else (close_price > prev)
+                )
+
+            if (
+                reversal
+                and _net_profit_ok_close()
+                and self._htf_allows_profit_exit(symbol=symbol, position_side=side)
+            ):
+                return self._exit_action(
+                    ticket=ticket,
+                    symbol=symbol,
+                    position_side=side,
+                    volume=volume,
+                    reason="candle_close_reversal_in_profit",
+                )
+
+        # Update prev close after reversal check
+        st.prev_close = float(close_price)
+
+        # ---- Candle-close anchor/buffer trailing (PROFIT; can be HTF-gated) ----
+        eps = self._pips_to_price(symbol=symbol, pips=self._config.eps_pips) or 0.0
+        if self._is_favorable_vs_anchor(
+            position_side=side,
+            anchor=st.anchor_close,
+            price=float(close_price),
+            eps=float(eps),
+        ):
+            st.anchor_close = float(close_price)
+            return None
+
+        start_n = int(getattr(self._config, "buffer_start_candle", 1) or 1)
+        if st.closes_seen < max(1, start_n):
+            return None
+
+        buf = self._pips_to_price(
+            symbol=symbol, pips=self._dynamic_buffer(symbol, self._config.buffer_pips)
+        )
+        if buf is None:
+            return None
+
+        if side == "buy":
+            if (
+                float(close_price) <= (float(st.anchor_close) - float(buf))
+                and _net_profit_ok_close()
+                and self._htf_allows_profit_exit(symbol=symbol, position_side=side)
+            ):
+                return self._exit_action(
+                    ticket=ticket,
+                    symbol=symbol,
+                    position_side=side,
+                    volume=volume,
+                    reason="candle_close_buffer_breach",
+                )
+        else:
+            if (
+                float(close_price) >= (float(st.anchor_close) + float(buf))
+                and _net_profit_ok_close()
+                and self._htf_allows_profit_exit(symbol=symbol, position_side=side)
+            ):
+                return self._exit_action(
+                    ticket=ticket,
+                    symbol=symbol,
+                    position_side=side,
+                    volume=volume,
+                    reason="candle_close_buffer_breach",
+                )
+
+        return None
 
     # -------------------------
     # Helpers: positions & ticks
     # -------------------------
-
-    def _safe_get_positions(self):
-        getter = getattr(self._broker, "get_open_positions", None)
-        if callable(getter):
-            return getter()
-        return []
 
     def _prune_states(self, open_tickets: set[Any]) -> None:
         for ticket in list(self._state_by_ticket.keys()):
@@ -441,25 +809,18 @@ class ExitTrade:
         return float(v) if v not in (None, "") else None
 
     def _pos_profit(self, position: Any) -> Optional[float]:
-        """
-        Try to read floating profit from the position object.
-        MT5 positions typically expose 'profit'.
-        """
+        """Try to read floating profit from the position object (MT5 positions expose 'profit')."""
         v = self._get_any(position, ("profit", "pnl", "floating_profit"))
         return float(v) if v not in (None, "") else None
 
     def _mt5_profit_by_ticket(self, ticket: Any) -> Optional[float]:
-        """
-        Fallback if broker position objects don't include profit.
-        """
+        """Fallback if broker position objects don't include profit."""
         if ticket is None:
             return None
         try:
-            # Most MT5 builds support ticket=...
             try:
                 positions = mt5.positions_get(ticket=ticket)
             except TypeError:
-                # Fallback for older wrappers: filter manually
                 positions = mt5.positions_get()
                 if positions:
                     positions = [
@@ -521,8 +882,8 @@ class ExitTrade:
     ) -> bool:
         eps = self._pips_to_price(symbol=symbol, pips=self._config.eps_pips) or 0.0
         if position_side == "buy":
-            return price > (entry + eps)
-        return price < (entry - eps)
+            return float(price) > (float(entry) + float(eps))
+        return float(price) < (float(entry) - float(eps))
 
     def _pips_to_price(self, *, symbol: str, pips: float) -> Optional[float]:
         get_pip_size = getattr(self._broker, "get_pip_size", None)
@@ -539,22 +900,6 @@ class ExitTrade:
             return pip_size * float(pips)
 
         return 0.0001 * float(pips)
-
-    def _get_spread(self, tick: Any) -> float:
-        if tick is None:
-            return 0.0
-        bid = getattr(tick, "bid", None)
-        ask = getattr(tick, "ask", None)
-        try:
-            if bid is None or ask is None:
-                return 0.0
-            bid_f = float(bid)
-            ask_f = float(ask)
-            if bid_f <= 0 or ask_f <= 0:
-                return 0.0
-            return max(0.0, ask_f - bid_f)
-        except Exception:
-            return 0.0
 
     def _is_favorable_vs_anchor(
         self, *, position_side: str, anchor: float, price: float, eps: float
