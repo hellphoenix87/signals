@@ -25,20 +25,22 @@ class Broker:
     # -----------------------------
 
     def place_buy(self, symbol, lot, sl, tp, price=None):
+        print(f"Broker.place_buy called: {symbol}, lot={lot}, sl={sl}, tp={tp}")
         if self.mode == "backtest":
             self._backtest_trade(symbol, "BUY", lot, sl, tp, price)
         elif self.mode == "demo":
             self._simulate_trade(symbol, "BUY", lot, sl, tp)
         else:
-            return self._mt5_place_order(symbol, "BUY", lot, sl, tp)
+            return self._mt5_place_order(symbol, "BUY", lot, sl, tp)  # live mode/
 
     def place_sell(self, symbol, lot, sl, tp, price=None):
+        print(f"Broker.place_sell called: {symbol}, lot={lot}, sl={sl}, tp={tp}")
         if self.mode == "backtest":
             self._backtest_trade(symbol, "SELL", lot, sl, tp, price)
         elif self.mode == "demo":
             self._simulate_trade(symbol, "SELL", lot, sl, tp)
         else:
-            return self._mt5_place_order(symbol, "SELL", lot, sl, tp)
+            return self._mt5_place_order(symbol, "SELL", lot, sl, tp)  # live mode/
 
     def get_open_positions(self, symbol=None):
         if self.mode in ("demo", "backtest"):

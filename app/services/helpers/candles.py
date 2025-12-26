@@ -316,3 +316,38 @@ class MultiTimeframeCandleCollector:
                 else (now_epoch + 1)
             )
             time.sleep(max(1, int(next_due - now_epoch)))
+
+
+def create_candle_collector(
+    symbol: str = "EURUSD",
+    tf_entry=None,
+    tf_confirm=None,
+    tf_bias=None,
+    count=None,
+    config: Any = Config,
+):
+    """
+    Factory: returns either single-timeframe or multi-timeframe candle collector based on config.
+    """
+    use_multi = getattr(config, "USE_MULTI_TIMEFRAME_SIGNALS", False)
+    if use_multi:
+        # Use all provided timeframes, or config defaults
+        timeframes = [tf for tf in [tf_entry, tf_confirm, tf_bias] if tf is not None]
+        if not timeframes:
+            timeframes = [
+                getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1),
+                getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5),
+                getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15),
+            ]
+        return create_multi_timeframe_candle_collector(
+            symbol=symbol,
+            timeframes=timeframes,
+            count=count,
+        )
+    else:
+        tf = tf_entry or getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+        return create_live_candle_collector(
+            symbol=symbol,
+            timeframe=tf,
+            count=count,
+        )

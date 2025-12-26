@@ -10,9 +10,9 @@ def calculate_ema(data, span: int):
 def calculate_macd(
     data,
     *,
-    fast_period: int = 12,
-    slow_period: int = 26,
-    signal_period: int = 9,
+    fast_period: int = 7,
+    slow_period: int = 16,
+    signal_period: int = 5,
     logger: logging.Logger | None = None,
 ):
     """
