@@ -1,19 +1,19 @@
-import logging
 import numpy as np
-import pandas as pd
+import logging
 
 
 def calculate_rsi(
     data,
     *,
-    period: int = 14,
+    period: int = 7,
     logger: logging.Logger | None = None,
 ):
     """
-    Pure-ish RSI:
-    - no file I/O
-    - configurable period
-    - returns numpy array aligned to input length (NaNs for warmup)
+    Fast Signal RSI (FSI) for M1 scalping + tick confirmation.
+
+    - Wilder EMA smoothing (classic RSI)
+    - Aligned to input length (NaNs for warmup)
+    - Returns np.array of RSI values
     """
     log = logger or logging.getLogger(__name__)
 
@@ -22,46 +22,43 @@ def calculate_rsi(
         if period <= 0:
             return np.array([])
 
-        if not data or len(data) < period + 1:
-            log.error(
-                "Insufficient data for RSI calculation. Need at least %s bars.",
-                period + 1,
-            )
-            return np.array([])
-
+        # Extract closes
         closes = np.array(
             [float(bar["close"]) for bar in data if bar.get("close") is not None],
             dtype=float,
         )
-
         if len(closes) < period + 1:
-            log.error("Insufficient non-null close prices for RSI calculation.")
-            return np.array([])
+            log.debug(f"Insufficient data for FSI. Need at least {period + 1} bars.")
+            return np.full(len(data), np.nan)
 
         delta = np.diff(closes)
+        gains = np.where(delta > 0, delta, 0.0)
+        losses = np.where(delta < 0, -delta, 0.0)
 
-        gains = np.maximum(delta, 0.0)
-        losses = np.maximum(-delta, 0.0)
+        # Wilder EMA
+        avg_gain = np.zeros_like(gains)
+        avg_loss = np.zeros_like(losses)
+        avg_gain[0] = np.mean(gains[:period])
+        avg_loss[0] = np.mean(losses[:period])
 
-        avg_gain = pd.Series(gains).rolling(window=period).mean().to_numpy()
-        avg_loss = pd.Series(losses).rolling(window=period).mean().to_numpy()
+        for i in range(1, len(gains)):
+            avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i]) / period
+            avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i]) / period
 
-        rs = avg_gain / (avg_loss + 1e-6)
+        rs = avg_gain / (avg_loss + 1e-8)  # avoid div-by-zero
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # Align to closes length: gains/losses length is len(closes)-1, avg_* length same
-        # We want output length == len(closes)
-        rsi_aligned = np.concatenate(([np.nan] * period, rsi[period - 1 :]))
-        # If any minor mismatch occurs, trim/pad conservatively
-        if len(rsi_aligned) > len(closes):
-            rsi_aligned = rsi_aligned[: len(closes)]
-        elif len(rsi_aligned) < len(closes):
+        # Align to original closes length
+        rsi_aligned = np.concatenate((np.full(period, np.nan), rsi[period - 1 :]))
+        if len(rsi_aligned) < len(closes):
             rsi_aligned = np.concatenate(
-                (rsi_aligned, [np.nan] * (len(closes) - len(rsi_aligned)))
+                (rsi_aligned, np.full(len(closes) - len(rsi_aligned), np.nan))
             )
+        elif len(rsi_aligned) > len(closes):
+            rsi_aligned = rsi_aligned[: len(closes)]
 
         return rsi_aligned
 
     except Exception as e:
-        log.error("Error in calculate_rsi: %s", str(e))
-        return np.array([])
+        log.error(f"Error in calculate_fsi: {e}")
+        return np.full(len(data), np.nan)

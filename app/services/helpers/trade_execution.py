@@ -69,33 +69,24 @@ class TradeExecutor:
                 print(f"Skipping signal (could not determine lot): {s!r}")
                 continue
 
-            sl = s.get("sl")
-            tp = s.get("tp")
+            # Always calculate SL/TP here using config defaults if not present
+            price = s.get("open_price") or s.get("price")
+            sl_pips = s.get("sl_pips") or getattr(Config, "DEFAULT_SL_PIPS", 5.0)
+            tp_pips = s.get("tp_pips") or getattr(Config, "DEFAULT_TP_PIPS", 50.0)
 
-            # --- Fallback: compute SL/TP from pips if not provided ---
-            if (sl is None or tp is None) and (
-                s.get("sl_pips") is not None or s.get("tp_pips") is not None
-            ):
-                price = s.get("open_price") or s.get("price")
-                direction_str = s.get("direction") or direction
-                sl_pips = s.get("sl_pips")
-                tp_pips = s.get("tp_pips")
-                if price is not None and direction_str and symbol:
-                    # Use broker's helper if available
-                    calc = getattr(self.broker, "calculate_sl_tp_prices", None)
-                    if callable(calc):
-                        sl_calc, tp_calc = calc(
-                            direction_str,
-                            price,
-                            sl_pips or 0,
-                            tp_pips or 0,
-                            symbol,
-                            units="pips",
-                        )
-                        if sl is None:
-                            sl = sl_calc
-                        if tp is None:
-                            tp = tp_calc
+            calc = getattr(self.broker, "calculate_sl_tp_prices", None)
+            if callable(calc) and price is not None:
+                sl, tp = calc(
+                    direction,
+                    price,
+                    sl_pips,
+                    tp_pips,
+                    symbol,
+                    units="pips",
+                )
+            else:
+                sl = None
+                tp = None
 
             any_actionable = True
             print(f"Executing trade: {symbol} {direction} lot={lot} sl={sl} tp={tp}")

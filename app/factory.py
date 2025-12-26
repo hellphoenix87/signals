@@ -4,14 +4,12 @@ from app.execution.mode import TradingMode as Mode
 from app.risk.risk_manager import create_risk_manager
 from app.execution.broker import create_broker
 from app.services.helpers.trade_execution import create_trade_executor
-from app.services.helpers.candles import create_multi_timeframe_candle_collector
+from app.services.helpers.candles import create_candle_collector
 from app.services.trade_services import create_orchestrator
 from app.services.helpers.tick_collector import create_tick_collector
-from app.strategies.exit_trade import create_exit_trade
-from app.services.helpers.signal_generation import (
-    create_strong_signal_strategy,
-    create_multi_timeframe_signal_strategy,
-)
+from app.strategies.enter.enter_trade import create_enter_trade
+from app.strategies.exit.exit_trade import create_exit_trade
+from app.services.helpers.signal_generation import create_signal_strategy
 import MetaTrader5 as mt5
 
 md = create_market_data()
@@ -23,23 +21,21 @@ tf_confirm = int(getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5))
 tf_bias = int(getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15))
 
 trade_executor = create_trade_executor(rm, br, md)
-base = create_strong_signal_strategy(config=Config)
+enter_trade = create_enter_trade(md, rm, br, trade_executor)  # <-- Wire TradeExecutor
 
 orchestrators = {}
 for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
-    collector = create_multi_timeframe_candle_collector(
+    collector = create_candle_collector(
         symbol=symbol,
-        timeframes=[tf_entry, tf_confirm, tf_bias],
+        tf_entry=tf_entry,
+        tf_confirm=tf_confirm,
+        tf_bias=tf_bias,
         count=int(Config.MIN_CANDLES_FOR_INDICATORS) + 1,
+        config=Config,
     )
     tick = create_tick_collector(symbol=symbol, interval=1)
     exit_trade = create_exit_trade(broker=br, risk_manager=rm)
-    signal_generator = create_multi_timeframe_signal_strategy(
-        base=base,
-        tf_bias=tf_bias,
-        tf_confirm=tf_confirm,
-        tf_entry=tf_entry,
-    )
+    signal_generator = create_signal_strategy(config=Config)
     orchestrator = create_orchestrator(
         collector=collector,
         signal_generator=signal_generator,
@@ -47,6 +43,7 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
         tick_collector=tick,
         exit_trade=exit_trade,
         broker=br,
+        enter_trade=enter_trade,
     )
     orchestrators[symbol] = orchestrator
 

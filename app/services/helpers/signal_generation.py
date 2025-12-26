@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime
 
@@ -10,6 +11,48 @@ from app.utils.configure_logging import logger as default_logger
 from app.signals.sma_crossover import generate_sma_signal as default_sma_fn
 from app.signals.macd import calculate_macd as default_macd_fn
 from app.signals.rsi import calculate_rsi as default_rsi_fn
+
+
+def create_signal_strategy(
+    config: Any = Config,
+    logger: Any = default_logger,
+    sma_fn: Callable[[List[dict]], Any] = default_sma_fn,
+    macd_fn: Callable[[List[dict]], dict] = default_macd_fn,
+    rsi_fn: Callable[[List[dict]], Any] = default_rsi_fn,
+    log_file: Optional[str] = None,
+    min_candles: Optional[int] = None,
+):
+    """
+    Factory: returns either single-timeframe or multi-timeframe strategy based on config.
+    Optionally wraps with n-tick confirmation if enabled in config.
+    """
+    use_multi = getattr(config, "USE_MULTI_TIMEFRAME_SIGNALS", False)
+    use_n_tick = getattr(config, "USE_N_TICK_CONFIRMATION", False)
+    n_ticks = int(getattr(config, "N_TICK_CONFIRMATION", 0) or 0)
+
+    base = StrongSignalStrategy(
+        config=config,
+        logger=logger,
+        sma_fn=sma_fn,
+        macd_fn=macd_fn,
+        rsi_fn=rsi_fn,
+        log_file=log_file,
+        min_candles=min_candles,
+    )
+    if use_multi:
+        tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15)
+        tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
+        tf_entry = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+        strategy = MultiTimeframeStrongSignalStrategy(
+            base=base, tf_bias=tf_bias, tf_confirm=tf_confirm, tf_entry=tf_entry
+        )
+    else:
+        strategy = base
+
+    if use_n_tick and n_ticks > 1:
+        strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks)
+
+    return strategy
 
 
 def create_strong_signal_strategy(
@@ -247,7 +290,7 @@ class StrongSignalStrategy:
     # -----------------------
 
     def generate_signal(
-        self, candles: List[dict], *, apply_entry_filters: bool = True
+        self, candles: List[dict], *, apply_entry_filters: bool = False
     ) -> dict:
         try:
             if not candles or len(candles) < self.min_candles:
@@ -508,3 +551,201 @@ class MultiTimeframeStrongSignalStrategy:
         was_below = any(c < sma20 for c in closes[-25:-20])
         now_above = closes[-1] > sma20
         return was_below and now_above
+
+
+class NTickConfirmedSignalStrategy:
+    """
+    Wraps a base signal strategy to add n-tick confirmation logic.
+    - Only returns actionable buy/sell signals after n consecutive favorable (or unfavorable) ticks.
+    - Orchestrator should call generate_signal only on new closed candles.
+    - All tick logic is handled internally via on_new_tick.
+    """
+
+    def __init__(
+        self,
+        base_strategy,
+        n_ticks=3,
+        min_pip_move=0.0,
+        max_spread_points=None,
+        liquidity_check_after_ntick=None,
+        config=None,
+        logger=None,
+    ):
+        self.base = base_strategy
+        self.n_ticks = n_ticks
+        self.min_pip_move = min_pip_move
+        self.max_spread_points = max_spread_points
+        self.config = config
+        self.logger = logger or getattr(base_strategy, "logger", None)
+        if config is not None and hasattr(config, "LIQUIDITY_CHECK_AFTER_NTICK"):
+            self.liquidity_check_after_ntick = bool(
+                getattr(config, "LIQUIDITY_CHECK_AFTER_NTICK")
+            )
+        elif liquidity_check_after_ntick is not None:
+            self.liquidity_check_after_ntick = bool(liquidity_check_after_ntick)
+        else:
+            self.liquidity_check_after_ntick = True
+
+        self._pending_signal = None
+        self._pending_entry_price = None
+        self._tick_results = []
+        self._waiting = False
+        self._last_signal = None
+        self._last_m1_signal_id = None
+        self._confirmed_signal = None
+
+    def on_new_tick(self, price: float, spread_points: Optional[float] = None):
+        """
+        Called on every tick. Handles n-tick confirmation logic.
+        """
+        if not self._waiting or self._pending_signal not in ("buy", "sell"):
+            return
+
+        if self.logger:
+            self.logger.info(
+                f"[NTick] on_new_tick: price={price}, spread_points={spread_points}, waiting={self._waiting}, pending_signal={self._pending_signal}"
+            )
+
+        # Optional spread filter (before tick confirmation)
+        if not self.liquidity_check_after_ntick:
+            if self.max_spread_points is not None and spread_points is not None:
+                if spread_points > self.max_spread_points:
+                    self._tick_results = []
+                    if self.logger:
+                        self.logger.info(
+                            f"[NTick] Spread too high: {spread_points}, resetting tick results."
+                        )
+                    return
+
+        # Determine if tick is favorable
+        favorable = False
+        if self._pending_signal == "buy":
+            favorable = price > (self._pending_entry_price or 0) + self.min_pip_move
+        elif self._pending_signal == "sell":
+            favorable = price < (self._pending_entry_price or 0) - self.min_pip_move
+
+        self._tick_results.append(favorable)
+        if len(self._tick_results) > self.n_ticks:
+            self._tick_results.pop(0)
+
+        if self.logger:
+            self.logger.info(
+                f"[NTick] Tick: price={price}, entry_price={self._pending_entry_price}, favorable={favorable}, tick_results={self._tick_results}"
+            )
+
+        if len(self._tick_results) == self.n_ticks:
+            all_fav = all(self._tick_results)
+            all_unfav = not any(self._tick_results)
+            if all_fav:
+                if self.logger:
+                    self.logger.info(
+                        f"[NTick] {self.n_ticks} consecutive favorable ticks: confirming {self._pending_signal}."
+                    )
+                self._confirmed_signal = {
+                    **(self._last_signal or {}),
+                    "final_signal": self._pending_signal,
+                    "reason": f"{self.n_ticks}_consecutive_favorable_ticks",
+                }
+                self._reset()
+            elif all_unfav:
+                opposite = "sell" if self._pending_signal == "buy" else "buy"
+                if self.logger:
+                    self.logger.info(
+                        f"[NTick] {self.n_ticks} consecutive unfavorable ticks: confirming {opposite}."
+                    )
+                self._confirmed_signal = {
+                    **(self._last_signal or {}),
+                    "final_signal": opposite,
+                    "reason": f"{self.n_ticks}_consecutive_unfavorable_ticks_opposite_trade",
+                }
+                self._reset()
+            else:
+                if self.logger:
+                    self.logger.info(
+                        f"[NTick] Mixed ticks, clearing counter and continuing n-tick confirmation."
+                    )
+                self._tick_results = []
+
+    def generate_signal(self, candles: list[dict], *args, **kwargs):
+        """
+        Called on each new closed candle by the orchestrator.
+        Returns a buffered confirmed signal if n-tick confirmation was achieved since the last candle,
+        otherwise returns a hold signal.
+        """
+        if self.logger:
+            self.logger.info(
+                f"[NTick] generate_signal called. Confirmed signal buffer: {self._confirmed_signal}"
+            )
+
+        # 1. Return buffered confirmed signal if present
+        if self._confirmed_signal is not None:
+            sig = self._confirmed_signal
+            self._confirmed_signal = None
+            return sig
+
+        # 2. Get base signal for this candle
+        signal = self.base.generate_signal(candles, *args, **kwargs)
+        raw_signal = signal.get("final_signal", "hold")
+        last_candle = candles[-1] if candles else None
+        last_close = last_candle.get("close") if last_candle else None
+        m1_signal_id = last_candle.get("time") if last_candle else None
+        spread_points = last_candle.get("spread_points") if last_candle else None
+
+        # 3. Hard reset on new M1 candle
+        if m1_signal_id != self._last_m1_signal_id:
+            if self.logger:
+                self.logger.info(
+                    f"[NTick] Hard reset on new M1 signal: {m1_signal_id} (was {self._last_m1_signal_id})"
+                )
+            self._reset()
+            self._last_m1_signal_id = m1_signal_id
+
+        # 4. Start n-tick confirmation if new buy/sell signal
+        if raw_signal in ("buy", "sell") and self._pending_signal != raw_signal:
+            self._pending_signal = raw_signal
+            self._pending_entry_price = last_close
+            self._tick_results = []
+            self._waiting = True
+            self._last_signal = signal
+            if self.logger:
+                self.logger.info(
+                    f"[NTick] New pending signal: {raw_signal}, entry_price={last_close}, waiting for {self.n_ticks} ticks."
+                )
+            return {
+                **signal,
+                "final_signal": "hold",
+                "reason": f"waiting_for_{self.n_ticks}_tick_confirmation",
+            }
+
+        # 5. If n-tick confirmation is running, but not yet confirmed, keep returning hold
+        if self._waiting:
+            return {
+                **signal,
+                "final_signal": "hold",
+                "reason": f"waiting_for_{self.n_ticks}_tick_confirmation",
+            }
+
+        # 6. If no actionable signal, or after reset
+        if raw_signal not in ("buy", "sell"):
+            if self.logger:
+                self.logger.info(f"[NTick] Raw signal not buy/sell, resetting.")
+            self._reset()
+        return {
+            **signal,
+            "final_signal": "hold",
+            "reason": "waiting_for_tick_confirmation",
+        }
+
+    def get_confirmed_signal(self):
+        sig = self._confirmed_signal
+        self._confirmed_signal = None
+        return sig
+
+    def _reset(self):
+        if self.logger:
+            self.logger.info(f"[NTick] Resetting internal state.")
+        self._pending_signal = None
+        self._pending_entry_price = None
+        self._tick_results = []
+        self._waiting = False
+        self._last_signal = None
