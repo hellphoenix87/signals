@@ -81,3 +81,10 @@ def pos_volume(position):
 def pos_profit(position):
     v = get_any(position, ("profit", "pnl", "floating_profit"))
     return float(v) if v not in (None, "") else None
+
+
+def is_break_even(position) -> bool:
+    profit = getattr(position, "profit", None)
+    if profit is None:
+        profit = 0.0
+    return profit >= 0.0

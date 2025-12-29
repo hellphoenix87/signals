@@ -1,5 +1,6 @@
 from app.strategies.exit.exit_shared import (
     PosState,
+    is_break_even,
     pos_entry,
     pos_side,
     pos_symbol,
@@ -82,9 +83,7 @@ class ProfitExitManager:
             be_distance * pip_value if side == "buy" else -be_distance * pip_value
         )
         if not getattr(state, "be_armed", False):
-            if (side == "buy" and price >= be_price) or (
-                side == "sell" and price <= be_price
-            ):
+            if is_break_even(position):
                 state.be_armed = True
                 state.be_armed_tick = state.ticks_seen
                 state.be_armed_price = price
@@ -94,17 +93,14 @@ class ProfitExitManager:
                 return None
 
         # --- Stale Trade Before Trailing ---
-        trail_start_distance = float(getattr(self.config, "trail_start_pips", 6.0))
-        trail_start_price = float(entry) + (
-            trail_start_distance * pip_value
-            if side == "buy"
-            else -trail_start_distance * pip_value
-        )
+        profit = getattr(position, "profit", None)
+        if profit is None:
+            profit = 0.0
+
         if not getattr(state, "trailing_active", False):
             stale_tick_limit = int(getattr(self.config, "stale_tick_limit", 20))
-            if (side == "buy" and price < trail_start_price) or (
-                side == "sell" and price > trail_start_price
-            ):
+            # Use profit threshold instead of pip-based price movement
+            if profit < 0.05:
                 state.stale_ticks = getattr(state, "stale_ticks", 0) + 1
                 if state.stale_ticks >= stale_tick_limit:
                     return self._exit_action(
@@ -122,78 +118,49 @@ class ProfitExitManager:
                 state.best_price = price
                 state.trailing_start_tick = state.ticks_seen
 
-        # --- Trailing Logic ---
-        if not hasattr(state, "best_price"):
-            state.best_price = price
-        if (side == "buy" and price > state.best_price) or (
-            side == "sell" and price < state.best_price
-        ):
-            state.best_price = price
+        # --- Trailing Logic: Profit-based trailing with breach and timeout ---
+        profit = getattr(position, "profit", None)
+        if profit is None:
+            profit = 0.0
 
-        trail_distance = float(getattr(self.config, "trail_distance_pips", 6.0))
-        trail_buffer = float(getattr(self.config, "buffer_pips", 2.0))
-        trailing_stop = (
-            state.best_price - (trail_distance * pip_value)
-            if side == "buy"
-            else state.best_price + (trail_distance * pip_value)
-        )
-        buffer_zone = (
-            state.best_price - ((trail_distance - trail_buffer) * pip_value)
-            if side == "buy"
-            else state.best_price + ((trail_distance - trail_buffer) * pip_value)
-        )
+        # Track the best profit seen so far
+        if not hasattr(state, "best_profit"):
+            state.best_profit = profit
+            state.breach_ticks = 0
 
-        # --- Buffer Zone ---
-        if (side == "buy" and buffer_zone >= price > trailing_stop) or (
-            side == "sell" and buffer_zone <= price < trailing_stop
-        ):
-            state.buffer_ticks = getattr(state, "buffer_ticks", 0) + 1
-            buffer_tick_limit = int(getattr(self.config, "buffer_tick_limit", 10))
-            if state.buffer_ticks >= buffer_tick_limit:
+        if profit > state.best_profit:
+            state.best_profit = profit
+            state.breach_ticks = 0
+
+        breach_threshold = 0.05  # Immediate exit if breached by more than $0.05
+        breach_tick_limit = 5  # Wait up to 5 ticks for recovery
+
+        if profit < state.best_profit:
+            # Immediate exit if breach is too large
+            if state.best_profit - profit > breach_threshold:
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
                     position_side=side,
                     volume=volume,
-                    reason="stale_in_buffer_zone",
+                    reason="trailing_breach_gt_5c",
                 )
-            state.prev_price = float(price)
-            state.ticks_seen += 1
-            return None
+            # Start or increment breach tick countdown
+            state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
+            # If profit recovers, reset countdown
+            if profit >= state.best_profit:
+                state.breach_ticks = 0
+            # Exit if breach lasts too long
+            elif state.breach_ticks >= breach_tick_limit:
+                return self._exit_action(
+                    ticket=ticket,
+                    symbol=symbol,
+                    position_side=side,
+                    volume=volume,
+                    reason="trailing_breach_timeout",
+                )
         else:
-            state.buffer_ticks = 0
-
-        # --- Trailing Stop Breach ---
-        if (side == "buy" and price <= trailing_stop) or (
-            side == "sell" and price >= trailing_stop
-        ):
-            return self._exit_action(
-                ticket=ticket,
-                symbol=symbol,
-                position_side=side,
-                volume=volume,
-                reason="trailing_stop_breach",
-            )
-
-        # --- Deep Reversal Guard ---
-        extra_reversal_guard_pips = float(
-            getattr(self.config, "extra_reversal_guard_pips", 2.0)
-        )
-        reversal_guard = (
-            trailing_stop - (extra_reversal_guard_pips * pip_value)
-            if side == "buy"
-            else trailing_stop + (extra_reversal_guard_pips * pip_value)
-        )
-        if (side == "buy" and price <= reversal_guard) or (
-            side == "sell" and price >= reversal_guard
-        ):
-            return self._exit_action(
-                ticket=ticket,
-                symbol=symbol,
-                position_side=side,
-                volume=volume,
-                reason="deep_reversal_guard_exit",
-            )
+            state.breach_ticks = 0  # No breach, reset
 
         state.prev_price = float(price)
         state.ticks_seen += 1

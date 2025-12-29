@@ -41,7 +41,7 @@ class Config:
 
     # --- Break-even arming ---
     EXIT_BE_DISTANCE_PIPS: float = 0.5
-    EXIT_BE_ARMING_TICKS: int = 10
+    EXIT_BE_ARMING_TICKS: int = 30
 
     # --- Profit management (tick-driven trailing only) ---
     EXIT_MIN_PROFIT_PIPS: float = 0.0
@@ -93,7 +93,7 @@ class Config:
     USE_MULTI_TIMEFRAME_SIGNALS = False
 
     USE_N_TICK_CONFIRMATION = True
-    N_TICK_CONFIRMATION = 3
+    N_TICK_CONFIRMATION = 10
 
     MAGIC_NUMBER: int = 123456
     MAX_DEVIATION: int = 5

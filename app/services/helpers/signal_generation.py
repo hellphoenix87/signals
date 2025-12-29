@@ -647,18 +647,7 @@ class NTickConfirmedSignalStrategy:
                     "reason": f"{self.n_ticks}_consecutive_favorable_ticks",
                 }
                 self._reset()
-            elif all_unfav:
-                opposite = "sell" if self._pending_signal == "buy" else "buy"
-                if self.logger:
-                    self.logger.info(
-                        f"[NTick] {self.n_ticks} consecutive unfavorable ticks: confirming {opposite}."
-                    )
-                self._confirmed_signal = {
-                    **(self._last_signal or {}),
-                    "final_signal": opposite,
-                    "reason": f"{self.n_ticks}_consecutive_unfavorable_ticks_opposite_trade",
-                }
-                self._reset()
+
             else:
                 if self.logger:
                     self.logger.info(

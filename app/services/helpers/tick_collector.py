@@ -44,11 +44,14 @@ class TickCollector:
             self._thread.join()
 
     def _collect(self):
+        last_tick_time = None
         while self._running:
             try:
                 tick = mt5.symbol_info_tick(self.symbol)
                 if tick and self.on_tick:
-                    self.on_tick(tick)
+                    if tick.time != last_tick_time:
+                        self.on_tick(tick)
+                        last_tick_time = tick.time
             except Exception as e:
                 print(f"[TickCollector] Error fetching tick: {e}")
             time.sleep(self.interval)
