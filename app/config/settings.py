@@ -10,8 +10,8 @@ class Config:
     # === Timeframes (system + MTF signal gating) ===
     TIMEFRAME = mt5.TIMEFRAME_M1
     TF_ENTRY = mt5.TIMEFRAME_M1
-    TF_CONFIRM = mt5.TIMEFRAME_M5
-    TF_BIAS = mt5.TIMEFRAME_M15
+    TF_CONFIRM = mt5.TIMEFRAME_M1
+    TF_BIAS = mt5.TIMEFRAME_M5
 
     # === Daily limits ===
     DAILY_TARGET_PROFIT = 200
@@ -41,7 +41,7 @@ class Config:
 
     # --- Break-even arming ---
     EXIT_BE_DISTANCE_PIPS: float = 0.5
-    EXIT_BE_ARMING_TICKS: int = 30
+    EXIT_BE_ARMING_TICKS: int = 3
 
     # --- Profit management (tick-driven trailing only) ---
     EXIT_MIN_PROFIT_PIPS: float = 0.0
@@ -90,10 +90,10 @@ class Config:
     # Enable liquidity check after n-tick confirmation (recommended: True)
     LIQUIDITY_CHECK_AFTER_NTICK = True
 
-    USE_MULTI_TIMEFRAME_SIGNALS = False
+    USE_MULTI_TIMEFRAME_SIGNALS = True
 
     USE_N_TICK_CONFIRMATION = True
-    N_TICK_CONFIRMATION = 10
+    N_TICK_CONFIRMATION = 1
 
     MAGIC_NUMBER: int = 123456
     MAX_DEVIATION: int = 5

@@ -47,8 +47,8 @@ class LossExitManager:
         if profit is None:
             profit = 0.0
 
-        be_arming_ticks = int(getattr(self.config, "EXIT_BE_ARMING_TICKS", 20))
-        drop_profit = -0.1  # Exit if profit drops to -0.10 or lower
+        be_arming_ticks = int(getattr(self.config, "EXIT_BE_ARMING_TICKS", 5))
+        drop_profit = -0.07  # Exit if profit drops to -0.07 or lower
 
         # State init
         if not hasattr(state, "be_armed"):
@@ -56,8 +56,15 @@ class LossExitManager:
             state.be_arming_ticks = 0
             state.was_unprofitable_after_be = False
             state.was_profitable_after_unprofit = False
+            state.last_profit = profit  # Track last profit for direction
 
-        # 1. During first N ticks, exit if profit drops to -0.20 or lower
+        # --- Reset arming ticks if profit moves in favorable direction ---
+        if not state.be_armed and hasattr(state, "last_profit"):
+            if profit > state.last_profit:
+                state.be_arming_ticks = 0
+        state.last_profit = profit
+
+        # 1. During first N ticks, exit if profit drops to -0.07 or lower
         if not state.be_armed and state.be_arming_ticks < be_arming_ticks:
             state.be_arming_ticks += 1
 
@@ -89,14 +96,14 @@ class LossExitManager:
         # 2. After BE is reached
         if state.be_armed:
             drop_profit_after_be = (
-                -0.05
-            )  # Exit if profit drops to -0.10 or lower after BE
+                -0.01
+            )  # Exit if profit drops to -0.05 or lower after BE
             # Track if profit moves to unprofit after BE
             if profit < 0.0:
                 if not state.was_unprofitable_after_be:
                     state.was_unprofitable_after_be = True
                     state.unprofit_profit = profit
-                # If profit drops to -0.10 or lower after BE, exit
+                # If profit drops to -0.05 or lower after BE, exit
                 if profit <= drop_profit_after_be:
                     return self._exit_action(
                         ticket=ticket,

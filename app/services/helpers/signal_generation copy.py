@@ -40,21 +40,17 @@ def create_signal_strategy(
         min_candles=min_candles,
     )
     if use_multi:
-        tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M5)
-        tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M1)
-
-        strategy = M5BiasM1DirectionNTickEntryStrategy(
-            base_strategy=base,
-            tf_bias=tf_bias,
-            tf_confirm=tf_confirm,
-            n_ticks=n_ticks,
-            logger=logger,
+        tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15)
+        tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
+        tf_entry = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+        strategy = MultiTimeframeStrongSignalStrategy(
+            base=base, tf_bias=tf_bias, tf_confirm=tf_confirm, tf_entry=tf_entry
         )
     else:
         strategy = base
 
     if use_n_tick and n_ticks > 1:
-        strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks)
+        strategy = NTickSignalStrategy(strategy, n_ticks=n_ticks)
 
     return strategy
 
@@ -744,23 +740,39 @@ class NTickConfirmedSignalStrategy:
         self._last_signal = None
 
 
-class M5BiasM1DirectionNTickEntryStrategy:
+class NTickSignalStrategy:
+    """
+    Tick-only strategy: returns buy/sell after n consecutive favorable ticks.
+    Uses base strategy only for symbol extraction.
+    """
+
     def __init__(
         self,
-        base_strategy,
-        tf_bias=mt5.TIMEFRAME_M5,
-        tf_confirm=mt5.TIMEFRAME_M1,
+        base_strategy=None,
         n_ticks=3,
+        min_pip_move=0.0,
+        max_spread_points=None,
+        liquidity_check_after_ntick=None,
+        config=None,
         logger=None,
     ):
         self.base = base_strategy
-        self.tf_bias = tf_bias
-        self.tf_confirm = tf_confirm
         self.n_ticks = n_ticks
+        self.min_pip_move = min_pip_move
+        self.max_spread_points = max_spread_points
+        self.config = config or getattr(base_strategy, "config", Config)
         self.logger = logger or getattr(base_strategy, "logger", None)
+        if config is not None and hasattr(config, "LIQUIDITY_CHECK_AFTER_NTICK"):
+            self.liquidity_check_after_ntick = bool(
+                getattr(config, "LIQUIDITY_CHECK_AFTER_NTICK")
+            )
+        elif liquidity_check_after_ntick is not None:
+            self.liquidity_check_after_ntick = bool(liquidity_check_after_ntick)
+        else:
+            self.liquidity_check_after_ntick = True
+
         self._tick_results = []
         self._last_price = None
-        self._pending_signal = None
         self._confirmed_signal = None
         self._symbol = None
 
@@ -770,58 +782,60 @@ class M5BiasM1DirectionNTickEntryStrategy:
         spread_points: Optional[float] = None,
         symbol: Optional[str] = None,
     ):
+        # Accept symbol from tick, fallback to base strategy's config
         if symbol:
             self._symbol = symbol
+        elif (
+            self.base
+            and hasattr(self.base, "config")
+            and hasattr(self.base.config, "SYMBOLS")
+        ):
+            self._symbol = self.base.config.SYMBOLS[0]
 
-        if self._pending_signal in ("buy", "sell"):
-            if self._last_price is not None:
-                favorable = (
-                    price > self._last_price
-                    if self._pending_signal == "buy"
-                    else price < self._last_price
-                )
-                self._tick_results.append(favorable)
-                if len(self._tick_results) > self.n_ticks:
-                    self._tick_results.pop(0)
+        if self._last_price is not None:
+            direction = None
+            if price > self._last_price:
+                direction = "up"
+            elif price < self._last_price:
+                direction = "down"
+            else:
+                direction = "flat"
+            self._tick_results.append(direction)
+            if len(self._tick_results) > self.n_ticks:
+                self._tick_results.pop(0)
 
-                if all(self._tick_results[-self.n_ticks :]):
-                    self._confirmed_signal = {
-                        "final_signal": self._pending_signal,
-                        "reason": f"{self.n_ticks}_consecutive_favorable_ticks",
-                        "symbol": self._symbol,
-                    }
-                    self._pending_signal = None
-                    self._tick_results = []
+            signal = "hold"
+            if all(d == "up" for d in self._tick_results[-self.n_ticks :]):
+                signal = "buy"
+            elif all(d == "down" for d in self._tick_results[-self.n_ticks :]):
+                signal = "sell"
+
+            if signal in ("buy", "sell"):
+                self._confirmed_signal = {
+                    "final_signal": signal,
+                    "reason": f"{self.n_ticks}_consecutive_{signal}_ticks",
+                    "symbol": self._symbol,
+                }
 
         self._last_price = price
 
-    def generate_signal(self, candles_by_tf: Dict[int, List[dict]]) -> dict:
-        # Expect candles_by_tf: {mt5.TIMEFRAME_M5: [...], mt5.TIMEFRAME_M1: [...]}
-        m5_candles = candles_by_tf.get(self.tf_bias, [])
-        m1_candles = candles_by_tf.get(self.tf_confirm, [])
+    def generate_signal(self, candles: list[dict], *args, **kwargs):
+        # Use base strategy to extract symbol if available
+        if self.base and hasattr(self.base, "_resolve_symbol"):
+            self._symbol = self.base._resolve_symbol(candles)
+        elif candles and isinstance(candles[-1], dict):
+            self._symbol = candles[-1].get("symbol") or (
+                self.config.SYMBOLS[0]
+                if self.config and hasattr(self.config, "SYMBOLS")
+                else None
+            )
+        else:
+            self._symbol = (
+                self.config.SYMBOLS[0]
+                if self.config and hasattr(self.config, "SYMBOLS")
+                else None
+            )
 
-        bias_signal = self.base.generate_signal(m5_candles, apply_entry_filters=False)
-        direction_signal = self.base.generate_signal(
-            m1_candles, apply_entry_filters=True
-        )
-
-        bias = bias_signal.get("final_signal", "hold")
-        direction = direction_signal.get("final_signal", "hold")
-        symbol = direction_signal.get("symbol") or bias_signal.get("symbol")
-
-        # Only start n-tick confirmation if bias and direction agree and are actionable
-        if bias in ("buy", "sell") and direction == bias:
-            self._pending_signal = bias
-            self._symbol = symbol
-            # Return hold until n-tick confirmation
-            return {
-                "final_signal": "hold",
-                "raw_signal": bias,
-                "symbol": symbol,
-                "reason": f"waiting_for_{self.n_ticks}_tick_confirmation",
-            }
-
-        # If n-tick confirmation is done, return confirmed signal
         if self._confirmed_signal is not None:
             sig = self._confirmed_signal
             self._confirmed_signal = None
@@ -829,7 +843,11 @@ class M5BiasM1DirectionNTickEntryStrategy:
 
         return {
             "final_signal": "hold",
-            "raw_signal": bias,
-            "symbol": symbol,
-            "reason": "bias_direction_disagree_or_waiting",
+            "reason": "waiting_for_tick_confirmation",
+            "symbol": self._symbol,
         }
+
+    def get_confirmed_signal(self):
+        sig = self._confirmed_signal
+        self._confirmed_signal = None
+        return sig

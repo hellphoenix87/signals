@@ -132,8 +132,8 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        breach_threshold = 0.05  # Immediate exit if breached by more than $0.05
-        breach_tick_limit = 5  # Wait up to 5 ticks for recovery
+        breach_threshold = 0.02  # Immediate exit if breached by more than $0.02
+        breach_tick_limit = 3  # Wait up to 5 ticks for recovery
 
         if profit < state.best_profit:
             # Immediate exit if breach is too large
