@@ -176,7 +176,7 @@ class TradeExecutor:
                 except Exception:
                     pass
 
-        return 0.01
+        return 1
 
     # -------------------------
     # Exit execution (used by hybrid ExitTrade)

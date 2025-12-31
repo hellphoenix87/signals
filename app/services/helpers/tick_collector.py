@@ -12,7 +12,7 @@ def create_tick_collector(symbol="EURUSD", interval=1, on_tick=None):
 
 
 class TickCollector:
-    def __init__(self, symbol="EURUSD", interval=1, on_tick=None):
+    def __init__(self, symbol="EURUSD", interval=0.1, on_tick=None):
         self.symbol = symbol
         self.interval = interval  # seconds
         self.on_tick = on_tick  # callback: function(tick)

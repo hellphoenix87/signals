@@ -25,22 +25,6 @@ def create_live_candle_collector(
     )
 
 
-# NEW
-def create_multi_timeframe_candle_collector(
-    symbol: str = "EURUSD",
-    timeframes=None,
-    count=None,
-):
-    """
-    Provider for DI wiring of MultiTimeframeCandleCollector.
-    """
-    return MultiTimeframeCandleCollector(
-        symbol=symbol,
-        timeframes=timeframes,
-        count=count,
-    )
-
-
 class LiveCandleCollector:
     def __init__(self, symbol="EURUSD", timeframe=None, count=None, interval=None):
         self.symbol = symbol
@@ -77,7 +61,6 @@ class LiveCandleCollector:
             return list(self.latest_candles)
 
     def _timeframe_seconds(self) -> int:
-        # Minimal mapping; extend if you use other timeframes.
         tf = self.timeframe
         mapping = {
             mt5.TIMEFRAME_M1: 60,
@@ -89,43 +72,69 @@ class LiveCandleCollector:
         return int(mapping.get(tf, self.interval or 60))
 
     def _collect(self):
-        last_candle_time = None
         tf_seconds = self._timeframe_seconds()
+        last_candle_time = None
+
+        # Initial pull: get full window
+        try:
+            candles = self.market_data.get_historical_candles(
+                self.symbol,
+                timeframe=self.timeframe,
+                start_pos=1,
+                count=self.count,
+                verbose=False,
+            )
+            with self._lock:
+                self.latest_candles = candles
+            if candles:
+                last_candle_time = candles[-1]["time"]
+                print(
+                    f"[{self.symbol}] Initial candle window: {last_candle_time} (count={len(candles)})"
+                )
+        except Exception as e:
+            print(f"[LiveCandleCollector] Error fetching initial candles: {e}")
 
         while self._running:
             try:
-                candles = self.market_data.get_historical_candles(
-                    self.symbol,
-                    timeframe=self.timeframe,
-                    start_pos=1,
-                    count=self.count,
-                    verbose=False,
+                # Fetch only the latest closed candle
+                new_candle_list = self.market_data.get_symbol_data(
+                    self.symbol, self.timeframe, num_bars=1, closed_only=True
                 )
+                if not new_candle_list:
+                    time.sleep(1)
+                    continue
+                new_candle = new_candle_list[0]
+                new_candle_time = new_candle["time"]
 
-                with self._lock:
-                    self.latest_candles = candles
-
-                if candles:
-                    newest_time = candles[-1]["time"]
-                    if last_candle_time is None or newest_time != last_candle_time:
-                        print(
-                            f"[{self.symbol}] New candle: {newest_time} (count={len(candles)})"
-                        )
-                        last_candle_time = newest_time
-
+                # Only append if it's a new candle
+                if last_candle_time is None or new_candle_time > last_candle_time:
+                    with self._lock:
+                        self.latest_candles.append(new_candle)
+                        if len(self.latest_candles) > self.count:
+                            self.latest_candles.pop(0)
+                    last_candle_time = new_candle_time
+                    print(
+                        f"[{self.symbol}] New candle: {new_candle_time} (count={len(self.latest_candles)})"
+                    )
             except Exception as e:
                 print(f"[LiveCandleCollector] Error fetching candles: {e}")
 
-            tick = mt5.symbol_info_tick(self.symbol)
-            if tick and getattr(tick, "time", None):
-                now_epoch = int(tick.time)
-                seconds_to_next_bar = tf_seconds - (now_epoch % tf_seconds)
-                sleep_time = max(
-                    1, int(seconds_to_next_bar) + 1
-                )  # +1s to let bar close
-                time.sleep(sleep_time)
-            else:
-                time.sleep(tf_seconds)
+            time.sleep(1)  # Poll every second for new candle
+
+
+def create_multi_timeframe_candle_collector(
+    symbol: str = "EURUSD",
+    timeframes=None,
+    count=None,
+):
+    """
+    Provider for DI wiring of MultiTimeframeCandleCollector.
+    """
+    return MultiTimeframeCandleCollector(
+        symbol=symbol,
+        timeframes=timeframes,
+        count=count,
+    )
 
 
 # NEW
