@@ -227,7 +227,7 @@ class SignalOrchestrator:
     # -------------------------
 
     def _run(self) -> None:
-        poll_sleep = float(getattr(self.collector, "interval", 1) or 1)
+        poll_sleep = min(float(getattr(self.collector, "interval", 1) or 1), 0.05)
 
         while self._running:
             try:

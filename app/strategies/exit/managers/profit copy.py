@@ -78,9 +78,9 @@ class ProfitExitManager:
 
         # --- Break-Even Arming ---
         be_distance = float(getattr(self.config, "be_distance_pips", 3.0))
-        pip_value = self._pips_to_price(symbol=symbol, pips=1) or 0.0001
+        pip_size = self._pips_to_price(symbol=symbol, pips=1) or 0.0001
         be_price = float(entry) + (
-            be_distance * pip_value if side == "buy" else -be_distance * pip_value
+            be_distance * pip_size if side == "buy" else -be_distance * pip_size
         )
         if not getattr(state, "be_armed", False):
             if is_break_even(position):
@@ -92,39 +92,43 @@ class ProfitExitManager:
                 state.prev_price = float(price)
                 return None
 
-        # --- Trailing Logic: Profit-based trailing with breach and timeout ---
-        profit = getattr(position, "profit", None)
-        if profit is None:
-            profit = 0.0
+        # --- Trailing Logic: Pip-based trailing with breach and timeout ---
+        pip_gain = (
+            (price - entry) / pip_size if side == "buy" else (entry - price) / pip_size
+        )
 
-        # Track the best profit seen so far
-        if not hasattr(state, "best_profit"):
-            state.best_profit = profit
+        # Track the best pip gain seen so far
+        if not hasattr(state, "best_pip_gain"):
+            state.best_pip_gain = pip_gain
             state.breach_ticks = 0
 
-        if profit > state.best_profit:
-            state.best_profit = profit
+        if pip_gain > state.best_pip_gain:
+            state.best_pip_gain = pip_gain
             state.breach_ticks = 0
 
-        breach_threshold = 0.04  # Immediate exit if breached by more than $0.04
+        # For EURUSD, 0.01 lots, $0.04 = 0.4 pips (1 pip = $0.10)
+        breach_threshold_pips = 0.4  # Immediate exit if breached by more than 0.4 pips
         breach_tick_limit = 5  # Wait up to 5 ticks for recovery
 
-        if 0.00 < profit < state.best_profit:
-            # Immediate exit if breach is too large
-            if state.best_profit - profit > breach_threshold:
+        if 0.00 < pip_gain < state.best_pip_gain:
+            # Immediate exit if breach is too large and pip_gain is still positive
+            if (
+                state.best_pip_gain - pip_gain > breach_threshold_pips
+                and pip_gain > 0.0
+            ):
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
                     position_side=side,
                     volume=volume,
-                    reason="trailing_breach_gt_5c",
+                    reason="trailing_breach_gt_0.4pip",
                 )
             # Start or increment breach tick countdown
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
-            # If profit recovers, reset countdown
-            if profit >= state.best_profit:
+            # If pip gain recovers, reset countdown
+            if pip_gain >= state.best_pip_gain:
                 state.breach_ticks = 0
-            # Exit if breach lasts too long
+            # Exit if breach lasts too long (optional, uncomment if needed)
             """
             elif state.breach_ticks >= breach_tick_limit:
                 return self._exit_action(
@@ -134,7 +138,7 @@ class ProfitExitManager:
                     volume=volume,
                     reason="trailing_breach_timeout",
                 )
-                """
+            """
         else:
             state.breach_ticks = 0  # No breach, reset
 

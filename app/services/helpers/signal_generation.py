@@ -596,7 +596,7 @@ class NTickConfirmedSignalStrategy:
 
     def on_new_tick(self, price: float, spread_points: Optional[float] = None):
         """
-        Called on every tick. Handles n-tick confirmation logic.
+        Called on every tick. Handles n-tick confirmation logic with minimum favorable movement per tick.
         """
         if not self._waiting or self._pending_signal not in ("buy", "sell"):
             return
@@ -615,28 +615,31 @@ class NTickConfirmedSignalStrategy:
                         self.logger.info(
                             f"[NTick] Spread too high: {spread_points}, resetting tick results."
                         )
+                    self._last_tick_price = None
                     return
 
-        # Determine if tick is favorable
+        # --- Favorable movement logic ---
         favorable = False
+        movement = 0.0
+        if not hasattr(self, "_last_tick_price") or self._last_tick_price is None:
+            self._last_tick_price = self._pending_entry_price
+
+        movement = price - self._last_tick_price
         if self._pending_signal == "buy":
-            favorable = price > (self._pending_entry_price or 0) + self.min_pip_move
+            favorable = (
+                movement >= self.min_pip_move
+            )  # min_pip_move = favorable_price_movement_range
         elif self._pending_signal == "sell":
-            favorable = price < (self._pending_entry_price or 0) - self.min_pip_move
+            favorable = movement <= -self.min_pip_move
 
-        self._tick_results.append(favorable)
-        if len(self._tick_results) > self.n_ticks:
-            self._tick_results.pop(0)
-
-        if self.logger:
-            self.logger.info(
-                f"[NTick] Tick: price={price}, entry_price={self._pending_entry_price}, favorable={favorable}, tick_results={self._tick_results}"
-            )
-
-        if len(self._tick_results) == self.n_ticks:
-            all_fav = all(self._tick_results)
-            all_unfav = not any(self._tick_results)
-            if all_fav:
+        if favorable:
+            self._tick_results.append(True)
+            self._last_tick_price = price
+            if self.logger:
+                self.logger.info(
+                    f"[NTick] Favorable tick: movement={movement}, tick_results={self._tick_results}"
+                )
+            if len(self._tick_results) == self.n_ticks:
                 if self.logger:
                     self.logger.info(
                         f"[NTick] {self.n_ticks} consecutive favorable ticks: confirming {self._pending_signal}."
@@ -645,15 +648,16 @@ class NTickConfirmedSignalStrategy:
                     **(self._last_signal or {}),
                     "final_signal": self._pending_signal,
                     "reason": f"{self.n_ticks}_consecutive_favorable_ticks",
+                    "entry_price": price,
                 }
                 self._reset()
-
-            else:
-                if self.logger:
-                    self.logger.info(
-                        f"[NTick] Mixed ticks, clearing counter and continuing n-tick confirmation."
-                    )
-                self._tick_results = []
+        else:
+            if self.logger:
+                self.logger.info(
+                    f"[NTick] Unfavorable tick: movement={movement}, resetting tick counter."
+                )
+            self._tick_results = []
+            self._last_tick_price = self._pending_entry_price
 
     def generate_signal(self, candles: list[dict], *args, **kwargs):
         """

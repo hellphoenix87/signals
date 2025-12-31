@@ -33,7 +33,7 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
         count=int(Config.MIN_CANDLES_FOR_INDICATORS) + 1,
         config=Config,
     )
-    tick = create_tick_collector(symbol=symbol, interval=1)
+    tick = create_tick_collector(symbol=symbol, interval=0.1)
     exit_trade = create_exit_trade(broker=br, risk_manager=rm)
     signal_generator = create_signal_strategy(config=Config)
     orchestrator = create_orchestrator(
