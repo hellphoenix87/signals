@@ -98,6 +98,6 @@ class Config:
     MAGIC_NUMBER: int = 123456
     MAX_DEVIATION: int = 5
 
-    LOT_SIZE: float = 0.01
-    DEFAULT_LOT: float = 0.01
-    MIN_LOT: float = 0.01
+    LOT_SIZE: float = 2
+    DEFAULT_LOT: float = 2
+    MIN_LOT: float = 2
