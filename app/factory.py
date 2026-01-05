@@ -1,15 +1,15 @@
 from app.config.settings import Config
 from app.data.market_data import create_market_data
-from app.execution.mode import TradingMode as Mode
+from app.trade_execution.mode import TradingMode as Mode
 from app.risk.risk_manager import create_risk_manager
-from app.execution.broker import create_broker
-from app.services.helpers.trade_execution import create_trade_executor
-from app.services.helpers.candles import create_candle_collector
+from app.trade_execution.broker import create_broker
+from app.trade_execution.trade_execution import create_trade_executor
+from app.data.candles import create_candle_collector
 from app.services.trade_services import create_orchestrator
-from app.services.helpers.tick_collector import create_tick_collector
-from app.strategies.enter.enter_trade import create_enter_trade
-from app.strategies.exit.exit_trade import create_exit_trade
-from app.services.helpers.signal_generation import create_signal_strategy
+from app.data.tick_collector import create_tick_collector
+from app.trade_execution.helpers.prepare_trade import create_enter_trade
+from app.exit_strategies.exit_trade import create_exit_trade
+from app.signals.signal_generation import create_signal_strategy
 import MetaTrader5 as mt5
 
 md = create_market_data()

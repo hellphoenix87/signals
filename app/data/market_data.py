@@ -69,11 +69,6 @@ class MarketData:
 
         return candles
 
-    def calculate_dynamic_sl_tp(self, candles, risk_reward_ratio=1.2):
-        """Calculate dynamic stop-loss and take-profit based on opening range."""
-        sl, tp = self._calculate_opening_range_sl_tp(candles, risk_reward_ratio)
-        return sl, tp
-
     def _ensure_symbol_selected(self, symbol):
         """Ensure the symbol is in Market Watch before fetching data."""
         if not mt5.symbol_select(symbol, True):
@@ -92,13 +87,3 @@ class MarketData:
             }
             for rate in rates
         ]
-
-    def _calculate_opening_range_sl_tp(self, candles, risk_reward_ratio=1.2):
-        """Compute opening range-based SL and TP."""
-        period = 1  # first candle by default
-        opening_candles = candles[:period]
-        high = max(c["high"] for c in opening_candles)
-        low = min(c["low"] for c in opening_candles)
-        sl = high - low
-        tp = sl * risk_reward_ratio
-        return sl, tp

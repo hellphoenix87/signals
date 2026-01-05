@@ -8,9 +8,9 @@ import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.utils.configure_logging import logger as default_logger
-from app.signals.sma_crossover import generate_sma_signal as default_sma_fn
-from app.signals.macd import calculate_macd as default_macd_fn
-from app.signals.rsi import calculate_rsi as default_rsi_fn
+from app.signals.indicators.sma_crossover import generate_sma_signal as default_sma_fn
+from app.signals.indicators.macd import calculate_macd as default_macd_fn
+from app.signals.indicators.rsi import calculate_rsi as default_rsi_fn
 
 
 def create_signal_strategy(

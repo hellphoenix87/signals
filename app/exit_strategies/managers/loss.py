@@ -1,4 +1,4 @@
-from app.strategies.exit.exit_shared import (
+from app.exit_strategies.exit_shared import (
     PosState,
     is_break_even,
     pos_symbol,
