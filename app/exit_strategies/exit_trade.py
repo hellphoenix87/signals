@@ -1,4 +1,4 @@
-# -- HYBRID EXIT: tick-driven protection + M1 candle-close profit-taking --
+# -- TO BE DELETED OR REFACTORED LATER TO UNIFY MANAGERS --
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ import threading
 import MetaTrader5 as mt5
 
 from app.config.settings import Config
-from app.strategies.exit.exit_shared import (
+from app.exit_strategies.exit_shared import (
     ExitAction,
     PosState,
     pos_symbol,
     pos_ticket,
 )
-from app.strategies.exit.managers.profit import ProfitExitManager
-from app.strategies.exit.managers.loss import LossExitManager
+from app.exit_strategies.managers.profit import ProfitExitManager
+from app.exit_strategies.managers.loss import LossExitManager
 
 
 def create_exit_trade(
