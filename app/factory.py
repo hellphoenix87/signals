@@ -9,7 +9,7 @@ from app.services.trade_services import create_orchestrator
 from app.data.tick_collector import create_tick_collector
 from app.trade_execution.helpers.prepare_trade import create_enter_trade
 from app.exit_strategies.exit_trade import create_exit_trade
-from app.signals.signal_generation import create_signal_strategy
+from app.signals.signal_generation import strategy_factory
 import MetaTrader5 as mt5
 
 md = create_market_data()
@@ -35,7 +35,7 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
     )
     tick = create_tick_collector(symbol=symbol, interval=0.1)
     exit_trade = create_exit_trade(broker=br, risk_manager=rm)
-    signal_generator = create_signal_strategy(config=Config)
+    signal_generator = strategy_factory(config=Config)
     orchestrator = create_orchestrator(
         collector=collector,
         signal_generator=signal_generator,

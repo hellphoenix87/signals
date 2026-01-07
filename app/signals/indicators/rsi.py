@@ -9,33 +9,27 @@ def calculate_rsi(
     logger: logging.Logger | None = None,
 ):
     """
-    Fast Signal RSI (FSI) for M1 scalping + tick confirmation.
-
-    - Wilder EMA smoothing (classic RSI)
-    - Aligned to input length (NaNs for warmup)
-    - Returns np.array of RSI values
+    RSI indicator that returns a simple signal: 'buy', 'sell', or 'hold'.
     """
     log = logger or logging.getLogger(__name__)
 
     try:
         period = int(period)
         if period <= 0:
-            return np.array([])
+            return "hold"
 
-        # Extract closes
         closes = np.array(
             [float(bar["close"]) for bar in data if bar.get("close") is not None],
             dtype=float,
         )
         if len(closes) < period + 1:
-            log.debug(f"Insufficient data for FSI. Need at least {period + 1} bars.")
-            return np.full(len(data), np.nan)
+            log.debug(f"Insufficient data for RSI. Need at least {period + 1} bars.")
+            return "hold"
 
         delta = np.diff(closes)
         gains = np.where(delta > 0, delta, 0.0)
         losses = np.where(delta < 0, -delta, 0.0)
 
-        # Wilder EMA
         avg_gain = np.zeros_like(gains)
         avg_loss = np.zeros_like(losses)
         avg_gain[0] = np.mean(gains[:period])
@@ -45,20 +39,21 @@ def calculate_rsi(
             avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i]) / period
             avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i]) / period
 
-        rs = avg_gain / (avg_loss + 1e-8)  # avoid div-by-zero
+        rs = avg_gain / (avg_loss + 1e-8)
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # Align to original closes length
-        rsi_aligned = np.concatenate((np.full(period, np.nan), rsi[period - 1 :]))
-        if len(rsi_aligned) < len(closes):
-            rsi_aligned = np.concatenate(
-                (rsi_aligned, np.full(len(closes) - len(rsi_aligned), np.nan))
-            )
-        elif len(rsi_aligned) > len(closes):
-            rsi_aligned = rsi_aligned[: len(closes)]
+        # Use the latest RSI value for signal
+        latest_rsi = rsi[-1] if len(rsi) > 0 else np.nan
 
-        return rsi_aligned
+        if np.isnan(latest_rsi):
+            return "hold"
+        elif latest_rsi < 30:
+            return "buy"
+        elif latest_rsi > 70:
+            return "sell"
+        else:
+            return "hold"
 
     except Exception as e:
-        log.error(f"Error in calculate_fsi: {e}")
-        return np.full(len(data), np.nan)
+        log.error(f"Error in calculate_rsi: {e}")
+        return "hold"
