@@ -1,6 +1,6 @@
 # Project Refactor Sweep
 
-Status: todo
+Status: in-progress
 Triage: elevated — Phases 2-4 touch exit-strategy money logic (`exit_strategies/managers`, `broker.py`) and the orchestrator's control flow (`SignalOrchestrator`, `app/factory.py`-adjacent DI wiring), which spans multiple subsystems (exit strategies + trade execution + API composition root) even though each individual subphase is small.
 
 ## Goal
@@ -148,3 +148,18 @@ A full-repo sweep found: three unused backup files, a broken/dead second FastAPI
 
 ## QA
 
+### 2026-09-12 — Subphase 1.1 (Remove stray backup files)
+
+Checked: Subphase 1.1 only.
+
+- `pipenv run pytest tests/test_repo_hygiene.py -v` → 1 passed.
+- `pipenv run pytest -q` (full suite) → 1 passed, 1 collected — `tests/test_repo_hygiene.py` is currently the only test file in the repo, so this is expected at this point in the plan, not a sign of skipped coverage.
+- Confirmed via filesystem listing that all three files are gone: `app/exit_strategies/managers/loss copy.py`, `app/exit_strategies/managers/profit copy.py`, `app/signals/indicators/sma_crossover copy.py`. No `__pycache__` remnants of them either.
+- `tests/test_repo_hygiene.py::test_backup_files_removed` asserts `not Path(...).exists()` for all three exact paths named in the acceptance criteria — matches the criteria, not a weaker check (e.g. doesn't just check a directory listing count).
+- Repo-wide grep for the three path substrings (`loss copy`, `profit copy`, `sma_crossover copy`) turns up three hits: the plan file itself (expected — describes the deletion), `tests/test_repo_hygiene.py` (expected — the assertion), and **`CLAUDE.md` line 40**, which still contains: "Note: `managers/loss copy.py`, `managers/profit copy.py`, and `indicators/sma_crossover copy.py` are stray backup files, not part of the active import graph." This sentence is now stale/inaccurate — it describes files that no longer exist as if they're still present in the repo.
+
+**Verdict: gap found.** Test and deletion both satisfy the stated acceptance criteria and nothing else broke, but the QA check "confirm nothing else in the repo still references any of those three file paths" surfaced a real miss: `CLAUDE.md`'s "Exit strategies" paragraph still documents the three now-deleted files as existing stray backups. This isn't covered by any subphase's stated acceptance criteria (Subphase 1.7 only targets the `entry_filter.py` and `main3.py` stale references), so it's a plan gap, not a criteria failure — recommend either folding a one-line CLAUDE.md fix into Subphase 1.1 (or Subphase 1.7) before this goes to `docs/plans/done/`, so documentation doesn't drift out of sync with the codebase it describes.
+
+Not a blocker for proceeding to Subphase 1.2 — the stray CLAUDE.md line doesn't affect behavior or test coverage — but should be resolved before Phase 1 as a whole is marked done.
+
+**Resolved in this same branch (Subphase 1.1):** removed the stale sentence from CLAUDE.md's Exit strategies paragraph. Also fixed a pr-reviewer finding: `tests/test_repo_hygiene.py`'s assertions were cwd-relative and would pass vacuously if pytest were ever run from outside the repo root; anchored them to `Path(__file__).resolve().parents[1]` instead, since Subphases 1.2/1.3/1.6 extend this same file with more path assertions.
