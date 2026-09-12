@@ -62,7 +62,7 @@ app/
   config/            # Config class with all tunable parameters
   data/              # Market data fetching, candle collection, tick collection
   signals/
-    indicators/      # SMA, MACD, RSI, entry filter calculations
+    indicators/      # SMA, MACD, RSI calculations
     strategies/      # Strategies combining indicators into buy/sell/hold signals
   exit_strategies/   # Tick-driven and candle-close position exit management
   trade_execution/   # Broker abstraction and trade placement

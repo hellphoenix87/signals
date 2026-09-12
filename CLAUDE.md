@@ -35,7 +35,7 @@ The app is wired together with plain factory functions (no DI framework). `app/f
 - `MultiTimeframeStrongSignalStrategy` (`app/signals/strategies/multi_timeframe.py`) if `USE_MULTI_TIMEFRAME_SIGNALS` — gates the base signal using `TF_BIAS`/`TF_CONFIRM`/`TF_ENTRY`.
 - `NTickConfirmedSignalStrategy` (`app/signals/strategies/ntick_confirmed_signal_strategy.py`) if `USE_N_TICK_CONFIRMATION` and `N_TICK_CONFIRMATION > 1` — requires the signal to hold across N ticks before confirming.
 
-All strategies inherit from `BaseSignalStrategy` (`app/signals/strategies/base_signal_strategy.py`) and indicators live in `app/signals/indicators/` (`sma_crossover.py`, `macd.py`, `rsi.py`, `entry_filter.py`), returning simple values (floats/strings/dicts) that strategies combine into `"buy"`/`"sell"`/`"hold"`.
+All strategies inherit from `BaseSignalStrategy` (`app/signals/strategies/base_signal_strategy.py`) and indicators live in `app/signals/indicators/` (`sma_crossover.py`, `macd.py`, `rsi.py`), returning simple values (floats/strings/dicts) that strategies combine into `"buy"`/`"sell"`/`"hold"`.
 
 **Exit strategies** (`app/exit_strategies/`): `exit_shared.py` defines the `PosState` dataclass (per-position tick-tracking state) and position-field accessors — `pos_entry()`, `pos_side()`, `pos_symbol()`, `pos_ticket()`, `pos_volume()`, `pos_profit()`, `is_break_even()` — which must be used instead of touching raw position attributes, because a "position" may be an MT5 object *or* a dict depending on call site (`get_any()` handles both). `managers/profit.py` (`ProfitExitManager`) and `managers/loss.py` (`LossExitManager`) implement `check_exit_on_tick(position, tick, state)` → exit action dict or `None`; `exit_trade.py` (`ExitTrade`) composes these into `on_tick()` / `on_candle_close()` / `update_bias()` for the orchestrator.
 
@@ -45,7 +45,7 @@ All strategies inherit from `BaseSignalStrategy` (`app/signals/strategies/base_s
 
 **Configuration** (`app/config/settings.py::Config`): every tunable (symbols, timeframes, risk %, pip/price thresholds, exit tick/pip parameters, feature flags like `USE_MULTI_TIMEFRAME_SIGNALS`/`USE_N_TICK_CONFIRMATION`) lives on this single class and is read via `getattr(config, "NAME", default)` throughout — never hardcode thresholds, pip sizes, or symbol lists; add new tunables here.
 
-**API layer** (`app/routes/endpoints.py`): thin FastAPI routes over the objects built in `app/factory.py` (`/status`, `/trading/start`, `/trading/stop`, `/signal/latest`, `/live_signal`, `/tick`, `/simulated_positions`, `/close_all`, `/test_historical`, `/stop_orchestrator`). `app/main.py` is the FastAPI entrypoint (initializes/shuts down MT5 via lifespan); `app/main3.py` is a separate/alternate entrypoint — check which one is current before assuming `app.main:app` is the only target.
+**API layer** (`app/routes/endpoints.py`): thin FastAPI routes over the objects built in `app/factory.py` (`/status`, `/trading/start`, `/trading/stop`, `/signal/latest`, `/live_signal`, `/tick`, `/simulated_positions`, `/close_all`, `/test_historical`, `/stop_orchestrator`). `app/main.py` is the FastAPI entrypoint (initializes/shuts down MT5 via lifespan); `app/main3.py` was removed in this sweep and `app.main:app` is the sole entrypoint.
 
 ## Development workflow: spec/TDD multi-agent flow
 
