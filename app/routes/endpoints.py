@@ -8,7 +8,6 @@ from app.factory import (
     rm,
     md,
 )
-from app.utils.backtest_signals import backtest_signals
 from app.config.settings import Config
 
 router = APIRouter()
@@ -86,25 +85,6 @@ def test_historical():
         count=getattr(Config, "CANDLE_COUNT", 500),
     )
     return {"candles": candles}
-
-
-"""
-@router.get("/backtest_signals_historical")
-def backtest_signals_endpoint_historical():
-    candles = md.get_historical_candles(
-        "EURUSD",
-        timeframe=Config.TIMEFRAME,
-        start_pos=0,
-        count=Config.CANDLE_COUNT,
-    )
-    strategy_instance = BreakoutStrategy(market_data=md, risk_manager=rm, broker=br)
-    results = backtest_signals(
-        strategy_instance.strong_signal_strategy,
-        candles,
-        min_window=Config.MIN_CANDLES_FOR_INDICATORS,
-    )
-    return {"signals": results}
-"""
 
 
 @router.post("/stop_orchestrator")
