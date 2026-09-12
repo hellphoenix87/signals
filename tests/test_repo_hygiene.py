@@ -72,3 +72,37 @@ def test_mt5_reference_updated_in_claude_md():
     content = claude_md.read_text(encoding="utf-8")
     assert "test_mt5.py" not in content, "CLAUDE.md should not reference test_mt5.py"
     assert "scripts/mt5_smoke.py" in content, "CLAUDE.md should reference scripts/mt5_smoke.py"
+
+
+def test_entry_filter_removed_from_docs():
+    """Documentation should not reference the stale entry_filter.py file."""
+    claude_md = REPO_ROOT / "CLAUDE.md"
+    readme_md = REPO_ROOT / "README.md"
+
+    assert claude_md.exists()
+    assert readme_md.exists()
+
+    claude_content = claude_md.read_text(encoding="utf-8")
+    readme_content = readme_md.read_text(encoding="utf-8")
+
+    assert "entry_filter.py" not in claude_content, "CLAUDE.md should not reference entry_filter.py"
+    # README never wrote the ".py" suffix -- it read "entry filter calculations" (space, no
+    # extension), so the check above would pass vacuously against README. Assert the actual
+    # wording that was there instead.
+    assert "entry filter" not in readme_content, "README.md should not reference entry filter"
+
+
+def test_main3_removed_from_docs():
+    """CLAUDE.md should not contain the old reference to main3.py as a separate entrypoint."""
+    claude_md = REPO_ROOT / "CLAUDE.md"
+    assert claude_md.exists()
+
+    content = claude_md.read_text(encoding="utf-8")
+    # The actual prose wraps the path in backticks (`app/main3.py`), so a check for the
+    # unbacktick'd substring above would pass vacuously even against the pre-change file.
+    assert "is a separate/alternate entrypoint" not in content, (
+        "CLAUDE.md should not describe main3.py as a separate/alternate entrypoint"
+    )
+    assert "sole entrypoint" in content, (
+        "CLAUDE.md should state app.main:app is the sole entrypoint"
+    )
