@@ -98,3 +98,73 @@ def test_rm_import_removed():
     assert not re.search(r'\brm\b', source), (
         "The unused 'rm' identifier should be removed from the import in endpoints.py"
     )
+
+
+def test_close_all_endpoint_calls_trade_executor_method(mock_mt5):
+    """Test that POST /close_all calls trade_executor.close_all_trades() and returns 200.
+
+    Given:
+      - A mocked trade_executor
+
+    When:
+      - POST /close_all is called via TestClient
+
+    Then:
+      - trade_executor.close_all_trades is called exactly once
+      - response status is 200
+      - no AttributeError is raised
+    """
+    from unittest.mock import patch, MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes.endpoints import router
+
+    # Create a mock trade_executor with a realistic close_all_trades() return shape
+    mock_trade_executor = MagicMock()
+    mock_trade_executor.close_all_trades.return_value = {"closed": [1, 2], "failed": []}
+
+    # Create the app and include the router
+    app = FastAPI()
+    app.include_router(router)
+
+    # Patch the trade_executor in the endpoints module
+    with patch("app.routes.endpoints.trade_executor", mock_trade_executor):
+        client = TestClient(app)
+
+        # Act
+        response = client.post("/close_all")
+
+        # Assert
+        assert response.status_code == 200
+        assert mock_trade_executor.close_all_trades.call_count == 1
+        body = response.json()
+        assert body["status"] == "all trades closed"
+        assert body["closed"] == [1, 2]
+        assert body["failed"] == []
+
+
+def test_close_all_endpoint_reports_failures():
+    """POST /close_all should surface partial failures instead of always claiming success."""
+    from unittest.mock import patch, MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes.endpoints import router
+
+    mock_trade_executor = MagicMock()
+    mock_trade_executor.close_all_trades.return_value = {
+        "closed": [1],
+        "failed": [{"ticket": 2, "error": "close_position returned False"}],
+    }
+
+    app = FastAPI()
+    app.include_router(router)
+
+    with patch("app.routes.endpoints.trade_executor", mock_trade_executor):
+        client = TestClient(app)
+        response = client.post("/close_all")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "some trades failed to close"
+        assert body["closed"] == [1]
+        assert body["failed"] == [{"ticket": 2, "error": "close_position returned False"}]

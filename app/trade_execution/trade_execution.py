@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.config.settings import Config
+from app.exit_strategies.exit_shared import pos_ticket
 
 
 def create_trade_executor(
@@ -211,10 +212,10 @@ class TradeExecutor:
 
         position = None
         for pos in positions:
-            pos_ticket = getattr(pos, "ticket", None) or (
+            candidate_ticket = getattr(pos, "ticket", None) or (
                 pos.get("ticket") if isinstance(pos, dict) else None
             )
-            if pos_ticket == ticket:
+            if candidate_ticket == ticket:
                 position = pos
                 break
 
@@ -283,6 +284,40 @@ class TradeExecutor:
                 return result
 
         return None
+
+    def close_all_trades(self) -> Dict[str, List[Any]]:
+        """Close every open position on the account (panic-button semantics).
+
+        Retrieves all open positions from the broker (unfiltered by symbol or
+        magic number -- this closes everything on the account, including
+        positions opened manually or by another EA, matching the endpoint's
+        "close all" name) and attempts to close each one via
+        broker.close_position(), skipping any position where pos_ticket
+        returns None.
+
+        A failure closing one position (whether close_position returns False
+        or raises) does not stop the rest from being attempted -- this is
+        meant to work as a best-effort panic button, not an all-or-nothing
+        transaction. Returns {"closed": [...], "failed": [{"ticket", "error"}, ...]}
+        so the caller can tell which positions, if any, are still open.
+        """
+        closed: List[Any] = []
+        failed: List[Dict[str, Any]] = []
+        positions = self.broker.get_open_positions()
+        for pos in positions or []:
+            ticket = pos_ticket(pos)
+            if ticket is None:
+                continue
+            try:
+                ok = self.broker.close_position(ticket=ticket)
+            except Exception as exc:
+                failed.append({"ticket": ticket, "error": repr(exc)})
+                continue
+            if ok is False:
+                failed.append({"ticket": ticket, "error": "close_position returned False"})
+            else:
+                closed.append(ticket)
+        return {"closed": closed, "failed": failed}
 
     def _safe_mt5_comment(self, text: str, *, max_len: int = 31) -> str:
         """
