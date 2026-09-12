@@ -71,8 +71,9 @@ def get_simulated_positions():
 
 @router.post("/close_all")
 def close_all_trades():
-    trade_executor._close_all_trades()
-    return {"status": "all trades closed"}
+    result = trade_executor.close_all_trades()
+    status = "all trades closed" if not result["failed"] else "some trades failed to close"
+    return {"status": status, **result}
 
 
 @router.get("/test_historical")
