@@ -2,6 +2,7 @@ from app.exit_strategies.exit_shared import (
     PosState,
     is_break_even,
     pos_entry,
+    pos_profit,
     pos_side,
     pos_symbol,
     pos_ticket,
@@ -93,7 +94,7 @@ class ProfitExitManager:
                 return None
 
         # --- Trailing Logic: Profit-based trailing with breach and timeout ---
-        profit = getattr(position, "profit", None)
+        profit = pos_profit(position)
         if profit is None:
             profit = 0.0
 
