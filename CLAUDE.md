@@ -18,7 +18,7 @@ just format    # pipenv run black .
 just shell     # pipenv shell
 ```
 
-There is no `tests/` directory or test suite currently in the repo (`just test` / `pytest` will find nothing) — `test_mt5.py` at the repo root is a manual MT5 connectivity smoke script, not a pytest test.
+Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `test_mt5.py` at the repo root is a separate manual MT5 connectivity smoke script, not a pytest test.
 
 Running the app requires a running/configured MetaTrader 5 terminal — `app/main.py` calls `mt5.initialize()` on startup and raises if it fails.
 
@@ -46,6 +46,29 @@ All strategies inherit from `BaseSignalStrategy` (`app/signals/strategies/base_s
 **Configuration** (`app/config/settings.py::Config`): every tunable (symbols, timeframes, risk %, pip/price thresholds, exit tick/pip parameters, feature flags like `USE_MULTI_TIMEFRAME_SIGNALS`/`USE_N_TICK_CONFIRMATION`) lives on this single class and is read via `getattr(config, "NAME", default)` throughout — never hardcode thresholds, pip sizes, or symbol lists; add new tunables here.
 
 **API layer** (`app/routes/endpoints.py`): thin FastAPI routes over the objects built in `app/factory.py` (`/status`, `/trading/start`, `/trading/stop`, `/signal/latest`, `/live_signal`, `/tick`, `/simulated_positions`, `/close_all`, `/test_historical`, `/stop_orchestrator`). `app/main.py` is the FastAPI entrypoint (initializes/shuts down MT5 via lifespan); `app/main3.py` is a separate/alternate entrypoint — check which one is current before assuming `app.main:app` is the only target.
+
+## Development workflow: spec/TDD multi-agent flow
+
+Non-trivial work goes through a plan-driven, test-first flow using four project agents (`.claude/agents/`) and three skills (`.claude/skills/`). **The main session is the sole orchestrator** — it invokes agents via the Agent tool and moves plan files between folders; agents never call each other directly.
+
+| Agent | Model | Job |
+|---|---|---|
+| `architect` | sonnet (opus when triage says elevated) | Turns a request into a phased plan under `docs/plans/`, using the `plan` skill. Never writes application code. |
+| `developer` | haiku | Implements exactly one subphase at a time, test-first, using the `tdd-subphase` skill. |
+| `qa` | sonnet | Verifies a finished subphase/phase against the plan's acceptance criteria using the `qa-verify` skill; only edits the plan's QA section. |
+| `pr-reviewer` | sonnet (opus when triage says elevated) | Reviews the accumulated diff before merge, via the built-in `code-review` skill. |
+
+**Plan lifecycle** — one markdown file per feature/bugfix, physically moved as its status changes:
+
+```
+docs/plans/todo/<slug>.md        # architect has written it, work hasn't started
+docs/plans/in-progress/<slug>.md # developer/qa are actively working it
+docs/plans/done/<slug>.md        # pr-reviewer approved it, merged
+```
+
+**Triage → model gating**: the architect records `Triage: low | elevated` at the top of every plan, weighing complexity and blast radius together — elevated when the change touches money-moving logic (trade execution, exit strategies, risk/position sizing), spans multiple subsystems at once, changes the composition root (`app/factory.py`) or the orchestrator's control flow, or is explicitly flagged high-risk. The main session reads this line and passes `model: opus` on the Agent tool call for `architect`/`pr-reviewer` work on that plan when elevated; otherwise both run on their sonnet default. `developer` always runs on haiku regardless of triage — which is why every subphase the architect writes must be small and unambiguous enough for a weaker model to execute without needing judgment calls.
+
+Typical flow: architect writes/updates a plan (todo) → main session moves it to in-progress → developer implements a subphase test-first → qa verifies it → repeat per subphase/phase → pr-reviewer reviews the full diff → main session moves the plan to done and proceeds with the normal PR/merge process.
 
 ## Conventions (from prior Copilot instructions)
 
