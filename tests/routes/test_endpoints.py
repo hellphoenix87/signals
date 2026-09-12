@@ -3,8 +3,6 @@
 Covers the dead commented-out endpoint block and the active route registry.
 """
 
-import pytest
-
 
 def test_breakout_strategy_removed():
     """Assert the string 'BreakoutStrategy' no longer appears in endpoints.py source."""
@@ -68,3 +66,35 @@ def test_backtest_signals_module_removed():
     endpoints_path = repo_root / "app" / "routes" / "endpoints.py"
     source = endpoints_path.read_text(encoding="utf-8", errors="ignore")
     assert "backtest_signals" not in source
+
+
+def test_endpoints_import_succeeds(mock_mt5):
+    """Assert that importing app.routes.endpoints still succeeds after removing rm.
+
+    This test ensures the removal of the unused rm import doesn't break the module.
+    """
+    # Import should succeed without any errors
+    from app.routes import endpoints
+
+    # Verify the endpoints module was loaded successfully
+    assert hasattr(endpoints, 'router')
+    assert hasattr(endpoints, 'get_status')
+
+
+def test_rm_import_removed():
+    """Assert that the unused rm identifier has been removed from endpoints.py.
+
+    This test reads the file source and asserts a regex search for the standalone
+    identifier \\brm\\b finds no matches.
+    """
+    import re
+    from pathlib import Path
+
+    endpoints_path = Path(__file__).resolve().parents[2] / "app" / "routes" / "endpoints.py"
+    source = endpoints_path.read_text(encoding="utf-8", errors="ignore")
+
+    # Assert that the standalone identifier 'rm' is not present
+    # Use word boundaries to avoid matching 'perm', 'firm', etc.
+    assert not re.search(r'\brm\b', source), (
+        "The unused 'rm' identifier should be removed from the import in endpoints.py"
+    )
