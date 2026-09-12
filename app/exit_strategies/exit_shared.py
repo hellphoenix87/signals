@@ -84,7 +84,7 @@ def pos_profit(position):
 
 
 def is_break_even(position) -> bool:
-    profit = getattr(position, "profit", None)
+    profit = pos_profit(position)
     if profit is None:
         profit = 0.0
     return profit >= 0.0
