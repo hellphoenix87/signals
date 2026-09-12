@@ -1,0 +1,150 @@
+# Project Refactor Sweep
+
+Status: todo
+Triage: elevated — Phases 2-4 touch exit-strategy money logic (`exit_strategies/managers`, `broker.py`) and the orchestrator's control flow (`SignalOrchestrator`, `app/factory.py`-adjacent DI wiring), which spans multiple subsystems (exit strategies + trade execution + API composition root) even though each individual subphase is small.
+
+## Goal
+
+A full-repo sweep found: three unused backup files, a broken/dead second FastAPI entrypoint, a dead utility module explicitly marked for deletion, dead code inside the live endpoints module, a genuinely broken endpoint (calls a method that doesn't exist), two real bugs where exit-management code silently mis-reads position profit for dict-shaped positions (used in demo/backtest mode), a broker bug that never assigns tickets to simulated positions (breaking exit tracking in demo mode), and defensive orchestrator duck-typing that guesses at collaborator method names that don't actually exist on the real classes (i.e. dead fallback branches, not real flexibility). This plan fixes all of that, formalizes the orchestrator's real interfaces, makes the API layer testable via FastAPI dependency injection instead of importing live singletons, and backfills tests for the money-handling exit logic.
+
+## Out of scope
+
+- **`app/config/settings.py::Config` is not being split.** It's ~95 lines, already organized into commented `===` sections, and every call site reads it via `getattr(config, "NAME", default)`. Splitting it into multiple classes would touch every one of those call sites for no behavioral benefit at this project's size. Revisit only if/when distinct config concerns need independent lifecycles (e.g. per-symbol overrides), not as cleanup for its own sake.
+- **Simulating real-time P&L for demo/backtest positions.** Phase 2 fixes the *ticket* bug so simulated positions can be tracked/closed, but `Broker._simulate_trade`/`_backtest_trade` still hardcode `"profit": 0.0` forever — nothing recalculates it as price moves. Making demo-mode profit realistic is a real feature (needs a price-driven mark-to-market loop), not a small bug fix. Left for a future plan.
+- Any change to indicator math (MACD/RSI/SMA signal logic itself) — this sweep only touches orchestration, exit management, dead code, and API wiring.
+- Adding CI (`.github/` currently has no workflow files) — flagged as a gap but not part of this plan.
+
+## Phases
+
+### Phase 1: Dead code and file hygiene (no behavior change)
+
+#### Subphase 1.1: Remove stray backup files
+
+- Change: delete `app/exit_strategies/managers/loss copy.py`, `app/exit_strategies/managers/profit copy.py`, `app/signals/indicators/sma_crossover copy.py`. (Confirmed via repo-wide grep that nothing imports any of these three paths — they are earlier drafts of the current `loss.py`/`profit.py`/`sma_crossover.py`.)
+- Acceptance criteria (test-first): a test in `tests/test_repo_hygiene.py` asserts `Path("app/exit_strategies/managers/loss copy.py").exists()`, `Path("app/exit_strategies/managers/profit copy.py").exists()`, and `Path("app/signals/indicators/sma_crossover copy.py").exists()` are all `False`. No mocks needed (pure filesystem check).
+
+#### Subphase 1.2: Remove the dead alternate entrypoint and its only dependency
+
+- Change: delete `app/main3.py` (it imports `from utils.connection import ...` and `from data.market_data import ...` — top-level `utils`/`data` packages that do not exist in this project's layout, so it already fails to import as-is) and delete `app/utils/connection.py` (its only importer, confirmed via repo-wide grep, is `app/main3.py`).
+- Acceptance criteria (test-first): test asserts `Path("app/main3.py").exists()` and `Path("app/utils/connection.py").exists()` are both `False`; a second test asserts `import app.main` still succeeds and `app.main.app` is a `fastapi.FastAPI` instance (the canonical entrypoint is unaffected), with `MetaTrader5.initialize` monkeypatched via the `mock_mt5` fixture so no real MT5 terminal is required.
+
+#### Subphase 1.3: Remove dead `process_handling.py`
+
+- Change: delete `app/utils/process_handling.py`. It is headed by a literal `### !!! TO BE DELETED !!! ###` comment, imports `from utils.configure_logging import logger` (a broken top-level import identical in kind to Subphase 1.2's), and repo-wide grep shows no other file imports anything from it.
+- Acceptance criteria (test-first): test asserts `Path("app/utils/process_handling.py").exists()` is `False`; a second test greps all `*.py` files under `app/` for the substring `process_handling` and asserts zero matches remain.
+
+#### Subphase 1.4: Remove dead commented-out endpoint block
+
+- Change: in `app/routes/endpoints.py`, delete the triple-quoted commented-out block defining `backtest_signals_endpoint_historical` (references an undefined `BreakoutStrategy` name that exists nowhere in the codebase).
+- Acceptance criteria (test-first): test asserts the string `"BreakoutStrategy"` no longer appears anywhere in `app/routes/endpoints.py`'s source; a second test imports `app.routes.endpoints` and asserts `router.routes` still contains exactly the same 10 paths as before (`/status`, `/trading/start`, `/trading/stop`, `/signal/latest`, `/live_signal`, `/tick`, `/simulated_positions`, `/close_all`, `/test_historical`, `/stop_orchestrator`) — proving the deletion removed only dead comment text, not an active route.
+
+#### Subphase 1.5: Remove unused `rm` import from endpoints.py
+
+- Change: in `app/routes/endpoints.py`, remove `rm` from the `from app.factory import (...)` import block. It is imported but never referenced by any route handler in the file (only `br`, `md`, `trade_executor`, `orchestrators`, `signal_orchestrator`, and `Config` are actually used).
+- Acceptance criteria (test-first): test asserts `import app.routes.endpoints` still succeeds; a second test reads the file's source and asserts a regex search for the standalone identifier `\brm\b` finds no matches.
+
+#### Subphase 1.6: Move the root MT5 smoke-test script out of the pytest-lookalike name
+
+- Change: create `scripts/` directory if it doesn't exist; move `test_mt5.py` (repo root) to `scripts/mt5_smoke_test.py` unchanged in content. Update its one reference in `CLAUDE.md` ("`test_mt5.py` at the repo root is a separate manual MT5 connectivity smoke script") to point at the new path.
+- Acceptance criteria (test-first): test asserts `Path("test_mt5.py").exists()` is `False` and `Path("scripts/mt5_smoke_test.py").exists()` is `True`; a second test asserts no file matching `test_*.py` exists anywhere under the repo root outside of `tests/` and `scripts/` (walk the repo root's immediate children only, excluding `tests/`); a third test asserts the substring `test_mt5.py` no longer appears in `CLAUDE.md` and `scripts/mt5_smoke_test.py` does.
+
+#### Subphase 1.7: Fix stale documentation references
+
+- Change: `CLAUDE.md` and `README.md` both reference `app/signals/indicators/entry_filter.py`, which does not exist anywhere in `app/signals/indicators/` (that directory only contains `macd.py`, `rsi.py`, `sma_crossover.py`). In `CLAUDE.md`, remove `entry_filter.py` from the indicators list in the "Signal generation" paragraph. In `README.md`, change "SMA, MACD, RSI, entry filter calculations" to "SMA, MACD, RSI calculations" in the Project Structure section. Also update `CLAUDE.md`'s `app/main3.py` sentence (the "check which one is current" caveat) to state that `app/main3.py` was removed in this sweep and `app.main:app` is the sole entrypoint.
+- Acceptance criteria (test-first): test asserts the substring `entry_filter.py` no longer appears in either `CLAUDE.md` or `README.md`; a second test asserts `CLAUDE.md` no longer contains the substring `app/main3.py is a separate/alternate entrypoint`.
+
+### Phase 2: Fix confirmed exit/trade-logic bugs
+
+#### Subphase 2.1: Fix the broken `/close_all` endpoint
+
+- Change: `app/routes/endpoints.py::close_all_trades()` calls `trade_executor._close_all_trades()`, a method that does not exist anywhere in `app/trade_execution/trade_execution.py::TradeExecutor` (confirmed via repo-wide grep — it is defined nowhere). Add a new public method `close_all_trades(self)` to `TradeExecutor` that calls `self.broker.get_open_positions()`, and for each returned position calls `self.broker.close_position(ticket=pos_ticket(pos))` (import `pos_ticket` from `app.exit_strategies.exit_shared` so both dict and object positions work), skipping any position where `pos_ticket` returns `None`. Update the endpoint to call `trade_executor.close_all_trades()` instead of the nonexistent method.
+- Acceptance criteria (test-first): test in `tests/trade_execution/test_trade_execution.py` using `mock_broker`: `mock_broker.get_open_positions.return_value` is set to `[make_position(as_dict=True, ticket=1), make_position(as_dict=True, ticket=2)]`; call `TradeExecutor(risk_manager=MagicMock(), broker=mock_broker, market_data=MagicMock()).close_all_trades()`; assert `mock_broker.close_position` was called exactly twice, once with `ticket=1` and once with `ticket=2`. A second test in `tests/routes/test_endpoints.py` uses a FastAPI `TestClient`, overrides `trade_executor` with a `MagicMock`, sends `POST /close_all`, and asserts the response status is `200` and `trade_executor.close_all_trades` was called exactly once (no `AttributeError`).
+
+#### Subphase 2.2: Fix `is_break_even()` to support dict-shaped positions
+
+- Change: `app/exit_strategies/exit_shared.py::is_break_even()` currently does `getattr(position, "profit", None)`, which returns `None` (defaulting to `0.0`, i.e. always reporting "break-even or better") for any dict-shaped position — dict positions have no `.profit` attribute. Replace the body with `profit = pos_profit(position)` (the dict/object-safe accessor already defined earlier in the same file), falling back to `0.0` only if `pos_profit` returns `None`.
+- Acceptance criteria (test-first): test in `tests/exit_strategies/test_exit_shared.py` asserts `is_break_even({"profit": -5.0})` returns `False`; `is_break_even({"profit": 0.0})` returns `True`; `is_break_even(make_position(profit=-5.0))` (object form, via the `make_position` fixture) returns `False`; `is_break_even({})` (no profit key at all) returns `True` (preserves current "missing profit defaults to break-even" behavior).
+
+#### Subphase 2.3: Fix `ProfitExitManager` to read profit via the dict/object-safe accessor
+
+- Change: `app/exit_strategies/managers/profit.py::ProfitExitManager.check_exit_on_tick` — replace `profit = getattr(position, "profit", None)` with `profit = pos_profit(position)` (import `pos_profit` alongside the other `pos_*` imports already at the top of the file), keeping the existing `if profit is None: profit = 0.0` fallback line unchanged.
+- Acceptance criteria (test-first): test in `tests/exit_strategies/managers/test_profit.py` builds a dict position via `make_position(as_dict=True, profit=-0.10)`, a `PosState` pre-armed at break-even (`be_armed=True`, `best_profit=0.0`, `ticks_seen=5`), and a tick; calls `ProfitExitManager(...).check_exit_on_tick(position, tick, state)`; asserts the return value is an `ExitAction` with `reason="trailing_breach_gt_5c"` — proving a dict position's real profit (`-0.10`, a $0.10 breach from `best_profit=0.0`, exceeding the $0.04 threshold) is now used instead of silently reading `0.0` and never breaching.
+
+#### Subphase 2.4: Fix `LossExitManager` to read profit via the dict/object-safe accessor
+
+- Change: `app/exit_strategies/managers/loss.py::LossExitManager.check_exit_on_tick` — same fix: replace `profit = getattr(position, "profit", None)` with `profit = pos_profit(position)` (add the import), keeping the `if profit is None: profit = 0.0` fallback.
+- Acceptance criteria (test-first): test in `tests/exit_strategies/managers/test_loss.py` builds a dict position via `make_position(as_dict=True, profit=-6.0)` and a fresh `PosState`; calls `LossExitManager(...).check_exit_on_tick(position, tick, state)`; asserts the return value is an `ExitAction` with `reason="profit_drop"` — proving the `-5` drop threshold now fires for dict positions (previously always read `profit=0.0` for dicts and could never cross the threshold).
+
+#### Subphase 2.5: Assign tickets to simulated (demo/backtest) positions
+
+- Change: `app/trade_execution/broker.py::Broker.__init__` — add `self._next_sim_ticket = 1`. In `_simulate_trade` and `_backtest_trade`, add `"ticket": self._next_sim_ticket` to the constructed `trade` dict, and after appending to `self.open_positions_sim`, do `self._next_sim_ticket += 1`. (`close_position`'s demo/backtest branch already filters on `p.get("ticket") != ticket`, so it will now actually match something.)
+- Acceptance criteria (test-first): test in `tests/trade_execution/test_broker.py`, using `mock_mt5` (so `Broker(TradingMode.DEMO)` doesn't need a real terminal) and monkeypatching `mt5.symbol_info_tick` to return a `make_tick()`: call `broker.place_buy("EURUSD", 0.01, None, None)` twice; assert `broker.open_positions_sim[0]["ticket"] != broker.open_positions_sim[1]["ticket"]` and neither is `None`; call `broker.close_position(ticket=broker.open_positions_sim[0]["ticket"])`; assert `len(broker.open_positions_sim) == 1` and the remaining entry's ticket equals the second placed trade's ticket.
+
+### Phase 3: Formalize the SignalOrchestrator's collaborator interfaces
+
+#### Subphase 3.1: Call `EnterTrade`'s real method instead of guessing at nonexistent names
+
+- Change: `app/services/trade_services.py::SignalOrchestrator` — in both `_on_tick` and `_run_entries`, the code does `fn = getattr(self.enter_trade, "on_signal", None) or getattr(self.enter_trade, "execute", None) or getattr(self.enter_trade, "enter", None)`. `EnterTrade` (`app/trade_execution/helpers/prepare_trade.py`) defines none of these — only `enter_trade(self, signal, account_balance)` — so this branch is unreachable dead code today. Replace both occurrences with a direct call: `if self.enter_trade is not None:` then `account_balance = 0.0`; `get_bal = getattr(self.broker, "get_account_balance", None)`; `if callable(get_bal):` try `account_balance = float(get_bal())` inside a `try/except Exception: pass`; then call `self.enter_trade.enter_trade(sig, account_balance)` inside the existing `try/except Exception as exc:` logging block.
+- Acceptance criteria (test-first): test in `tests/services/test_trade_services.py` constructs `SignalOrchestrator(collector=MagicMock(), signal_generator=MagicMock(), trading_service=None, enter_trade=MagicMock(spec=["enter_trade"]), broker=None)`; configures the mock `signal_generator.generate_signal.return_value = {"symbol": "EURUSD", "final_signal": "buy", "pullback_completed": True}`; calls `orchestrator._run_entries(snapshot={}, asof=datetime.now(timezone.utc))`; asserts `enter_trade.enter_trade.assert_called_once()` with the signal dict as the first positional argument — proving this path is now reachable (previously it was dead code since none of the guessed attribute names existed on `EnterTrade`).
+
+#### Subphase 3.2: Call the signal generator's one real method directly
+
+- Change: `app/services/trade_services.py::SignalOrchestrator._run_entries` — `gen = getattr(sg, "generate_signal", None) or getattr(sg, "generate_signals", None) or getattr(sg, "__call__", None)` followed by a `TypeError`-fallback ladder trying `gen(snapshot)`, `gen(candles_snapshot=snapshot)`, `gen()`, `gen(account_balance=bal)`. All three current signal-generator implementations (`StrongSignalStrategy`, `MultiTimeframeStrongSignalStrategy`, `NTickConfirmedSignalStrategy` in `app/signals/strategies/`) implement only `generate_signal(self, candles, ...)` taking the candles/snapshot as the first positional argument — none implement `generate_signals` or rely on `__call__`, and none accept `candles_snapshot=`, `()`, or `account_balance=` calling conventions. Replace the lookup-and-fallback ladder with a direct `sig_out = sg.generate_signal(snapshot)` call inside the existing `try/except Exception as exc:` block (keep the existing exception logging and early-return-on-failure behavior; just remove the multi-name lookup and the three `TypeError` fallback attempts).
+- Acceptance criteria (test-first): test asserts `SignalOrchestrator._run_entries` calls `signal_generator.generate_signal` exactly once with `snapshot` as its sole positional argument, using a `MagicMock` signal_generator returning `{"symbol": "EURUSD", "final_signal": "hold"}`. A second, parametrized test instantiates each of `StrongSignalStrategy`, `MultiTimeframeStrongSignalStrategy`, and `NTickConfirmedSignalStrategy` with minimal constructor args and a stub `indicators`/`base` dependency, wraps each in a `SignalOrchestrator`, and asserts calling `_run_entries` with a small candles snapshot completes without raising — proving the simplified direct call still works for every real implementation.
+
+#### Subphase 3.3: Log (don't silently swallow) exit-execution failures
+
+- Change: `app/services/trade_services.py::SignalOrchestrator._execute_exit_actions` — the two `except TypeError: try: closer(...) except Exception: pass` / `except Exception: pass` blocks around the `closer(...)` call silently discard all errors. Replace both bare `except Exception: pass` blocks with `except Exception as exc: self._log_exception(f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}")`, reusing the `_log_exception` helper already defined on the class.
+- Acceptance criteria (test-first): test constructs `SignalOrchestrator(collector=MagicMock(), signal_generator=MagicMock(), broker=MagicMock(), logger=MagicMock())` where `broker.close_position.side_effect = RuntimeError("boom")` and `broker.close_trade`/`close_order` are absent (so `close_position` is the one selected); calls `orchestrator._execute_exit_actions([{"ticket": 1, "symbol": "EURUSD", "side": "sell", "volume": 0.01}])`; asserts `orchestrator.logger.exception.called` is `True` — proving the failure is now surfaced instead of silently discarded.
+
+### Phase 4: Composition-root testability for the API layer
+
+#### Subphase 4.1: Add getter functions for factory singletons
+
+- Change: `app/factory.py` — after the existing module-level construction of `md`, `br`, `trade_executor`, `orchestrators` (no change to when/how these are built — they stay eagerly constructed at import time in `Mode.LIVE`, exactly as today), add four plain functions at the end of the file: `def get_market_data(): return md`, `def get_broker(): return br`, `def get_trade_executor(): return trade_executor`, `def get_orchestrators(): return orchestrators`.
+- Acceptance criteria (test-first): test asserts `app.factory.get_market_data() is app.factory.md`, `app.factory.get_broker() is app.factory.br`, `app.factory.get_trade_executor() is app.factory.trade_executor`, and `app.factory.get_orchestrators() is app.factory.orchestrators` — four identity checks proving each getter returns the exact existing singleton, not a copy.
+
+#### Subphase 4.2: Wire endpoints.py through FastAPI `Depends()`
+
+- Change: `app/routes/endpoints.py` — remove the direct `from app.factory import (orchestrators, signal_orchestrator, trade_executor, br, md)` import (per Subphase 1.5, `rm` is already gone). Instead `from app.factory import get_orchestrators, get_broker, get_market_data, get_trade_executor` and `from fastapi import APIRouter, Depends`. Give every route handler the collaborators it actually uses as `Depends(...)`-injected parameters instead of reading the module-level names, e.g. `def get_status(orchestrators: dict = Depends(get_orchestrators), trade_executor = Depends(get_trade_executor)):`. Replace `get_any_orchestrator()`'s body with `return next(iter(orchestrators.values()))` taking `orchestrators` as a parameter (or inline this logic at each of its two call sites) instead of referencing the module-level `signal_orchestrator` name. Every route (`/status`, `/trading/start`, `/trading/stop`, `/signal/latest`, `/live_signal`, `/tick`, `/simulated_positions`, `/close_all`, `/test_historical`, `/stop_orchestrator`) must obtain `orchestrators`/`br`/`md`/`trade_executor` only via its `Depends(...)` parameters, never via a module-level import.
+- Acceptance criteria (test-first): test builds `app = FastAPI(); app.include_router(router)`, sets `app.dependency_overrides[get_trade_executor] = lambda: mock_trade_executor` and `app.dependency_overrides[get_orchestrators] = lambda: {"EURUSD": mock_orchestrator}` (both `MagicMock`s, `mock_orchestrator.is_running.return_value = True`), issues `GET /status` via `TestClient(app)`, and asserts the response is `200` with JSON `{"orchestrator_running": {"EURUSD": True}, ...}` reflecting the mocked orchestrator — proving `/status` no longer needs the real `app.factory` singletons to be exercised.
+
+#### Subphase 4.3: Prove the whole router is testable without touching MT5
+
+- Change: none (test-only). Add `tests/routes/test_endpoints.py` (extending the file from Subphase 2.1/4.2 if already created) covering the remaining routes not yet covered.
+- Acceptance criteria (test-first): a single test monkeypatches `MetaTrader5.initialize` to raise `AssertionError("MT5 should not be touched in this test")`, overrides `get_broker`, `get_market_data`, `get_trade_executor`, and `get_orchestrators` with `MagicMock`-backed lambdas (configuring return values so each route's logic succeeds, e.g. `mock_broker.mode = TradingMode.DEMO`, `mock_broker.open_positions_sim = []`, `mock_md.get_historical_candles.return_value = []`), then drives all ten routes via `TestClient` and asserts every response status is in `range(200, 300)` — proving the full router is exercisable through dependency overrides alone, with zero real MT5/broker/orchestrator construction.
+
+### Phase 5: Backfill tests for exit-strategy logic
+
+#### Subphase 5.1: Cover `exit_shared.py`'s accessors for both dict and object positions
+
+- Change: none (test-only). `tests/exit_strategies/test_exit_shared.py` (extend the file created in Subphase 2.2).
+- Acceptance criteria (test-first): a parametrized test covers `pos_symbol`, `pos_side` (both numeric `type=0`/`type=1` and string `"buy"`/`"sell"`/`"long"`/`"short"`/an unrecognized string), `pos_ticket`, `pos_entry`, `pos_volume`, and `pos_profit`, each run twice — once against a dict position (`make_position(as_dict=True, ...)`) and once against an object position (`make_position(as_dict=False, ...)`) — asserting identical, correct results from both shapes; plus one case per accessor asserting `None` is returned when the relevant field is entirely absent.
+
+#### Subphase 5.2: Cover `ExitTrade.on_tick`'s cooldown gate
+
+- Change: none (test-only). New file `tests/exit_strategies/test_exit_trade.py`.
+- Acceptance criteria (test-first): construct `ExitTrade(broker=mock_broker, risk_manager=MagicMock())` where `mock_broker.get_open_positions.return_value = [make_position(as_dict=True, ticket=1, profit=-6.0)]`; call `exit_trade.on_tick(make_tick())` twice back-to-back (same test, no sleep); assert the first call's return list has length `1` with `reason="profit_drop"`, and the second call (still within `EXIT_COOLDOWN_SECONDS`) returns `[]` — proving `_should_exit`'s per-ticket cooldown suppresses a second exit action on the very next tick.
+
+#### Subphase 5.3: Cover `ExitTrade.on_candle_close`'s HTF gating
+
+- Change: none (test-only). `tests/exit_strategies/test_exit_trade.py` (extend from 5.2).
+- Acceptance criteria (test-first): construct `ExitTrade` with `ExitTradeConfig(htf_filter_enabled=True, profit_exits_on_candle_close=True, profit_exits_on_tick=False)`; set up a break-even-armed buy position and state such that `ProfitExitManager.check_exit_on_candle_close` would otherwise return an exit action; call `exit_trade.update_bias("EURUSD", m15="buy")` then `exit_trade.on_candle_close(symbol="EURUSD", close_price=1.1005)` and assert the result is `[]` (HTF bias `m15="buy"` supports an existing buy position, so the profit exit is gated off); then call `exit_trade.update_bias("EURUSD", m15="sell")` and assert `on_candle_close(...)` now returns a non-empty list (HTF bias opposes the position, so the exit is allowed through).
+
+#### Subphase 5.4: Cover `ProfitExitManager`'s break-even arming path
+
+- Change: none (test-only). `tests/exit_strategies/managers/test_profit.py` (extend from Subphase 2.3).
+- Acceptance criteria (test-first): test asserts `check_exit_on_tick` returns `None` and does not set `state.be_armed = True` while `is_break_even(position)` is `False` (position still at a loss, arming not yet reached); a second call with the same state but `is_break_even(position)` now `True` (profit `>= 0`) asserts `state.be_armed` becomes `True` and the method returns `None` for that call (arming happens without an immediate exit).
+
+#### Subphase 5.5: Cover `LossExitManager`'s "recovered after unprofitable" exit path
+
+- Change: none (test-only). `tests/exit_strategies/managers/test_loss.py` (extend from Subphase 2.4).
+- Acceptance criteria (test-first): drive one `PosState` through three sequential `check_exit_on_tick` calls with profit values `0.0` (arms BE), `-1.0` (sets `was_unprofitable_after_be=True`, returns `None` since `-1.0 > drop_profit_after_be=-5`), then `0.02` (`0.0 < 0.02 < 0.05`); assert the third call returns an `ExitAction` with `reason="be_recovered_after_unprofit"`.
+
+## Open questions
+
+- `app/main3.py` (deleted in Subphase 1.2) is the only place in the codebase implementing a `/ws/symbol_data` WebSocket endpoint and a `/account_info` route — neither exists in `app/main.py`/`app/routes/endpoints.py`. The file is already non-functional (broken imports), so nothing currently works either way, but confirm whether that WebSocket/account-info functionality is still wanted before or after this deletion lands; if so, it should be ported into `app/routes/endpoints.py` as its own follow-up plan rather than folded into this cleanup sweep.
+- This plan does not add CI (no workflow files exist under `.github/` today). Once Phase 5's test suite exists, consider a separate small plan to add a GitHub Actions workflow running `pipenv run pytest` on push/PR.
+
+## QA
+
