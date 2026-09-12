@@ -50,4 +50,4 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
 # For backward compatibility, export the first orchestrator as signal_orchestrator
 signal_orchestrator = next(iter(orchestrators.values()))
 
-# Export orchestrators dict, trade_executor, br, rm, md for endpoints
+# Export orchestrators dict, trade_executor, br, md for endpoints

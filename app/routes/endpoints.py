@@ -5,7 +5,6 @@ from app.factory import (
     signal_orchestrator,  # for backward compatibility
     trade_executor,
     br,
-    rm,
     md,
 )
 from app.config.settings import Config
