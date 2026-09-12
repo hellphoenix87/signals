@@ -10,3 +10,9 @@ def test_backup_files_removed():
     assert not (REPO_ROOT / "app/exit_strategies/managers/loss copy.py").exists()
     assert not (REPO_ROOT / "app/exit_strategies/managers/profit copy.py").exists()
     assert not (REPO_ROOT / "app/signals/indicators/sma_crossover copy.py").exists()
+
+
+def test_dead_alternate_entrypoint_removed():
+    """Dead alternate entrypoint main3.py and its only dependency should not exist."""
+    assert not (REPO_ROOT / "app/main3.py").exists()
+    assert not (REPO_ROOT / "app/utils/connection.py").exists()
