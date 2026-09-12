@@ -10,6 +10,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# Several app modules (app.factory, transitively app.main / app.routes.endpoints)
+# call real MT5 functions like mt5.initialize() at *module import time*. If a test
+# file does a top-level `from app.routes.endpoints import router`, that import runs
+# during pytest collection, before any per-test fixture (including mock_mt5 below)
+# has a chance to run -- so it would hit a real MT5 terminal regardless of which
+# test asks for mock_mt5. Patch a safe baseline unconditionally, right here at
+# conftest.py's own import time, since pytest always imports conftest.py before any
+# test module in this directory. The mock_mt5 fixture below still exists for tests
+# that want to assert on calls or customize return values.
+import MetaTrader5 as _mt5_baseline
+
+for _name, _default in (
+    ("initialize", True),
+    ("shutdown", None),
+    ("symbol_select", True),
+    ("symbol_info_tick", None),
+    ("positions_get", ()),
+    ("last_error", (0, "no error")),
+):
+    if hasattr(_mt5_baseline, _name):
+        setattr(_mt5_baseline, _name, lambda *a, _default=_default, **k: _default)
+
 
 @pytest.fixture
 def mock_mt5(monkeypatch):
