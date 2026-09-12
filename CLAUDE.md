@@ -18,7 +18,7 @@ just format    # pipenv run black .
 just shell     # pipenv shell
 ```
 
-Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `test_mt5.py` at the repo root is a separate manual MT5 connectivity smoke script, not a pytest test.
+Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `scripts/mt5_smoke.py` is a separate manual MT5 connectivity smoke script, not a pytest test.
 
 Running the app requires a running/configured MetaTrader 5 terminal — `app/main.py` calls `mt5.initialize()` on startup and raises if it fails.
 

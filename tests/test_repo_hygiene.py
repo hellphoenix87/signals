@@ -37,3 +37,38 @@ def test_no_process_handling_references():
         if "process_handling" in content:
             matches.append(str(py_file.relative_to(REPO_ROOT)))
     assert not matches, "Found references to process_handling in:\n" + "\n".join(matches)
+
+
+def test_mt5_smoke_script_moved():
+    """MT5 smoke test should be moved to scripts/ and removed from root."""
+    assert not (REPO_ROOT / "test_mt5.py").exists()
+    assert (REPO_ROOT / "scripts/mt5_smoke.py").exists()
+
+
+def test_no_stray_test_files_in_repo_root():
+    """No pytest-collectible files (test_*.py or *_test.py) should exist in repo root.
+
+    Both glob patterns are checked because pytest's default python_files setting
+    (pytest.ini here only overrides testpaths, not python_files) collects either
+    shape -- a file matching *_test.py at the repo root is just as much a hazard
+    as one matching test_*.py if a test runner or IDE is ever pointed at the repo
+    root directly instead of the shielded `testpaths = tests` default.
+    """
+    stray_test_files = []
+    for item in REPO_ROOT.iterdir():
+        if not item.is_file() or item.suffix != ".py":
+            continue
+        if item.name.startswith("test_") or item.name.endswith("_test.py"):
+            stray_test_files.append(str(item.relative_to(REPO_ROOT)))
+    assert not stray_test_files, "Found stray pytest-collectible files in repo root:\n" + "\n".join(
+        stray_test_files
+    )
+
+
+def test_mt5_reference_updated_in_claude_md():
+    """CLAUDE.md should reference the new MT5 smoke test location, not the old one."""
+    claude_md = REPO_ROOT / "CLAUDE.md"
+    assert claude_md.exists()
+    content = claude_md.read_text(encoding="utf-8")
+    assert "test_mt5.py" not in content, "CLAUDE.md should not reference test_mt5.py"
+    assert "scripts/mt5_smoke.py" in content, "CLAUDE.md should reference scripts/mt5_smoke.py"
