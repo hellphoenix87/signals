@@ -37,17 +37,20 @@ fully-wired app" pattern:
 
 2. `TestPreFixEndpointsCannotBeExercisedThisWay` empirically confirms this is
    the actual regression being closed: it loads `app/routes/endpoints.py`'s
-   source *as committed on `master` before this subphase* (via
-   `git show master:app/routes/endpoints.py`, executed into a private,
-   isolated module -- never touching the real working-tree file, which
-   `developer` may be concurrently editing) and shows that overriding the
-   very same `get_broker`/`get_orchestrators` callables has **no effect** on
-   that old code's routes: `/simulated_positions` still returns the *real*
-   `app.factory.br.open_positions_sim` (always `[]` for a real, LIVE-mode
-   `Broker` -- see `app/trade_execution/broker.py`), not the mocked value the
-   override supplied, because the pre-fix route reads the module-level `br`
-   name directly and has no `Depends()` parameter for
-   `app.dependency_overrides` to key on in the first place.
+   source *as committed at the immutable SHA `2795d07`* (Subphase 4.1's
+   merge commit -- the last commit on `master` before this subphase; see
+   `_PRE_FIX_COMMIT_SHA` below for why this must be a fixed SHA and never a
+   moving branch ref like `master` -- once this subphase merges, `master`
+   *becomes* the DI version, which would invert every assertion in this
+   class), executed into a private, isolated module -- never touching the
+   real working-tree file, which `developer` may be concurrently editing --
+   and shows that overriding the very same `get_broker`/`get_orchestrators`
+   callables has **no effect** on that old code's routes: `/simulated_positions`
+   still returns the *real* `app.factory.br.open_positions_sim` (always `[]`
+   for a real, LIVE-mode `Broker` -- see `app/trade_execution/broker.py`),
+   not the mocked value the override supplied, because the pre-fix route
+   reads the module-level `br` name directly and has no `Depends()`
+   parameter for `app.dependency_overrides` to key on in the first place.
 
 No real MT5/broker calls are made anywhere in this file -- `mock_mt5`
 (tests/conftest.py) is the only boundary mock, and even that is only
@@ -64,32 +67,60 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# The immutable commit this subphase's "prove the old code couldn't be
+# exercised this way" tests load their "pre-fix" source from -- Subphase
+# 4.1's merge commit, i.e. the last commit on `master` *before* this
+# subphase's DI wiring landed.
+#
+# This MUST be a fixed SHA, never a moving ref like "master" or "HEAD":
+# those tests assert the pre-fix code lacks Depends() and that overriding
+# it has no effect. Once this subphase's branch merges, `master` (and this
+# branch's own `HEAD`) *become* the DI version, which would silently invert
+# both assertions -- they'd start failing exactly when the code is correct.
+# A test proving "the old code was broken" cannot read a ref that will
+# itself become the new code.
+_PRE_FIX_COMMIT_SHA = "2795d07"
+
 
 def _load_endpoints_module_from_git_ref(ref: str, private_module_name: str):
-    """Load `app/routes/endpoints.py`'s source *as committed at `ref`* into an
-    isolated module under `private_module_name` -- never touching the real
-    working-tree file (which `developer` may be concurrently editing on this
-    same branch)."""
-    source = subprocess.run(
+    """Load `app/routes/endpoints.py`'s source *as committed at `ref`* (an
+    immutable SHA -- see `_PRE_FIX_COMMIT_SHA` above) into an isolated module
+    under `private_module_name` -- never touching the real working-tree file
+    (which `developer` may be concurrently editing on this same branch).
+
+    Skips (rather than errors) if `ref` isn't available locally (e.g. a
+    shallow checkout that never fetched it) -- this is a supplementary
+    regression-lock, not the primary behavioral proof of this subphase."""
+    result = subprocess.run(
         ["git", "show", f"{ref}:app/routes/endpoints.py"],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            f"git show {ref}:app/routes/endpoints.py failed (commit not "
+            f"available locally, e.g. a shallow checkout): {result.stderr!r}"
+        )
 
     spec = importlib.util.spec_from_loader(private_module_name, loader=None)
     module = importlib.util.module_from_spec(spec)
     sys.modules[private_module_name] = module
-    exec(
-        compile(source, f"<git:{ref}:app/routes/endpoints.py>", "exec"),
-        module.__dict__,
-    )
+    try:
+        exec(
+            compile(result.stdout, f"<git:{ref}:app/routes/endpoints.py>", "exec"),
+            module.__dict__,
+        )
+    finally:
+        # Don't leak this private, exec'd module into sys.modules beyond
+        # this test -- nothing else needs to import it by name.
+        del sys.modules[private_module_name]
     return module
 
 
@@ -372,15 +403,18 @@ class TestEndpointsWiredThroughDependencyOverrides:
 
 class TestPreFixEndpointsCannotBeExercisedThisWay:
     """Empirically confirms the regression this subphase closes: the exact
-    same override technique used above has no effect on the pre-fix
-    (`master`) version of `app/routes/endpoints.py`, because it has no
-    `Depends()` parameters for `app.dependency_overrides` to key on."""
+    same override technique used above has no effect on the pre-fix version
+    of `app/routes/endpoints.py` pinned at the immutable `_PRE_FIX_COMMIT_SHA`
+    (Subphase 4.1's merge commit -- deliberately NOT the moving `master`/
+    `HEAD` ref, which becomes the DI version once this subphase merges),
+    because it has no `Depends()` parameters for `app.dependency_overrides`
+    to key on."""
 
     def test_overriding_get_broker_does_not_change_pre_fix_simulated_positions(
         self, mock_mt5
     ):
         pre_fix_module = _load_endpoints_module_from_git_ref(
-            "master", "_pre_fix_endpoints_4_2"
+            _PRE_FIX_COMMIT_SHA, "_pre_fix_endpoints_4_2"
         )
 
         import app.factory as factory
@@ -421,7 +455,7 @@ class TestPreFixEndpointsCannotBeExercisedThisWay:
         import fastapi
 
         pre_fix_module = _load_endpoints_module_from_git_ref(
-            "master", "_pre_fix_endpoints_4_2_structural"
+            _PRE_FIX_COMMIT_SHA, "_pre_fix_endpoints_4_2_structural"
         )
 
         for route in pre_fix_module.router.routes:
