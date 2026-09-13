@@ -18,7 +18,7 @@ just format    # pipenv run black .
 just shell     # pipenv shell
 ```
 
-Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `scripts/mt5_smoke.py` is a separate manual MT5 connectivity smoke script, not a pytest test.
+Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). `tests/e2e/` is the exception — it holds full-stack tests that drive the real, wired-together app (real FastAPI app, real `SignalOrchestrator`/`ExitTrade`/`Broker`, only MT5 itself mocked at the boundary) rather than mirroring one `app/` module; per the spec/TDD workflow below, it's owned and written by the `qa` agent, not the `developer` agent. Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `scripts/mt5_smoke.py` is a separate manual MT5 connectivity smoke script, not a pytest test.
 
 Running the app requires a running/configured MetaTrader 5 terminal — `app/main.py` calls `mt5.initialize()` on startup and raises if it fails.
 
@@ -54,9 +54,11 @@ Non-trivial work goes through a plan-driven, test-first flow using four project 
 | Agent | Model | Job |
 |---|---|---|
 | `architect` | sonnet (opus when triage says elevated) | Turns a request into a phased plan under `docs/plans/`, using the `plan` skill. Never writes application code. |
-| `developer` | haiku | Implements exactly one subphase at a time, test-first, using the `tdd-subphase` skill. |
-| `qa` | sonnet | Verifies a finished subphase/phase against the plan's acceptance criteria using the `qa-verify` skill; only edits the plan's QA section. |
-| `pr-reviewer` | sonnet (opus when triage says elevated) | Reviews one phase/subphase branch's diff before it merges, via the built-in `code-review` skill. |
+| `developer` | haiku | Implements exactly one subphase at a time, test-first (unit/integration tests only), using the `tdd-subphase` skill. Done when its own unit/integration tests are green — nothing more. |
+| `qa` | sonnet | Owns the quality gate, in two passes. **Author** (runs in parallel with `developer`, starts as soon as the subphase exists): writes/extends `tests/e2e/` straight from the plan's stated requirements/acceptance criteria alone — never reads `developer`'s in-progress diff. **Verify** (starts only once `developer` reports its unit/integration tests green): runs the full suite (its own e2e tests plus `developer`'s unit/integration tests) against the real implementation and checks both against the plan's acceptance criteria. Edits `tests/e2e/**` and the plan's QA section; never pushes, opens a PR, or merges. |
+| `pr-reviewer` | sonnet (opus when triage says elevated) | Reviews one phase/subphase branch's diff before it merges, via the built-in `code-review` skill. Starts only after `qa`'s verify pass signs off. Never pushes, opens a PR, or merges. |
+
+**Only the main session pushes, opens PRs, or merges branches — no exceptions.** None of the four agents above ever runs `git push`, `gh pr create`, or `gh pr merge`; that is the main session's job alone, everywhere in this workflow (plan-branch setup, every phase/subphase branch, and anywhere else). This is a hard governance rule, not just a convention — see the permission hardening below.
 
 **Plan lifecycle** — one markdown file per feature/bugfix, physically moved as its status changes:
 
@@ -76,17 +78,27 @@ When the user asks to **implement** a plan (as opposed to just design one), the 
 
 **One branch per phase/subphase**, named `<plan-slug>-<phase>` or `<plan-slug>-<phase>.<subphase>` (matching the plan file's own `Phase N` / `Subphase N.M` numbering) — e.g. plan `ntick-macd-confirmation` → branches `ntick-macd-confirmation-1.1`, `ntick-macd-confirmation-1.2`, `ntick-macd-confirmation-2`. Only one such branch is ever in flight at a time; the next phase/subphase does not start until the current one is merged.
 
+**Every `developer`/`qa`/`pr-reviewer` call below is a brand-new agent spawn** — none of the three are reused across subphases or phases. The one exception is `qa`'s own author→verify resumption *within* a single subphase (step 5), which is a short-lived, tightly-scoped resume, not a standing session. Fresh spawns were chosen deliberately over longer-lived reused agents: a reused agent's context only grows, there's no tool to selectively clear it, and a resumed agent depends on the main session holding a live reference to it across however long the phase takes — a fresh spawn has neither problem.
+
+**Every spawn below runs in the foreground (`run_in_background: false`).** This entire flow is strictly sequential — only one branch is ever in flight, and the main session has nothing else useful to do while any agent runs — which is exactly the condition under which the `Agent` tool's own guidance calls for foreground rather than its background default. Where two agents genuinely need to run at once (`developer` + `qa`'s author pass, step 4), that comes from issuing both `Agent` calls in the *same message*, not from backgrounding either of them — the harness dispatches every tool call in one message together and waits for all of them, so foreground calls in one message still run concurrently.
+
+**Before invoking any of the three, extract just this subphase's `Change`/`Acceptance criteria` text from the plan file and paste it directly into that agent's prompt** — don't tell the agent to go open the plan file itself to find its own subphase. The plan file's accumulated QA history is tens of thousands of tokens by the middle of a multi-phase plan and only grows every subphase; a fresh spawn re-reading the whole file just to find its ~15-line section is pure waste. The agent still reads actual code files as needed — that's real work — it just doesn't need the plan file for its base instructions.
+
 For each phase/subphase, in order:
 
 1. `git checkout master && git pull` — always branch from the latest merged state (this repo's trunk is `master`, not `main`).
 2. Create `<plan-slug>-<phase[.subphase]>` off master.
 3. First subphase of the plan: move the plan file `docs/plans/todo/<slug>.md` → `docs/plans/in-progress/<slug>.md` as part of this branch's commit.
-4. Invoke `developer` (haiku) to implement it test-first (`tdd-subphase` skill).
-5. Invoke `qa` (sonnet) to verify against the plan's acceptance criteria (`qa-verify` skill); loop back to `developer` on the same branch until it passes.
-6. Invoke `pr-reviewer` (sonnet, or opus per the plan's triage) against the branch diff; loop back to `developer` on the same branch until there are no blocking findings.
-7. Push the branch, open a PR against master, and **merge it automatically** — no user confirmation needed for this merge specifically.
+4. Invoke `developer` and `qa` **at the same time**, in a single message with both Agent tool calls (a `developer` call followed sequentially by a `qa` call, in two separate turns, would run them one after another instead of concurrently) — as two independent agents sharing the same checkout:
+   - `developer` (haiku, `tdd-subphase` skill) implements the subphase test-first — unit/integration tests only — and iterates on its own until those tests are green. That's `developer` done; it does not wait for or coordinate with `qa`.
+   - `qa` (sonnet, `qa-verify` skill's author step) writes/extends `tests/e2e/` for this subphase using only the plan's stated requirements/acceptance criteria (handed to it directly per the note above) — it must not read `developer`'s in-progress diff while authoring, so the e2e test stays a black-box check against the spec rather than a mirror of whatever `developer` happened to implement.
+   - Sharing one checkout is safe here without worktree isolation because of two things, both enforced in each agent's own instructions: their file sets never overlap (`developer` writes `app/` + `tests/` outside `tests/e2e/`; `qa`'s author pass writes only `tests/e2e/`), and **neither agent runs `git add`/`git commit`/`git push`/`git checkout -b` itself** — they only edit files in the working tree. The main session is the one that stages and commits everything once both are done, which is also what removes any risk of two agents racing on the same `.git` index.
+5. Wait for **both** `developer` (tests green) and `qa`'s author pass (e2e written) to finish — not just `developer` — then stage/commit the combined result. Resume the same `qa` agent (continue its session rather than starting a fresh one, so it still has the e2e tests it authored) for its **verify** pass: run the full suite — its `tests/e2e/` plus `developer`'s unit/integration tests — against the actual implementation, and check both against the plan's acceptance criteria. Loop back to `developer` on the same branch on any gap (a fresh `developer` spawn, per the no-reuse note above), then re-run `qa`'s verify pass. During this pass `qa` may use read-only/diagnostic git commands (`diff`, `log`, `show`, or a paired `stash`/`stash pop` to compare before/after behavior) to verify a fix — that's inspection, not committing the subphase's change, and remains fine.
+6. Only once `qa`'s verify pass signs off, invoke `pr-reviewer` (sonnet, or opus per the plan's triage) against the branch diff; loop back to `developer` (again, a fresh spawn) on the same branch until there are no blocking findings.
+7. Push the branch, open a PR against master, and **merge it automatically** — no user confirmation needed for this merge specifically. This step is always performed by the main session; none of the four agents does it themselves.
 8. Last subphase of the plan: move the plan file `docs/plans/in-progress/<slug>.md` → `docs/plans/done/<slug>.md` as part of this final branch's commit, before opening its PR.
-9. `git checkout master && git pull` to pick up the merge, then proceed to the next phase/subphase's branch.
+9. **Delete the branch, both remote and local**, right after it merges (e.g. `gh pr merge --squash --delete-branch`, or a separate `git push origin --delete <branch>` plus `git branch -d <branch>`) — don't let merged phase/subphase branches accumulate on `origin`.
+10. `git checkout master && git pull` to pick up the merge, then proceed to the next phase/subphase's branch.
 
 ## Conventions (from prior Copilot instructions)
 
