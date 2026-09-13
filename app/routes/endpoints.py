@@ -7,6 +7,7 @@ from app.factory import (
     get_market_data,
 )
 from app.config.settings import Config
+from app.trade_execution.mode import TradingMode
 
 router = APIRouter()
 
@@ -78,8 +79,8 @@ def get_tick(
 
 @router.get("/simulated_positions")
 def get_simulated_positions(br = Depends(get_broker)):
-    if getattr(br, "mode", None) == br.mode.DEMO:
-        print(f"Paper trading mode: {len(br.open_positions_sim)} open positions")
+    if getattr(br, "mode", None) == TradingMode.BACKTEST:
+        print(f"Backtest mode: {len(br.open_positions_sim)} open positions")
     return br.open_positions_sim
 
 

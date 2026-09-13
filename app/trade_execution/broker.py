@@ -14,9 +14,9 @@ class Broker:
 
     `mode` selects how orders are placed: `"live"` sends real orders via MT5
     (against whatever account the terminal is logged into, demo or real),
-    `"demo"` and `"backtest"` instead append to `open_positions_sim` without
-    touching the MT5 trading API. MT5 itself is still initialized in every
-    mode, since ticks/symbol info are always fetched from the real terminal.
+    `"backtest"` instead appends to `open_positions_sim` without touching the
+    MT5 trading API. MT5 itself is still initialized in every mode, since
+    ticks/symbol info are always fetched from the real terminal.
     """
 
     def __init__(self, mode: str):
@@ -34,8 +34,6 @@ class Broker:
         print(f"Broker.place_buy called: {symbol}, lot={lot}, sl={sl}, tp={tp}")
         if self.mode == "backtest":
             self._backtest_trade(symbol, "BUY", lot, sl, tp, price)
-        elif self.mode == "demo":
-            self._simulate_trade(symbol, "BUY", lot, sl, tp)
         else:
             return self._mt5_place_order(symbol, "BUY", lot, sl, tp)
 
@@ -44,39 +42,16 @@ class Broker:
         print(f"Broker.place_sell called: {symbol}, lot={lot}, sl={sl}, tp={tp}")
         if self.mode == "backtest":
             self._backtest_trade(symbol, "SELL", lot, sl, tp, price)
-        elif self.mode == "demo":
-            self._simulate_trade(symbol, "SELL", lot, sl, tp)
         else:
             return self._mt5_place_order(symbol, "SELL", lot, sl, tp)
 
     def get_open_positions(self, symbol=None):
-        """Return open positions -- from the local simulator in demo/backtest mode, from MT5 otherwise."""
-        if self.mode in ("demo", "backtest"):
+        """Return open positions -- from the local simulator in backtest mode, from MT5 otherwise."""
+        if self.mode == "backtest":
             if symbol:
                 return [p for p in self.open_positions_sim if p["symbol"] == symbol]
             return self.open_positions_sim
         return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
-
-    def _simulate_trade(self, symbol, direction, lot, sl, tp):
-        """Append a simulated demo-mode position, priced off the live tick."""
-        price = 1.0
-        tick = mt5.symbol_info_tick(symbol)
-        if tick:
-            price = tick.ask if direction == "BUY" else tick.bid
-
-        trade = {
-            "symbol": symbol,
-            "direction": direction,
-            "volume": lot,
-            "open_price": price,
-            "sl": sl,
-            "tp": tp,
-            "profit": 0.0,
-            "ticket": self._next_sim_ticket,
-        }
-        self.open_positions_sim.append(trade)
-        self._next_sim_ticket += 1
-        print(f"Demo mode: {direction} {symbol} {lot} lots at {price}")
 
     def _backtest_trade(self, symbol, direction, lot, sl, tp, price):
         """Append a simulated backtest-mode position at the given historical price."""
@@ -288,7 +263,7 @@ class Broker:
         """
         Close a position by ticket (preferred), or by symbol/side if ticket is not provided.
 
-        In demo/backtest mode this removes matching entries from
+        In backtest mode this removes matching entries from
         `open_positions_sim` locally; in live mode it sends a real closing
         MT5 order for the given ticket.
         """
@@ -296,7 +271,7 @@ class Broker:
             f"Broker.close_position called: ticket={ticket}, symbol={symbol}, side={side}, volume={volume}"
         )
 
-        if self.mode in ("demo", "backtest"):
+        if self.mode == "backtest":
             before = len(self.open_positions_sim)
             if ticket is not None:
                 self.open_positions_sim = [
