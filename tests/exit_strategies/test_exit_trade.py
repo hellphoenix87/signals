@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from app.exit_strategies.exit_trade import ExitTrade
 
 

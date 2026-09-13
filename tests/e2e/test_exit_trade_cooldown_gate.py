@@ -34,8 +34,6 @@ close instruction every tick.
 
 from __future__ import annotations
 
-import pytest
-
 from app.exit_strategies.exit_shared import pos_ticket
 from app.exit_strategies.exit_trade import ExitTrade
 from app.risk.risk_manager import create_risk_manager
