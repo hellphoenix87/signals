@@ -1,3 +1,6 @@
+"""Composition root: builds every collaborator and wires one `SignalOrchestrator`
+per symbol in `Config.SYMBOLS`, eagerly, at import time, in `Mode.LIVE`."""
+
 from app.config.settings import Config
 from app.data.market_data import create_market_data
 from app.trade_execution.mode import TradingMode as Mode
@@ -7,7 +10,6 @@ from app.trade_execution.trade_execution import create_trade_executor
 from app.data.candles import create_candle_collector
 from app.services.trade_services import create_orchestrator
 from app.data.tick_collector import create_tick_collector
-from app.trade_execution.helpers.prepare_trade import create_enter_trade
 from app.exit_strategies.exit_trade import create_exit_trade
 from app.signals.signal_generation import strategy_factory
 import MetaTrader5 as mt5
@@ -21,7 +23,6 @@ tf_confirm = int(getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5))
 tf_bias = int(getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15))
 
 trade_executor = create_trade_executor(rm, br, md)
-enter_trade = create_enter_trade(md, rm, br, trade_executor)  # <-- Wire TradeExecutor
 
 orchestrators = {}
 for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
@@ -39,31 +40,28 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
     orchestrator = create_orchestrator(
         collector=collector,
         signal_generator=signal_generator,
-        trading_service=trade_executor,
+        trade_executor=trade_executor,
         tick_collector=tick,
         exit_trade=exit_trade,
-        broker=br,
-        enter_trade=enter_trade,
     )
     orchestrators[symbol] = orchestrator
 
-# For backward compatibility, export the first orchestrator as signal_orchestrator
-signal_orchestrator = next(iter(orchestrators.values()))
-
-# Export orchestrators dict, trade_executor, br, md for endpoints
-
 
 def get_market_data():
+    """Return the shared `MarketData` singleton."""
     return md
 
 
 def get_broker():
+    """Return the shared `Broker` singleton."""
     return br
 
 
 def get_trade_executor():
+    """Return the shared `TradeExecutor` singleton."""
     return trade_executor
 
 
 def get_orchestrators():
+    """Return the `{symbol: SignalOrchestrator}` dict."""
     return orchestrators

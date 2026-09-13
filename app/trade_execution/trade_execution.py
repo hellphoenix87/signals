@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.config.settings import Config
 from app.exit_strategies.exit_shared import pos_ticket
@@ -16,6 +16,13 @@ def create_trade_executor(
 
 
 class TradeExecutor:
+    """Executes entry and exit orders for confirmed signals, via `broker`.
+
+    Position size and SL/TP distances are driven by `risk_manager` and
+    `Config`; a live price/balance are read from `market_data` whenever a
+    signal doesn't supply its own.
+    """
+
     def __init__(self, risk_manager: Any, broker: Any, market_data: Any):
         self.risk_manager = risk_manager
         self.broker = broker
@@ -24,17 +31,9 @@ class TradeExecutor:
         self.last_reset = datetime.now()
         self._last_exit_attempt_at: Dict[Any, datetime] = {}
 
-    # -------------------------
-    # Entry execution
-    # -------------------------
-
     def process_signal(self, signal: Any, candles: Any = None):
-        """
-        Accepts:
-          - list[dict]
-          - dict with {"signals": list[dict]}
-          - dict (single signal)
-        """
+        """Normalize `signal` (a list, a `{"signals": [...]}` dict, or a
+        single signal dict) into a list and execute each one."""
         if isinstance(signal, list):
             return self.execute_signals(signal, candles=candles)
         if isinstance(signal, dict) and isinstance(signal.get("signals"), list):
@@ -46,7 +45,17 @@ class TradeExecutor:
     def execute_signals(
         self, signals: Iterable[Dict[str, Any]], candles: Any = None
     ) -> None:
-        _ = candles  # reserved for future sizing/sl/tp based on context
+        """Place a market order for every actionable buy/sell signal.
+
+        For each signal: resolve a price (the signal's own `open_price`/
+        `price` if given, else the current live tick), resolve SL/TP pip
+        distances (the signal's own, else `Config.DEFAULT_SL_PIPS`/
+        `DEFAULT_TP_PIPS`), and resolve lot size (the signal's own `lot` if
+        given, else `risk_manager.calculate_lot_size` using the live account
+        balance and `Config.LOT_RISK_PERCENT`). A signal is skipped (not
+        aborting the rest of the batch) if its direction, price, or lot
+        can't be resolved.
+        """
         print(f"TradeExecutor.execute_signals called at {datetime.now()}")
 
         any_actionable = False
@@ -65,29 +74,24 @@ class TradeExecutor:
             if direction is None:
                 continue
 
-            lot = self._extract_lot(symbol=str(symbol), signal=s)
-            if lot is None:
+            price = self._resolve_price(symbol=str(symbol), direction=direction, signal=s)
+            if price is None:
+                print(f"Skipping signal (no price available): {s!r}")
+                continue
+
+            sl_pips = float(s.get("sl_pips") or getattr(Config, "DEFAULT_SL_PIPS", 5.0))
+            tp_pips = float(s.get("tp_pips") or getattr(Config, "DEFAULT_TP_PIPS", 50.0))
+
+            lot = self._resolve_lot(
+                symbol=str(symbol), price=price, sl_pips=sl_pips, signal=s
+            )
+            if lot is None or lot <= 0:
                 print(f"Skipping signal (could not determine lot): {s!r}")
                 continue
 
-            # Always calculate SL/TP here using config defaults if not present
-            price = s.get("open_price") or s.get("price")
-            sl_pips = s.get("sl_pips") or getattr(Config, "DEFAULT_SL_PIPS", 5.0)
-            tp_pips = s.get("tp_pips") or getattr(Config, "DEFAULT_TP_PIPS", 50.0)
-
-            calc = getattr(self.broker, "calculate_sl_tp_prices", None)
-            if callable(calc) and price is not None:
-                sl, tp = calc(
-                    direction,
-                    price,
-                    sl_pips,
-                    tp_pips,
-                    symbol,
-                    units="pips",
-                )
-            else:
-                sl = None
-                tp = None
+            sl, tp = self.broker.calculate_sl_tp_prices(
+                direction, price, sl_pips, tp_pips, symbol, units="pips"
+            )
 
             any_actionable = True
             print(f"Executing trade: {symbol} {direction} lot={lot} sl={sl} tp={tp}")
@@ -101,17 +105,14 @@ class TradeExecutor:
             print("No actionable signals (buy/sell), no trades executed.")
 
     def _extract_direction(self, s: Dict[str, Any]) -> Optional[str]:
-        """
-        Returns "BUY" / "SELL" / None.
-        """
-        # Old format
+        """Return "BUY"/"SELL"/`None`, reading `direction` if present, else
+        falling back to `final_signal`/`signal`/`side`/`action`."""
         direction = s.get("direction")
         if isinstance(direction, str) and direction.strip():
             d = direction.strip().upper()
             if d in ("BUY", "SELL"):
                 return d
 
-        # New generator format(s)
         side = (
             s.get("final_signal")
             or s.get("signal")
@@ -131,61 +132,46 @@ class TradeExecutor:
         print(f"Skipping malformed signal (unknown direction/side={side!r}): {s!r}")
         return None
 
-    def _extract_lot(self, *, symbol: str, signal: Dict[str, Any]) -> Optional[float]:
-        """
-        Determine lot size:
-          1) explicit lot in signal
-          2) ask risk_manager via common method names
-          3) fallback to config LOT_SIZE / DEFAULT_LOT / 0.01
-        """
+    def _resolve_price(
+        self, *, symbol: str, direction: str, signal: Dict[str, Any]
+    ) -> Optional[float]:
+        """Return the signal's own price if given, else the live tick's ask
+        (BUY) or bid (SELL) via `market_data`; `None` if neither is available."""
+        price = signal.get("open_price") or signal.get("price")
+        if price is not None:
+            return float(price)
+
+        tick = self.market_data.get_symbol_tick(symbol)
+        if tick is None:
+            return None
+        return float(tick.ask if direction == "BUY" else tick.bid)
+
+    def _resolve_lot(
+        self, *, symbol: str, price: float, sl_pips: float, signal: Dict[str, Any]
+    ) -> Optional[float]:
+        """Return the signal's own `lot` if given, else a risk-percentage
+        lot size from `risk_manager`, sized against the live account balance."""
         lot = signal.get("lot")
         if lot is not None:
-            try:
-                return float(lot)
-            except Exception:
-                return None
+            return float(lot)
 
-        # Common risk manager method names (best-effort)
-        for name in (
-            "calculate_lot",
-            "calculate_lot_size",
-            "get_lot",
-            "get_lot_size",
-            "position_size",
-            "compute_lot",
-        ):
-            fn = getattr(self.risk_manager, name, None)
-            if callable(fn):
-                try:
-                    # try (symbol, signal)
-                    try:
-                        v = fn(symbol, signal)
-                    except TypeError:
-                        # try (symbol)
-                        v = fn(symbol)
-                    if v is not None:
-                        return float(v)
-                except Exception:
-                    pass
+        account_info = self.market_data.get_account_info()
+        balance = float(account_info.balance) if account_info is not None else 0.0
 
-        # Config fallback
-        for k in ("LOT_SIZE", "DEFAULT_LOT", "MIN_LOT"):
-            v = getattr(Config, k, None)
-            if v is not None:
-                try:
-                    return float(v)
-                except Exception:
-                    pass
-
-        return 1
-
-    # -------------------------
-    # Exit execution (used by hybrid ExitTrade)
-    # -------------------------
+        return self.risk_manager.calculate_lot_size(
+            balance,
+            sl_pips,
+            symbol_price=price,
+            symbol=symbol,
+            risk_percent=getattr(Config, "LOT_RISK_PERCENT", 1.0),
+        )
 
     def execute_exit(self, action: Any):
-        """
-        Executes an exit action by closing the position via the broker.
+        """Close a position by ticket, via a real MT5 closing order.
+
+        Debounced per ticket (`Config`-independent, hardcoded 2s) so a
+        protective-exit loop firing every tick doesn't spam `order_send`
+        for the same position while its close order is already in flight.
         """
         import MetaTrader5 as mt5
 
@@ -196,7 +182,6 @@ class TradeExecutor:
         if ticket is None or not symbol or volume <= 0:
             return None
 
-        # Debounce: do not spam order_send every tick for the same ticket
         now = datetime.now()
         last_try = self._last_exit_attempt_at.get(ticket)
         if last_try and (now - last_try).total_seconds() < 2.0:
@@ -223,13 +208,12 @@ class TradeExecutor:
             print(f"Position with ticket {ticket} not found for exit.")
             return None
 
-        # MT5: position.type -> 0=BUY, 1=SELL
         pos_type = getattr(position, "type", None)
         if pos_type is None:
             print(f"Cannot determine position type for ticket {ticket}; aborting exit.")
             return None
 
-        close_is_sell = int(pos_type) == 0  # close BUY with SELL
+        close_is_sell = int(pos_type) == 0
         order_type = mt5.ORDER_TYPE_SELL if close_is_sell else mt5.ORDER_TYPE_BUY
 
         tick = mt5.symbol_info_tick(symbol)
@@ -261,7 +245,6 @@ class TradeExecutor:
                 "price": price,
                 "deviation": int(getattr(Config, "MAX_DEVIATION", 5) or 5),
                 "magic": int(getattr(Config, "MAGIC_NUMBER", 123456) or 123456),
-                # "comment": "...",  # OMIT: some brokers/terminals reject comments
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": filling,
             }
@@ -320,12 +303,10 @@ class TradeExecutor:
         return {"closed": closed, "failed": failed}
 
     def _safe_mt5_comment(self, text: str, *, max_len: int = 31) -> str:
-        """
-        MT5/brokers often require comment <= 31 chars and ASCII-ish.
-        """
+        """Sanitize `text` to MT5's comment constraints (<= 31 chars, ASCII-ish)."""
         s = str(text or "")
-        s = s.encode("ascii", "ignore").decode("ascii")  # drop non-ascii
-        s = re.sub(r"[^A-Za-z0-9 _:\-\.]", "", s)  # keep a conservative set
+        s = s.encode("ascii", "ignore").decode("ascii")
+        s = re.sub(r"[^A-Za-z0-9 _:\-\.]", "", s)
         s = s.strip()
         if not s:
             s = "EXIT"

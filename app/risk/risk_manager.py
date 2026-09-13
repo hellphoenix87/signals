@@ -1,5 +1,7 @@
 import MetaTrader5 as mt5
 
+from app.config.settings import Config
+
 
 def create_risk_manager(broker):
     """Provider for DI wiring of RiskManager."""
@@ -7,32 +9,31 @@ def create_risk_manager(broker):
 
 
 class RiskManager:
+    """Computes position size from account risk percentage and stop distance."""
+
     def __init__(self, broker):
         self.broker = broker
-        self.daily_risk_used = 0.0
-
-    def reset_daily_risk(self):
-        self.daily_risk_used = 0.0
 
     def calculate_lot_size(
         self, account_balance, sl_pips, symbol_price, symbol, risk_percent
     ):
-        MIN_SL_PIPS = 5
+        """Return a lot size sized so a full stop-loss hit risks `risk_percent`
+        of `account_balance`, clamped to the symbol's volume min/max/step.
 
-        # Ensure SL is in pips
-        if sl_pips < MIN_SL_PIPS:
+        `sl_pips` is floored to `Config.MIN_SL_PIPS` so an unrealistically
+        tight stop can't inflate the computed lot size.
+        """
+        min_sl_pips = float(getattr(Config, "MIN_SL_PIPS", 5.0) or 5.0)
+        if sl_pips < min_sl_pips:
             print(
-                f"SL pips too small for {symbol}, adjusting to minimum {MIN_SL_PIPS}."
+                f"SL pips too small for {symbol}, adjusting to minimum {min_sl_pips}."
             )
-            sl_pips = MIN_SL_PIPS
+            sl_pips = min_sl_pips
 
-        pip = self.broker.get_pip_size(
-            symbol
-        )  # <-- true pip size (price units per pip)
+        pip = self.broker.get_pip_size(symbol)
         contract_size = self.broker.get_lot_value(symbol)
         risk_amount = account_balance * (risk_percent / 100.0)
 
-        # SL distance in price units
         sl_distance = float(sl_pips) * float(pip)
 
         lot = risk_amount / (sl_distance * contract_size) if sl_distance > 0 else 0.0
@@ -42,7 +43,6 @@ class RiskManager:
             print(f"Failed to get symbol info for {symbol}")
             return 0.0
 
-        # Clamp lot size to broker limits
         lot = max(min(lot, info.volume_max), info.volume_min)
         lot = round(lot / info.volume_step) * info.volume_step
         lot = float(f"{lot:.2f}")

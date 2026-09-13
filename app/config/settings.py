@@ -3,72 +3,63 @@ import MetaTrader5 as mt5
 
 
 class Config:
-    # === Symbols ===
+    """Every tunable for this bot, read elsewhere via `getattr(Config, "NAME", default)`.
+
+    Grouped by concern: symbols/timeframes, daily limits, SL/TP defaults,
+    risk management, logging, data/indicator sizing, strategy feature
+    flags (M1 signal-quality filters, ATR momentum gate, spread gate,
+    multi-timeframe strategy, N-tick confirmation), MT5 order parameters,
+    tick-driven exit strategy, and HTF gating for profit exits.
+    """
+
     MAX_SYMBOLS = 10
     SYMBOLS = ["EURUSD"]
 
-    # === Timeframes (system + MTF signal gating) ===
     TIMEFRAME = mt5.TIMEFRAME_M1
     TF_ENTRY = mt5.TIMEFRAME_M1
     TF_CONFIRM = mt5.TIMEFRAME_M5
     TF_BIAS = mt5.TIMEFRAME_M15
 
-    # === Daily limits ===
     DAILY_TARGET_PROFIT = 200
     DAILY_MAX_RISK_PERCENT = 2
 
     SESSION_START_TIME = time(hour=0, minute=0)
     SESSION_END_TIME = time(hour=22, minute=0)
 
-    # === SL/TP defaults (used by broker SL/TP placement, not by ExitTrade) ===
     DEFAULT_SL_PIPS: float = 2.0
     DEFAULT_TP_PIPS: float = 50.0
     STAGNATION_EXIT_MINUTES = 3
     MIN_SL_PIPS: float = 5.0
 
-    # === Risk management ===
     LOT_RISK_PERCENT = 1
 
-    # === Logging ===
     LOG_FILE = "trading_bot.log"
     LOG_LEVEL = "INFO"
 
-    # === Data / indicators ===
     CANDLE_COUNT = 2000
     MIN_CANDLES_FOR_INDICATORS = 202
     CONFIDENCE_THRESHOLD = 0.5
 
-    # === Strategy settings ===
-    # --- M1 signal-quality filters ---
     USE_CLOSED_CANDLES_ONLY: bool = True
     DROP_LAST_CANDLE_ALWAYS: bool = False
 
-    # --- ATR momentum gate ---
     ENTRY_ATR_PERIOD: int = 0
     ENTRY_ATR_MOVE_MULT: float = 0
 
-    # --- Spread gate ---
     MAX_SPREAD_POINTS: float = 0
 
-    # --- Multi-timeframe strategy ---
     USE_MULTI_TIMEFRAME_SIGNALS = False
-    TF_ENTRY = mt5.TIMEFRAME_M1
-    TF_CONFIRM = mt5.TIMEFRAME_M5
-    TF_BIAS = mt5.TIMEFRAME_M15
 
-    # --- N-tick confirmation strategy ---
     USE_N_TICK_CONFIRMATION = True
     N_TICK_CONFIRMATION = 1
     LIQUIDITY_CHECK_AFTER_NTICK = True
 
-    # --- Magic and lot settings ---
     MAGIC_NUMBER: int = 123456
     MAX_DEVIATION: int = 5
     LOT_SIZE: float = 0.01
     DEFAULT_LOT: float = 0.01
     MIN_LOT: float = 0.01
 
-    # === EXIT STRATEGY (TICK-DRIVEN ONLY) ===
     EXIT_MAX_LOSS_MONEY: float = 10.0
     EXIT_MAX_LOSS_PRICE: float = 0.0
     EXIT_MAX_LOSS_PIPS: float = 0.0
@@ -86,7 +77,6 @@ class Config:
     EXIT_STALE_TICK_LIMIT: int = 20
     EXIT_EXTRA_REVERSAL_GUARD_PIPS: float = 0.5
 
-    # --- HTF gating for profit exits ---
     EXIT_HTF_FILTER_ENABLED: bool = False
     EXIT_HTF_STALE_SECONDS: int = 180
     EXIT_HTF_USE_M15: bool = True

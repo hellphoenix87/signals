@@ -13,41 +13,33 @@ from app.config.settings import Config
 def create_orchestrator(
     collector: Any,
     signal_generator: Any,
-    broker: Optional[Any] = None,
-    trading_service: Optional[Any] = None,
+    trade_executor: Any,
     tick_collector: Optional[Any] = None,
     exit_trade: Optional[Any] = None,
-    enter_trade: Optional[Any] = None,
     logger: Optional[Any] = None,
 ) -> "SignalOrchestrator":
-    """
-    Provider that creates and returns a SignalOrchestrator.
-    """
+    """Provider that creates and returns a SignalOrchestrator."""
     return SignalOrchestrator(
         collector=collector,
         signal_generator=signal_generator,
-        broker=broker,
-        trading_service=trading_service,
+        trade_executor=trade_executor,
         tick_collector=tick_collector,
         exit_trade=exit_trade,
-        enter_trade=enter_trade,
         logger=logger,
     )
 
 
 class SignalOrchestrator:
-    """
-    Signal orchestrator (HYBRID exits):
+    """Drives one symbol's signal generation, entry execution, and exits.
 
-    - Candle loop (cadence = TF_ENTRY, typically M1):
-        * once per NEW CLOSED M1 candle (per symbol):
-            1) generate signals (and update HTF bias into exit_trade)
-            2) run candle-close PROFIT exits (ExitTrade.on_candle_close)
-            3) execute entries (trading_service OR enter_trade/broker fallback)
-
-    - Tick path:
-        * on every tick: run protective exits (ExitTrade.on_tick)
-        * on every tick: forward tick to signal_generator.on_new_tick (for n-tick logic)
+    - Candle loop (cadence = `TF_ENTRY`, typically M1): once per new closed
+      candle, generates a signal (updating `exit_trade`'s HTF bias), runs
+      candle-close profit exits, then hands any buy/sell signal to
+      `trade_executor` for entry.
+    - Tick path: on every tick, runs protective exits via `exit_trade.on_tick`,
+      forwards the tick to `signal_generator.on_new_tick` (only meaningful
+      for strategies that implement n-tick confirmation), and executes any
+      signal `signal_generator.get_confirmed_signal()` returns.
     """
 
     def __init__(
@@ -55,28 +47,25 @@ class SignalOrchestrator:
         *,
         collector: Any,
         signal_generator: Any,
-        broker: Optional[Any] = None,
-        trading_service: Optional[Any] = None,
+        trade_executor: Any,
         tick_collector: Optional[Any] = None,
         exit_trade: Optional[Any] = None,
-        enter_trade: Optional[Any] = None,
         logger: Optional[Any] = None,
-        pending_entries: Optional[dict[str, dict]] = None,
     ) -> None:
         self.collector = collector
         self.signal_generator = signal_generator
-        self.broker = broker
-        self.trading_service = trading_service
+        self.trade_executor = trade_executor
 
         self.tick_collector = tick_collector
         self.exit_trade = exit_trade
-        self.enter_trade = enter_trade
         self.logger = logger
 
         self._running: bool = False
         self._thread: Optional[threading.Thread] = None
 
-        self._last_closed_time_by_symbol: Dict[str, datetime] = {}
+        self._last_closed_time: Optional[datetime] = None
+        self._last_signal: Optional[dict] = None
+        self._last_tick: Any = None
 
         self._tf_entry: int = int(
             getattr(
@@ -85,32 +74,27 @@ class SignalOrchestrator:
                 getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1),
             )
         )
-        self._tf_confirm: int = int(
-            getattr(
-                signal_generator,
-                "tf_confirm",
-                getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5),
-            )
-        )
-        self._tf_bias: int = int(
-            getattr(
-                signal_generator,
-                "tf_bias",
-                getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15),
-            )
-        )
-        self.pending_entries: Dict[str, dict] = pending_entries or {}
 
-    # -------------------------
-    # Lifecycle
-    # -------------------------
+    def is_running(self) -> bool:
+        """Return whether the background candle loop is currently running."""
+        return self._running
+
+    def get_latest_signal(self, symbol: Optional[str] = None) -> Optional[dict]:
+        """Return the most recently generated signal, if any."""
+        return self._last_signal
+
+    def get_tick(self) -> Any:
+        """Return the most recently received tick, if any."""
+        return self._last_tick
 
     def start(self) -> None:
+        """Start the background candle loop and wire the tick callback (idempotent)."""
         if self._running:
             return
 
-        self._safe_call(self.collector, "start")
-        self._wire_tick_callback()
+        self.collector.start()
+        if self.tick_collector:
+            self.tick_collector.start(self._on_tick)
 
         self._running = True
         self._thread = threading.Thread(
@@ -119,57 +103,17 @@ class SignalOrchestrator:
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop the background candle loop and tick collection."""
         self._running = False
-        self._safe_call(self.tick_collector, "stop")
-        self._safe_call(self.collector, "stop")
-
-    # -------------------------
-    # Tick path (protective exits + n-tick logic)
-    # -------------------------
-
-    def _wire_tick_callback(self) -> None:
-        if not self.tick_collector:
-            self._log("[Orchestrator] tick_collector is None (tick exits disabled)")
-            return
-
-        self._log(
-            f"[Orchestrator] wiring tick_collector={type(self.tick_collector).__name__}"
-        )
-
-        set_cb = getattr(self.tick_collector, "set_callback", None)
-        start = getattr(self.tick_collector, "start", None)
-        self._log(
-            f"[Orchestrator] tick_collector methods: set_callback_callable={callable(set_cb)} start_callable={callable(start)}"
-        )
-
-        if callable(set_cb):
-            try:
-                set_cb(self._on_tick)
-                self._log("[Orchestrator] tick_collector.set_callback OK")
-            except Exception as exc:
-                self._log_exception(
-                    f"[Orchestrator] tick_collector.set_callback error: {exc!r}"
-                )
-
-        if callable(start):
-            try:
-                start(self._on_tick)
-                self._log("[Orchestrator] tick_collector.start(cb) OK")
-            except TypeError:
-                try:
-                    start()
-                    self._log("[Orchestrator] tick_collector.start() OK")
-                except Exception as exc:
-                    self._log_exception(
-                        f"[Orchestrator] tick_collector.start() error: {exc!r}"
-                    )
-            except Exception as exc:
-                self._log_exception(
-                    f"[Orchestrator] tick_collector.start error: {exc!r}"
-                )
+        if self.tick_collector:
+            self.tick_collector.stop()
+        self.collector.stop()
 
     def _on_tick(self, tick: Any) -> None:
-        # 1. Run protective exits
+        """Run protective exits, forward the tick to n-tick confirmation logic
+        (if the signal generator supports it), and execute any confirmed signal."""
+        self._last_tick = tick
+
         if self.exit_trade:
             try:
                 actions = self.exit_trade.on_tick(tick)
@@ -179,7 +123,6 @@ class SignalOrchestrator:
             if actions:
                 self._execute_exit_actions(actions)
 
-        # 2. Forward tick to n-tick confirmation logic (signal_generator handles tick logic)
         if hasattr(self.signal_generator, "on_new_tick"):
             try:
                 price = getattr(tick, "bid", None) or getattr(tick, "last", None)
@@ -189,90 +132,47 @@ class SignalOrchestrator:
                 self._log_exception(
                     f"[Orchestrator] signal_generator.on_new_tick error: {exc!r}"
                 )
-        # Prefer trading_service for entries if available
+
         if hasattr(self.signal_generator, "get_confirmed_signal"):
             sig = self.signal_generator.get_confirmed_signal()
             if sig and (sig.get("final_signal") in ("buy", "sell")):
-                if self.trading_service and hasattr(
-                    self.trading_service, "process_signal"
-                ):
-                    try:
-                        self.trading_service.process_signal([sig], None)
-                    except Exception as exc:
-                        self._log_exception(
-                            f"[Orchestrator] trading_service.process_signal error: {exc!r}"
-                        )
-                elif self.enter_trade:
-                    try:
-                        account_balance = 0.0
-                        get_bal = getattr(self.broker, "get_account_balance", None)
-                        if callable(get_bal):
-                            try:
-                                account_balance = float(get_bal())
-                            except Exception:
-                                pass
-                        self.enter_trade.enter_trade(sig, account_balance)
-                    except Exception as exc:
-                        self._log_exception(
-                            f"[Orchestrator] enter_trade execution error: {exc!r}"
-                        )
-                elif self.broker:
-                    self.broker.place_market_order(
-                        symbol=sig["symbol"], side=sig["final_signal"]
+                self._last_signal = sig
+                try:
+                    self.trade_executor.process_signal([sig], None)
+                except Exception as exc:
+                    self._log_exception(
+                        f"[Orchestrator] trade_executor.process_signal error: {exc!r}"
                     )
 
-        # DO NOT call generate_signal here! Only on new candle.
-
-    # -------------------------
-    # Candle loop (entries + candle-close profit exits)
-    # -------------------------
-
     def _run(self) -> None:
+        """Background loop: on each new closed candle, generate a signal,
+        run candle-close profit exits, and execute any entry."""
         poll_sleep = min(float(getattr(self.collector, "interval", 1) or 1), 0.05)
+        symbol = self.collector.symbol
 
         while self._running:
             try:
-                symbols = self._symbols_to_process()
+                snapshot = self._get_latest_candles()
                 did_work = False
 
-                for symbol in symbols:
-                    snapshot = self._get_latest_candles(symbol=symbol)
-                    if not snapshot:
-                        continue
-
+                if snapshot:
                     entry_candles = self._extract_tf_candles(snapshot, self._tf_entry)
                     closed_candle = self._last_closed_candle(entry_candles)
                     closed_time = self._candle_time(closed_candle)
-                    if closed_time is None:
-                        continue
 
-                    sym = self._resolve_symbol_from_candle_or_fallback(
-                        closed_candle, fallback=symbol
-                    )
-                    if not sym:
-                        continue
+                    if closed_time is not None:
+                        if self._last_closed_time is None:
+                            self._last_closed_time = closed_time
+                        elif closed_time > self._last_closed_time:
+                            self._last_closed_time = closed_time
+                            did_work = True
 
-                    # Trigger once per NEW closed candle
-                    last_t = self._last_closed_time_by_symbol.get(sym)
-                    if last_t is None:
-                        # baseline only (avoid firing immediately on startup)
-                        self._last_closed_time_by_symbol[sym] = closed_time
-                        continue
-                    if closed_time <= last_t:
-                        continue
-
-                    self._last_closed_time_by_symbol[sym] = closed_time
-                    did_work = True
-
-                    # 1) signals first (this updates bias via exit_trade.update_bias)
-                    self._run_entries(snapshot=snapshot, asof=closed_time)
-
-                    # 2) then candle-close profit exits (now bias is current)
-                    self._run_candle_close_profit_exits(
-                        symbol=sym,
-                        closed_candle=closed_candle,
-                        closed_time=closed_time,
-                    )
+                            self._run_entries(snapshot=snapshot, asof=closed_time)
+                            self._run_candle_close_profit_exits(
+                                symbol=symbol,
+                                closed_candle=closed_candle,
+                                closed_time=closed_time,
+                            )
 
                 time.sleep(0.1 if did_work else poll_sleep)
 
@@ -294,10 +194,7 @@ class SignalOrchestrator:
         if not callable(on_close):
             return
 
-        close_px = None
-        if isinstance(closed_candle, dict):
-            close_px = closed_candle.get("close")
-
+        close_px = closed_candle.get("close") if isinstance(closed_candle, dict) else None
         try:
             close_px_f = float(close_px) if close_px is not None else None
         except Exception:
@@ -322,16 +219,14 @@ class SignalOrchestrator:
             self._execute_exit_actions(actions)
 
     def _run_entries(self, *, snapshot: Any, asof: datetime) -> None:
-        sg = self.signal_generator
-
-        # Call the signal generator's generate_signal method directly
+        """Generate a signal for this candle close, update HTF bias, and
+        hand any buy/sell signal to `trade_executor`."""
         try:
-            sig_out = sg.generate_signal(snapshot)
+            sig_out = self.signal_generator.generate_signal(snapshot)
         except Exception as exc:
             self._log_exception(f"[Orchestrator] signal generator call failed: {exc!r}")
             return
 
-        # Normalize into list[dict]
         signals: List[dict]
         if isinstance(sig_out, list):
             signals = [s for s in sig_out if isinstance(s, dict)]
@@ -347,17 +242,17 @@ class SignalOrchestrator:
             self._log("[Orchestrator] signal generator returned 0 dict signals")
             return
 
+        self._last_signal = signals[0]
         self._log(
             f"[Orchestrator] signals={len(signals)} asof={asof.isoformat()} sample={signals[0]}"
         )
 
-        # Update HTF context for profit-exit gating (best-effort)
         if self.exit_trade:
             for sig in signals:
+                symbol = sig.get("symbol")
+                if not symbol:
+                    continue
                 try:
-                    symbol = sig.get("symbol")
-                    if not symbol:
-                        continue
                     self.exit_trade.update_bias(
                         str(symbol),
                         m5=sig.get("m5_confirm"),
@@ -369,173 +264,35 @@ class SignalOrchestrator:
                         f"[Orchestrator] exit_trade.update_bias error: {exc!r}"
                     )
 
-        # If trading_service exists, let it handle execution
-        if self.trading_service:
-            proc = getattr(self.trading_service, "process_signal", None)
-            if callable(proc):
-                try:
-                    proc(signals, snapshot)
-                except Exception as exc:
-                    self._log_exception(
-                        f"[Orchestrator] trading_service.process_signal error: {exc!r}"
-                    )
-            return
-
-        # Otherwise execute here (enter_trade preferred, broker fallback)
-        if not self.enter_trade and not self.broker:
-            self._log("[Orchestrator] No enter_trade and no broker; skipping execution")
-            return
-
-        for sig in signals:
-            symbol = sig.get("symbol")
-            final_signal = (sig.get("final_signal") or "hold").lower()
-            pullback_completed = sig.get("pullback_completed", True)
-            if not symbol or final_signal not in ("buy", "sell"):
-                continue
-
-            # --- Pending entry logic ---
-            if final_signal in ("buy", "sell") and not pullback_completed:
-                self.pending_entries[symbol] = sig
-                continue  # Do not execute trade yet
-
-            if self.enter_trade:
-                try:
-                    account_balance = 0.0
-                    get_bal = getattr(self.broker, "get_account_balance", None)
-                    if callable(get_bal):
-                        try:
-                            account_balance = float(get_bal())
-                        except Exception:
-                            pass
-                    self.enter_trade.enter_trade(sig, account_balance)
-                    continue
-                except Exception as exc:
-                    self._log_exception(
-                        f"[Orchestrator] enter_trade execution error: {exc!r}"
-                    )
-
-            if not self.broker:
-                continue
-
-            place = (
-                getattr(self.broker, "place_market_order", None)
-                or getattr(self.broker, "place_order", None)
-                or getattr(self.broker, "open_position", None)
+        try:
+            self.trade_executor.process_signal(signals, snapshot)
+        except Exception as exc:
+            self._log_exception(
+                f"[Orchestrator] trade_executor.process_signal error: {exc!r}"
             )
-            if callable(place):
-                try:
-                    place(symbol=str(symbol), side=final_signal)
-                except TypeError:
-                    try:
-                        place(symbol=str(symbol), signal=final_signal)
-                    except Exception as exc:
-                        self._log_exception(
-                            f"[Orchestrator] broker.place_* TypeError fallback failed: {exc!r}"
-                        )
-                except Exception as exc:
-                    self._log_exception(f"[Orchestrator] broker.place_* error: {exc!r}")
-
-    # -------------------------
-    # Broker execution helpers
-    # -------------------------
 
     def _execute_exit_actions(self, actions: List[Any]) -> None:
-        # Prefer trading_service (TradeExecutor) for exits if available
-        if self.trading_service and hasattr(self.trading_service, "execute_exit"):
-            for a in actions:
-                try:
-                    self.trading_service.execute_exit(a)
-                except Exception as exc:
-                    ticket = (
-                        getattr(a, "ticket", None)
-                        if not isinstance(a, dict)
-                        else a.get("ticket")
-                    )
-                    symbol = (
-                        getattr(a, "symbol", None)
-                        if not isinstance(a, dict)
-                        else a.get("symbol")
-                    )
-                    self._log_exception(
-                        f"[Orchestrator] exit execution failed for ticket={ticket} symbol={symbol}: {exc!r}"
-                    )
-            return
-
-        # Fallback: call broker directly
-        if not self.broker:
-            return
-
         for a in actions:
-            ticket = (
-                getattr(a, "ticket", None)
-                if not isinstance(a, dict)
-                else a.get("ticket")
-            )
-            symbol = (
-                getattr(a, "symbol", None)
-                if not isinstance(a, dict)
-                else a.get("symbol")
-            )
-            side = (
-                getattr(a, "side", None) if not isinstance(a, dict) else a.get("side")
-            )
-            volume = (
-                getattr(a, "volume", None)
-                if not isinstance(a, dict)
-                else a.get("volume")
-            )
-
-            closer = (
-                getattr(self.broker, "close_position", None)
-                or getattr(self.broker, "close_trade", None)
-                or getattr(self.broker, "close_order", None)
-            )
-            if not callable(closer):
-                continue
-
             try:
-                if ticket is not None:
-                    closer(ticket=ticket, symbol=symbol, side=side, volume=volume)
-                else:
-                    closer(symbol=symbol, side=side, volume=volume)
-            except TypeError:
-                try:
-                    closer(ticket, symbol, side, volume)
-                except Exception as exc:
-                    self._log_exception(
-                        f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}"
-                    )
+                self.trade_executor.execute_exit(a)
             except Exception as exc:
+                ticket = (
+                    getattr(a, "ticket", None)
+                    if not isinstance(a, dict)
+                    else a.get("ticket")
+                )
+                symbol = (
+                    getattr(a, "symbol", None)
+                    if not isinstance(a, dict)
+                    else a.get("symbol")
+                )
                 self._log_exception(
-                    f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}"
+                    f"[Orchestrator] exit execution failed for ticket={ticket} symbol={symbol}: {exc!r}"
                 )
 
-    # -------------------------
-    # Candle snapshot helpers
-    # -------------------------
-
-    def _symbols_to_process(self) -> List[str]:
-        sym = getattr(self.collector, "symbol", None)
-        if sym:
-            return [str(sym)]
-
-        syms = getattr(Config, "SYMBOLS", None)
-        if isinstance(syms, list) and syms:
-            max_syms = int(getattr(Config, "MAX_SYMBOLS", len(syms)) or len(syms))
-            return [str(s) for s in syms[:max_syms] if s]
-        return []
-
-    def _get_latest_candles(self, *, symbol: Optional[str]) -> Any:
-        fn = getattr(self.collector, "get_latest_candles", None) or getattr(
-            self.collector, "get_candles", None
-        )
-        if not callable(fn):
-            return None
+    def _get_latest_candles(self) -> Any:
         try:
-            try:
-                return fn(symbol=symbol) if symbol else fn()
-            except TypeError:
-                return fn()
+            return self.collector.get_latest_candles()
         except Exception:
             return None
 
@@ -563,26 +320,11 @@ class SignalOrchestrator:
                 return bool(candle.get(k))
         return True
 
-    def _resolve_symbol_from_candle_or_fallback(
-        self, candle: Optional[dict], fallback: Optional[str]
-    ) -> Optional[str]:
-        if isinstance(candle, dict):
-            s = candle.get("symbol")
-            if s:
-                return str(s)
-        if fallback:
-            return str(fallback)
-        return None
-
     def _candle_time(self, candle: Optional[dict]) -> Optional[datetime]:
         if not candle or not isinstance(candle, dict):
             return None
 
-        t = candle.get("time")
-        if t is None:
-            t = candle.get("timestamp")
-        if t is None:
-            t = candle.get("time_msc")
+        t = candle.get("time") or candle.get("timestamp") or candle.get("time_msc")
 
         if isinstance(t, datetime):
             return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
@@ -603,20 +345,6 @@ class SignalOrchestrator:
             return None
 
         return None
-
-    # -------------------------
-    # Misc helpers
-    # -------------------------
-
-    def _safe_call(self, obj: Any, method_name: str) -> None:
-        if not obj:
-            return
-        fn = getattr(obj, method_name, None)
-        if callable(fn):
-            try:
-                fn()
-            except Exception:
-                pass
 
     def _log(self, msg: str) -> None:
         try:
