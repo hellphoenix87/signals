@@ -5,3 +5,4 @@ signals_log.txt
 .python-version
 *.log
 .vscode/
+backtest_results/
