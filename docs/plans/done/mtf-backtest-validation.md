@@ -67,3 +67,17 @@ Two things, bundled since the second can't be judged without the first:
 - `strategy_factory(config=Config)` (use_multi defaulting from config, currently `False`) exposes `indicators.keys() == {"macd", "sma", "rsi"}`; `strategy_factory(config=Config, use_multi=True)`'s `entry_strategy` still exposes `indicators.keys() == {"macd"}` only. Confirmed directly via `strategy_factory(config=Config)` -> `['macd', 'sma', 'rsi']`.
 - `scripts/backtest_signals.py --mtf` produces a nonzero signal count and a plausible-looking summary without placing any real order. Confirmed (846 signals/4 weeks, all three stop sizes above).
 - Confirmed the M5/M15 pointer alignment is genuinely causal by spot-checking 4 M1 timestamps against their M5/M15 windows: in every case the last visible higher-timeframe candle's close time was `<=` the M1 candle's own close time, and the next one (if any) was strictly later.
+
+## Addendum: quick-check (1-minute exit) analysis
+
+The fixed target/stop simulation above assumes a hold time (up to 300 bars) this app doesn't actually commit to — the real exit strategy is tick-driven and can close a position within seconds. Added `--quick-check` (with `--horizon-bars`, default 1) to `scripts/backtest_signals.py`: for each signal, look only at the next N M1 candles and report the best price seen in the signal's favor, the worst seen against it, and the net move at the close of the window — independent of any target/stop assumption. New functions `evaluate_immediate_move`, `write_quick_results_csv`, `summarize_quick`.
+
+**Results (4 weeks EURUSD, horizon=1 bar/1 minute), plus a random-entry baseline (coin-flip direction on every M1 candle in the same window, not just signal candles) to judge whether the numbers mean anything:**
+
+| Source | n | Had win opportunity | Never positive | Avg favorable | Avg adverse | Avg end |
+|---|---|---|---|---|---|---|
+| Random baseline (every candle) | 28,599 | 84.6% | 15.4% | +0.50 | +0.51 | -0.01 |
+| Single-tf (MACD+SMA+RSI) | 5,656 | 85.3% | 14.7% | +0.60 | +0.63 | -0.04 |
+| Multi-timeframe | 846 | 87.7% | 12.3% | +0.64 | +0.62 | -0.02 |
+
+**Finding: statistically indistinguishable from random.** All three rows show ~85-88% "had a favorable moment" (this is just normal EURUSD noise over any 1-minute window, signal or not — a coin flip shows almost the same rate), favorable and adverse magnitudes nearly equal in every row (no skew toward the predicted direction), and average net move after exactly one minute ~0 pips in all three cases. Neither the single-timeframe nor the multi-timeframe strategy shows a detectable directional edge at a 1-minute horizon. This doesn't invalidate the earlier target/stop comparison (MTF still meaningfully outperforms single-timeframe there) — it means a fast, ~1-minute exit isn't where any edge would show up, if one exists; the edge (if real) needs more time to play out than one M1 bar.

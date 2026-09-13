@@ -24,6 +24,18 @@ timeframe candles already closed as of each M1 decision point. This is
 independent of `Config.USE_MULTI_TIMEFRAME_SIGNALS`, which stays off for
 live trading regardless of this flag.
 
+`--quick-check` replaces the fixed target/stop win-loss simulation with a
+much shorter, assumption-free read on entry timing: for each signal, look
+only at the next `--horizon-bars` M1 candles (default 1 = one minute) and
+report the best price seen in the signal's favor, the worst price seen
+against it, and where price ended up at the close of the window -- a
+proxy for "could a fast, tick-driven exit have captured a win in this
+short a hold", independent of any target/stop distance. Useful now,
+before the real exit strategy (tick-driven, can close a position within
+seconds) is finalized -- the longer target/stop simulation below still
+matters once that's settled, but assumes a hold time this app doesn't
+actually commit to.
+
 Not supported here: n-tick confirmation (needs live tick data to ever
 confirm a signal, which a bar-only replay can't provide). Full
 exit-strategy-aware backtesting (real trade lifecycle simulation via the
@@ -67,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm, MACD/M1 entry) instead of the single-timeframe path",
     )
+    parser.add_argument(
+        "--quick-check",
+        action="store_true",
+        help="Report best/worst/end-of-window price excursion over --horizon-bars instead of a fixed target/stop win-loss simulation",
+    )
+    parser.add_argument("--horizon-bars", type=int, default=1, help="Bars to look ahead for --quick-check (default: 1, i.e. one M1 minute)")
     return parser.parse_args()
 
 
@@ -108,6 +126,45 @@ def evaluate_signal(
     return "undecided", end - 1 - entry_index
 
 
+def evaluate_immediate_move(
+    candles: list[dict],
+    entry_index: int,
+    direction: str,
+    pip_size: float,
+    horizon_bars: int,
+) -> dict:
+    """Look at the next `horizon_bars` candles after entry and report the
+    best price seen in the signal's favor, the worst seen against it, and
+    the net move at the close of the window -- all in pips, all
+    independent of any target/stop assumption.
+    """
+    entry_price = float(candles[entry_index]["close"])
+    end = min(entry_index + 1 + horizon_bars, len(candles))
+    window = candles[entry_index + 1 : end]
+    if not window:
+        return {"favorable_pips": 0.0, "adverse_pips": 0.0, "end_pips": 0.0, "bars": 0}
+
+    highs = [float(c["high"]) for c in window]
+    lows = [float(c["low"]) for c in window]
+    end_close = float(window[-1]["close"])
+
+    if direction == "buy":
+        favorable_pips = (max(highs) - entry_price) / pip_size
+        adverse_pips = (entry_price - min(lows)) / pip_size
+        end_pips = (end_close - entry_price) / pip_size
+    else:
+        favorable_pips = (entry_price - min(lows)) / pip_size
+        adverse_pips = (max(highs) - entry_price) / pip_size
+        end_pips = (entry_price - end_close) / pip_size
+
+    return {
+        "favorable_pips": favorable_pips,
+        "adverse_pips": adverse_pips,
+        "end_pips": end_pips,
+        "bars": len(window),
+    }
+
+
 def fetch_history(market_data: MarketData, symbol: str, timeframe: int, count: int) -> list[dict]:
     """Fetch `count` closed candles for `timeframe` and tag each with `symbol`."""
     candles = market_data.get_historical_candles(
@@ -119,7 +176,13 @@ def fetch_history(market_data: MarketData, symbol: str, timeframe: int, count: i
 
 
 def run_backtest(
-    symbol: str, count: int, forward_bars: int, target_pips: float, stop_pips: float
+    symbol: str,
+    count: int,
+    forward_bars: int,
+    target_pips: float,
+    stop_pips: float,
+    quick_check: bool = False,
+    horizon_bars: int = 1,
 ) -> None:
     """Fetch history, replay it through the real signal generator, and print a summary."""
     if not mt5.initialize():
@@ -148,22 +211,30 @@ def run_backtest(
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
-                outcome, bars = evaluate_signal(
-                    candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
-                )
-                results.append(
-                    {
-                        "time": candles[i].get("time"),
-                        "direction": final_signal,
-                        "outcome": outcome,
-                        "bars": bars,
-                    }
-                )
+                if quick_check:
+                    move = evaluate_immediate_move(candles, i, final_signal, pip_size, horizon_bars)
+                    results.append({"time": candles[i].get("time"), "direction": final_signal, **move})
+                else:
+                    outcome, bars = evaluate_signal(
+                        candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
+                    )
+                    results.append(
+                        {
+                            "time": candles[i].get("time"),
+                            "direction": final_signal,
+                            "outcome": outcome,
+                            "bars": bars,
+                        }
+                    )
     finally:
         logging.disable(logging.NOTSET)
 
-    log_path = write_results_csv(results, symbol)
-    summarize(results, symbol, log_path)
+    if quick_check:
+        log_path = write_quick_results_csv(results, symbol)
+        summarize_quick(results, symbol, horizon_bars, log_path)
+    else:
+        log_path = write_results_csv(results, symbol)
+        summarize(results, symbol, log_path)
 
 
 TF_SECONDS = {
@@ -174,7 +245,13 @@ TF_SECONDS = {
 
 
 def run_mtf_backtest(
-    symbol: str, m1_count: int, forward_bars: int, target_pips: float, stop_pips: float
+    symbol: str,
+    m1_count: int,
+    forward_bars: int,
+    target_pips: float,
+    stop_pips: float,
+    quick_check: bool = False,
+    horizon_bars: int = 1,
 ) -> None:
     """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
     MACD/M1 entry) and print a summary.
@@ -236,22 +313,30 @@ def run_mtf_backtest(
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
-                outcome, bars = evaluate_signal(
-                    m1_candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
-                )
-                results.append(
-                    {
-                        "time": m1_candle.get("time"),
-                        "direction": final_signal,
-                        "outcome": outcome,
-                        "bars": bars,
-                    }
-                )
+                if quick_check:
+                    move = evaluate_immediate_move(m1_candles, i, final_signal, pip_size, horizon_bars)
+                    results.append({"time": m1_candle.get("time"), "direction": final_signal, **move})
+                else:
+                    outcome, bars = evaluate_signal(
+                        m1_candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
+                    )
+                    results.append(
+                        {
+                            "time": m1_candle.get("time"),
+                            "direction": final_signal,
+                            "outcome": outcome,
+                            "bars": bars,
+                        }
+                    )
     finally:
         logging.disable(logging.NOTSET)
 
-    log_path = write_results_csv(results, f"{symbol}_mtf")
-    summarize(results, f"{symbol} (multi-timeframe)", log_path)
+    if quick_check:
+        log_path = write_quick_results_csv(results, f"{symbol}_mtf")
+        summarize_quick(results, f"{symbol} (multi-timeframe)", horizon_bars, log_path)
+    else:
+        log_path = write_results_csv(results, f"{symbol}_mtf")
+        summarize(results, f"{symbol} (multi-timeframe)", log_path)
 
 
 def write_results_csv(results: list[dict], symbol: str) -> Path | None:
@@ -299,6 +384,65 @@ def summarize(results: list[dict], symbol: str, log_path: Path | None) -> None:
         print(f"Per-signal log: {log_path}")
 
 
+def write_quick_results_csv(results: list[dict], symbol: str) -> Path | None:
+    """Write one row per signal to a timestamped CSV for `--quick-check` runs."""
+    if not results:
+        return None
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_quick_{run_stamp}.csv"
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["time", "direction", "favorable_pips", "adverse_pips", "end_pips", "bars"]
+        )
+        writer.writeheader()
+        writer.writerows(results)
+
+    return path
+
+
+def summarize_quick(results: list[dict], symbol: str, horizon_bars: int, log_path: Path | None) -> None:
+    """Print aggregate stats for a `--quick-check` run: what fraction of
+    signals ever saw a favorable price move within the window, vs. never
+    going positive at all (a loss no matter when you'd exited)."""
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    buys = [r for r in results if r["direction"] == "buy"]
+    sells = [r for r in results if r["direction"] == "sell"]
+    had_win_opportunity = [r for r in results if r["favorable_pips"] > 0]
+    ended_positive = [r for r in results if r["end_pips"] > 0]
+    never_favorable = [r for r in results if r["favorable_pips"] <= 0]
+
+    avg_favorable = sum(r["favorable_pips"] for r in results) / total
+    avg_adverse = sum(r["adverse_pips"] for r in results) / total
+    avg_end = sum(r["end_pips"] for r in results) / total
+
+    print(f"\n=== Quick-check summary: {symbol} (horizon={horizon_bars} bar(s)) ===")
+    print(f"Total signals: {total} (buy={len(buys)}, sell={len(sells)})")
+    print(
+        f"Had a winning exit at some point in the window: {len(had_win_opportunity)} "
+        f"({len(had_win_opportunity) / total * 100.0:.1f}%)"
+    )
+    print(
+        f"Never went positive (a loss no matter when exited): {len(never_favorable)} "
+        f"({len(never_favorable) / total * 100.0:.1f}%)"
+    )
+    print(
+        f"Still positive at end of window: {len(ended_positive)} "
+        f"({len(ended_positive) / total * 100.0:.1f}%)"
+    )
+    print(
+        f"Avg favorable/adverse/end move: {avg_favorable:+.2f} / {avg_adverse:+.2f} / {avg_end:+.2f} pips"
+    )
+    if log_path:
+        print(f"Per-signal log: {log_path}")
+
+
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
@@ -335,9 +479,15 @@ def main() -> None:
         sys.exit(1)
 
     if args.mtf:
-        run_mtf_backtest(symbol, count, args.forward_bars, target_pips, stop_pips)
+        run_mtf_backtest(
+            symbol, count, args.forward_bars, target_pips, stop_pips,
+            quick_check=args.quick_check, horizon_bars=args.horizon_bars,
+        )
     else:
-        run_backtest(symbol, count, args.forward_bars, target_pips, stop_pips)
+        run_backtest(
+            symbol, count, args.forward_bars, target_pips, stop_pips,
+            quick_check=args.quick_check, horizon_bars=args.horizon_bars,
+        )
 
 
 if __name__ == "__main__":
