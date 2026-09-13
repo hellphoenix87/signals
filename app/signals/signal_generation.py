@@ -3,9 +3,7 @@ import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.utils.configure_logging import logger as default_logger
-from app.signals.indicators.sma_crossover import generate_sma_signal as default_sma_fn
 from app.signals.indicators.macd import calculate_macd as default_macd_fn
-from app.signals.indicators.rsi import calculate_rsi as default_rsi_fn
 
 from app.signals.strategies.strong_signal_strategy import StrongSignalStrategy
 from app.signals.strategies.multi_timeframe import MultiTimeframeStrongSignalStrategy
@@ -19,7 +17,6 @@ def strategy_factory(
     config: Any = Config,
     logger: Any = default_logger,
     indicators: Optional[Dict[str, Callable[[List[dict]], Any]]] = None,
-    log_file: Optional[str] = None,
     min_candles: Optional[int] = None,
     use_multi: Optional[bool] = None,
     use_n_tick: Optional[bool] = None,
@@ -47,18 +44,21 @@ def strategy_factory(
         else int(getattr(config, "N_TICK_CONFIRMATION", 0) or 0)
     )
 
-    # Default indicators if none provided
     if indicators is None:
-        indicators = {
-            # "sma": default_sma_fn,
-            "macd": default_macd_fn,
-            # "rsi": default_rsi_fn,
-        }
+        indicators = {"macd": default_macd_fn}
+
+    min_candles = (
+        min_candles
+        if min_candles is not None
+        else int(getattr(config, "MIN_CANDLES_FOR_INDICATORS", 1) or 1)
+    )
+    confidence_threshold = float(getattr(config, "CONFIDENCE_THRESHOLD", 0.5) or 0.5)
 
     base = strategy_cls(
         indicators=indicators,
         logger=logger,
         min_candles=min_candles,
+        confidence_threshold=confidence_threshold,
         config=config,
         **kwargs
     )
