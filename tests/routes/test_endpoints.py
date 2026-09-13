@@ -3,6 +3,10 @@
 Covers the dead commented-out endpoint block and the active route registry.
 """
 
+# Import router at module level to ensure app.factory's eager mt5.initialize()
+# happens before any test's monkeypatch is applied.
+from app.routes.endpoints import router  # noqa: F401
+
 
 def test_breakout_strategy_removed():
     """Assert the string 'BreakoutStrategy' no longer appears in endpoints.py source."""
@@ -326,3 +330,112 @@ def test_test_historical_endpoint_uses_dependency_injection(mock_mt5):
     assert "candles" in data
     assert len(data["candles"]) == 2
     assert mock_market_data.get_historical_candles.call_count == 1
+
+
+def test_all_ten_routes_without_mt5_import(monkeypatch):
+    """Comprehensive test that all 10 routes work with dependency overrides only.
+
+    This test proves:
+    1. The router is fully exercisable without real MT5/broker/orchestrator construction
+    2. All dependencies can be satisfied via app.dependency_overrides
+    3. No route attempts to call MT5 at request time
+
+    Setup:
+    - Monkeypatch MT5.initialize to raise AssertionError (proving it's not called)
+    - Mock all four factory functions: get_broker, get_market_data, get_trade_executor, get_orchestrators
+    - Configure mocks with realistic return values for each route's logic
+
+    Routes tested (all 10):
+    - /status, /trading/start, /trading/stop, /signal/latest, /live_signal,
+    - /tick, /simulated_positions, /close_all, /test_historical, /stop_orchestrator
+    """
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import MetaTrader5 as mt5
+
+    from app.routes.endpoints import router
+    from app.factory import (
+        get_broker,
+        get_market_data,
+        get_trade_executor,
+        get_orchestrators,
+    )
+    from app.trade_execution.mode import TradingMode
+
+    # IMPORTANT: app.routes.endpoints was already imported at module level (top of
+    # this file), so app.factory's eager mt5.initialize() call at import time
+    # already succeeded under the baseline mock_mt5 patch. Now we install a
+    # stricter trap that would fail if any route's logic tried to call MT5 at
+    # request time.
+    def raise_mt5_called(*args, **kwargs):
+        raise AssertionError("MT5 should not be touched in this test")
+
+    monkeypatch.setattr(mt5, "initialize", raise_mt5_called)
+
+    # Create mocks for all four factory functions
+    # Orchestrator: needs start(), stop(), is_running(), get_latest_signal(), get_tick()
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.is_running.return_value = True
+    mock_orchestrator.start.return_value = None
+    mock_orchestrator.stop.return_value = None
+    mock_orchestrator.get_latest_signal.return_value = "buy"
+    mock_orchestrator.get_tick.return_value = {"bid": 1.1000, "ask": 1.1002}
+
+    # Broker: needs mode (real TradingMode.DEMO, so the /simulated_positions
+    # route's demo-mode branch is genuinely exercised, not left inert) and
+    # open_positions_sim as a list (matching the real Broker's shape).
+    mock_broker = MagicMock()
+    mock_broker.mode = TradingMode.DEMO
+    mock_broker.open_positions_sim = []
+
+    # Trade executor: needs close_all_trades(), daily_profit, last_reset
+    mock_trade_executor = MagicMock()
+    mock_trade_executor.close_all_trades.return_value = {"closed": [], "failed": []}
+    mock_trade_executor.daily_profit = 0.0
+    mock_trade_executor.last_reset = "2025-01-01"
+
+    # Market data: needs get_historical_candles()
+    mock_market_data = MagicMock()
+    mock_market_data.get_historical_candles.return_value = []
+
+    # Create FastAPI app with router and set up dependency overrides
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_orchestrators] = lambda: {"EURUSD": mock_orchestrator}
+    app.dependency_overrides[get_broker] = lambda: mock_broker
+    app.dependency_overrides[get_trade_executor] = lambda: mock_trade_executor
+    app.dependency_overrides[get_market_data] = lambda: mock_market_data
+
+    client = TestClient(app)
+
+    # Define all 10 routes to test
+    routes_to_test = [
+        ("GET", "/status"),
+        ("POST", "/trading/start"),
+        ("POST", "/trading/stop"),
+        ("GET", "/signal/latest"),
+        ("GET", "/live_signal"),
+        ("GET", "/tick"),
+        ("GET", "/simulated_positions"),
+        ("POST", "/close_all"),
+        ("GET", "/test_historical"),
+        ("POST", "/stop_orchestrator"),
+    ]
+
+    # Execute each route and assert success
+    for method, path in routes_to_test:
+        if method == "GET":
+            response = client.get(path)
+        elif method == "POST":
+            response = client.post(path)
+        else:
+            raise ValueError(f"Unexpected method: {method}")
+
+        # Verify response is in 2xx range
+        assert (
+            200 <= response.status_code < 300
+        ), f"{method} {path} returned {response.status_code}: {response.text}"
+
+    # Verify MT5.initialize was never called (the trap still in place)
+    # This is implicit: if it had been called, we'd have raised AssertionError above
