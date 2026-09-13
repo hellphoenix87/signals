@@ -352,10 +352,11 @@ class TestSignalOrchestratorExecuteExitActions:
 
     def test_execute_exit_actions_logs_broker_close_position_failure(self):
         """
-        When broker.close_position raises an exception, the exception should
-        be logged via logger.exception instead of being silently swallowed.
-        Verifies both the keyword-argument call and the positional-argument
-        fallback both log failures.
+        When broker.close_position raises an exception on the keyword-argument
+        call, the exception should be logged via logger.exception instead of
+        being silently swallowed. The positional-argument fallback path is
+        covered separately by
+        test_execute_exit_actions_logs_positional_args_fallback_failure below.
         """
         # Setup mocks
         collector_mock = MagicMock()
