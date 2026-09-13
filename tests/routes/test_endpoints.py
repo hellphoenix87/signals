@@ -361,6 +361,7 @@ def test_all_ten_routes_without_mt5_import(monkeypatch):
         get_trade_executor,
         get_orchestrators,
     )
+    from app.trade_execution.mode import TradingMode
 
     # IMPORTANT: app.routes.endpoints was already imported at module level (top of
     # this file), so app.factory's eager mt5.initialize() call at import time
@@ -381,11 +382,12 @@ def test_all_ten_routes_without_mt5_import(monkeypatch):
     mock_orchestrator.get_latest_signal.return_value = "buy"
     mock_orchestrator.get_tick.return_value = {"bid": 1.1000, "ask": 1.1002}
 
-    # Broker: needs mode (with DEMO attr) and open_positions_sim
+    # Broker: needs mode (real TradingMode.DEMO, so the /simulated_positions
+    # route's demo-mode branch is genuinely exercised, not left inert) and
+    # open_positions_sim as a list (matching the real Broker's shape).
     mock_broker = MagicMock()
-    mock_broker.mode = MagicMock()
-    mock_broker.mode.DEMO = "demo"
-    mock_broker.open_positions_sim = {}
+    mock_broker.mode = TradingMode.DEMO
+    mock_broker.open_positions_sim = []
 
     # Trade executor: needs close_all_trades(), daily_profit, last_reset
     mock_trade_executor = MagicMock()

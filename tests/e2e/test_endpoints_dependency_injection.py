@@ -207,14 +207,9 @@ class TestEndpointsWiredThroughDependencyOverrides:
     def _client(self, mocks):
         orchestrator, orchestrators, trade_executor, market_data, broker = mocks
 
-        from app.factory import (
-            get_broker,
-            get_market_data,
-            get_orchestrators,
-            get_trade_executor,
-        )
-        from app.routes.endpoints import router
-
+        # get_broker/get_market_data/get_orchestrators/get_trade_executor/router
+        # are already imported at module level (see the top-of-file import
+        # ordering note in the module docstring).
         app = _build_test_app(
             router,
             {
@@ -594,8 +589,9 @@ class TestFullRouterExercisableWithoutTouchingMT5:
         # installed by _install_mt5_trap would have propagated straight out
         # of the `getattr(client, method)(...)` call and failed this test
         # with that error -- not with a non-2xx status code. Reaching this
-        # point at all is itself part of the proof.
-        assert mt5.initialize is not None
+        # point at all is itself part of the proof (see the bonus test below
+        # for empirical confirmation that the trap is actually reachable and
+        # not structurally inert).
 
     def test_trap_would_actually_catch_a_regression_that_calls_real_mt5(
         self, monkeypatch
