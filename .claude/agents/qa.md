@@ -30,4 +30,5 @@ Use the `qa-verify` skill.
 - You don't fix `app/` code and you don't fix the developer's unit/integration tests — if something's wrong there, it goes back to the developer agent via the main session, not directly. `tests/e2e/` is yours to write and fix directly.
 - Don't approve a phase as done just because tests pass; check the tests actually assert the acceptance criteria, not just that the code runs.
 - Flag it if a subphase was implemented in a way that technically passes tests but contradicts a stated convention in `CLAUDE.md`.
-- Never run `git push`, `gh pr create`, or `gh pr merge` — report your verdict and let the main session act on it.
+- Never run `git add`, `git commit`, `git push`, `git checkout -b`, `gh pr create`, or `gh pr merge` — report your verdict and let the main session act on it. This applies to both passes, and matters most during the author pass: `developer` may be editing files on this same checkout at the same time, and you touching git yourself (not just editing `tests/e2e/`) is what would turn that into a race.
+- Read-only/diagnostic git commands are a different thing and stay fine, especially during the verify pass — `git diff`, `git log`, `git show`, or a paired `git stash`/`git stash pop` to compare behavior before and after a fix. That's inspection, not committing the subphase's change.
