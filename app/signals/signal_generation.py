@@ -1,9 +1,12 @@
+import functools
 from typing import Any, Callable, List, Optional, Type, Dict
 import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.utils.configure_logging import logger as default_logger
 from app.signals.indicators.macd import calculate_macd as default_macd_fn
+from app.signals.indicators.sma_crossover import generate_sma_signal
+from app.signals.indicators.rsi import calculate_rsi
 
 from app.signals.strategies.strong_signal_strategy import StrongSignalStrategy
 from app.signals.strategies.multi_timeframe import MultiTimeframeStrongSignalStrategy
@@ -69,8 +72,34 @@ def strategy_factory(
         tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15)
         tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
         tf_entry = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+
+        bias_sma = functools.partial(
+            generate_sma_signal,
+            short_window=int(getattr(config, "MTF_BIAS_SMA_SHORT", 10)),
+            long_window=int(getattr(config, "MTF_BIAS_SMA_LONG", 50)),
+        )
+        bias_strategy = strategy_cls(
+            indicators={"sma": bias_sma},
+            logger=logger,
+            min_candles=min_candles,
+            confidence_threshold=confidence_threshold,
+            config=config,
+        )
+        confirm_strategy = strategy_cls(
+            indicators={"rsi": calculate_rsi},
+            logger=logger,
+            min_candles=min_candles,
+            confidence_threshold=confidence_threshold,
+            config=config,
+        )
         strategy = MultiTimeframeStrongSignalStrategy(
-            base=base, tf_bias=tf_bias, tf_confirm=tf_confirm, tf_entry=tf_entry
+            bias_strategy=bias_strategy,
+            confirm_strategy=confirm_strategy,
+            entry_strategy=base,
+            tf_bias=tf_bias,
+            tf_confirm=tf_confirm,
+            tf_entry=tf_entry,
+            config=config,
         )
 
     if use_n_tick and n_ticks > 1:

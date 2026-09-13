@@ -49,6 +49,14 @@ class Config:
     MAX_SPREAD_POINTS: float = 0
 
     USE_MULTI_TIMEFRAME_SIGNALS = False
+    MTF_BIAS_SMA_SHORT: int = 10
+    MTF_BIAS_SMA_LONG: int = 50
+    MTF_ADX_PERIOD: int = 14
+    MTF_ADX_MIN_STRENGTH: float = 20.0
+    MTF_BIAS_WEIGHT: float = 0.5
+    MTF_CONFIRM_WEIGHT: float = 0.3
+    MTF_ENTRY_WEIGHT: float = 0.2
+    MTF_SCORE_THRESHOLD: float = 0.6
 
     USE_N_TICK_CONFIRMATION = True
     N_TICK_CONFIRMATION = 1
