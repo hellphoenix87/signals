@@ -67,9 +67,30 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import MetaTrader5 as mt5
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
+
+# Force the (transitive) app.factory / app.routes.endpoints import to happen
+# right here, at this test module's own import time -- which pytest always
+# runs under conftest.py's unconditional baseline MT5 patch (see
+# tests/conftest.py), since conftest.py is imported before any test module in
+# this directory. This is deliberately a *module-level* import rather than
+# something done lazily inside a test function: Subphase 4.3's own test
+# below installs a real AssertionError-raising trap on mt5.initialize, and
+# app.factory's module-level `create_broker(Mode.LIVE)` call (which reaches
+# mt5.initialize()) must complete -- safely, under the baseline patch --
+# before that trap ever exists, regardless of which single test in this file
+# pytest happens to run or in what order.
+from app.factory import (  # noqa: E402
+    get_broker,
+    get_market_data,
+    get_orchestrators,
+    get_trade_executor,
+)
+from app.routes.endpoints import router  # noqa: E402
+from app.trade_execution.mode import TradingMode  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -470,3 +491,135 @@ class TestPreFixEndpointsCannotBeExercisedThisWay:
                 f"Depends(...) parameters (collaborators came from "
                 f"module-level closures, not FastAPI DI); got {depends_params!r}"
             )
+
+
+class TestFullRouterExercisableWithoutTouchingMT5:
+    """Subphase 4.3: proves the whole router is testable via
+    `app.dependency_overrides` alone, with a real `AssertionError`-raising
+    trap installed on `MetaTrader5.initialize` -- i.e. that none of the 10
+    routes named in this subphase's acceptance criteria construct or call
+    real MT5/broker/orchestrator code during request handling.
+
+    The module-level imports of `app.factory` / `app.routes.endpoints` at
+    the top of this file already happened -- safely, under conftest.py's
+    unconditional baseline MT5 patch -- before any test method below runs,
+    so installing the trap inside a test function here cannot retroactively
+    punish that one-time import (see the hazard this subphase's plan calls
+    out explicitly)."""
+
+    def _install_mt5_trap(self, monkeypatch):
+        """Replace MetaTrader5.initialize with a function that fails the
+        test loudly if anything actually calls it during request handling."""
+
+        def _raise(*args, **kwargs):
+            raise AssertionError("MT5 should not be touched in this test")
+
+        monkeypatch.setattr(mt5, "initialize", _raise)
+
+    def _make_mocks(self):
+        """Build MagicMock-backed collaborators, configured per this
+        subphase's acceptance criteria so every route's own logic succeeds
+        (e.g. `mock_broker.mode = TradingMode.DEMO`,
+        `mock_broker.open_positions_sim = []`,
+        `mock_md.get_historical_candles.return_value = []`)."""
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.is_running.return_value = True
+        mock_orchestrator.get_latest_signal.return_value = "buy"
+        mock_orchestrator.get_tick.return_value = "mocked-tick"
+        mock_orchestrator.start.return_value = None
+        mock_orchestrator.stop.return_value = None
+        mock_orchestrators = {"EURUSD": mock_orchestrator}
+
+        mock_trade_executor = MagicMock()
+        mock_trade_executor.daily_profit = 0.0
+        mock_trade_executor.last_reset = None
+        mock_trade_executor.close_all_trades.return_value = {
+            "failed": [],
+            "closed": [],
+        }
+
+        mock_market_data = MagicMock()
+        mock_market_data.get_historical_candles.return_value = []
+
+        mock_broker = MagicMock()
+        mock_broker.mode = TradingMode.DEMO
+        mock_broker.open_positions_sim = []
+
+        return mock_orchestrators, mock_trade_executor, mock_market_data, mock_broker
+
+    def _client(self, mocks):
+        mock_orchestrators, mock_trade_executor, mock_market_data, mock_broker = mocks
+        app = _build_test_app(
+            router,
+            {
+                get_market_data: mock_market_data,
+                get_broker: mock_broker,
+                get_trade_executor: mock_trade_executor,
+                get_orchestrators: mock_orchestrators,
+            },
+        )
+        return TestClient(app)
+
+    # The exact 10 routes named in this subphase's acceptance criteria.
+    ALL_TEN_ROUTES = (
+        ("get", "/status", {}),
+        ("post", "/trading/start", {}),
+        ("post", "/trading/stop", {}),
+        ("get", "/signal/latest", {"params": {"symbol": "EURUSD"}}),
+        ("get", "/live_signal", {"params": {"symbol": "EURUSD"}}),
+        ("get", "/tick", {"params": {"symbol": "EURUSD"}}),
+        ("get", "/simulated_positions", {}),
+        ("post", "/close_all", {}),
+        ("get", "/test_historical", {}),
+        ("post", "/stop_orchestrator", {}),
+    )
+
+    def test_all_ten_routes_succeed_with_mocked_collaborators_and_mt5_trapped(
+        self, monkeypatch
+    ):
+        self._install_mt5_trap(monkeypatch)
+
+        mocks = self._make_mocks()
+        client = self._client(mocks)
+
+        for method, path, kwargs in self.ALL_TEN_ROUTES:
+            response = getattr(client, method)(path, **kwargs)
+            assert response.status_code in range(200, 300), (
+                f"{method.upper()} {path} returned {response.status_code}: "
+                f"{response.text}"
+            )
+
+        # If any route (or a dependency it pulls in) had actually reached
+        # real MT5 during the request handling above, the AssertionError
+        # installed by _install_mt5_trap would have propagated straight out
+        # of the `getattr(client, method)(...)` call and failed this test
+        # with that error -- not with a non-2xx status code. Reaching this
+        # point at all is itself part of the proof.
+        assert mt5.initialize is not None
+
+    def test_trap_would_actually_catch_a_regression_that_calls_real_mt5(
+        self, monkeypatch
+    ):
+        """Bonus/empirical check that the trap above is a genuine,
+        reachable proof rather than one that's structurally inert given this
+        subphase's DI wiring: wires up a throwaway route that simulates a
+        future regression (a route/dependency bypassing Depends() and
+        calling MetaTrader5.initialize() directly, the same way the pre-fix
+        module-level singletons in app.factory do), and confirms the trap
+        installed the same way as above actually fires and propagates
+        through TestClient -- it is not silently swallowed or bypassed."""
+        self._install_mt5_trap(monkeypatch)
+
+        regression_router = APIRouter()
+
+        @regression_router.get("/regressed")
+        def regressed_route():
+            mt5.initialize()  # simulates a reintroduced real MT5 call
+            return {"ok": True}
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        client = TestClient(app)
+
+        with pytest.raises(AssertionError, match="MT5 should not be touched"):
+            client.get("/regressed")
