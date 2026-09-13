@@ -48,7 +48,24 @@ def strategy_factory(
     )
 
     if indicators is None:
-        indicators = {"macd": default_macd_fn}
+        if use_multi:
+            # Multi-timeframe path: bias (SMA/M15) and confirm (RSI/M5)
+            # layers below already own those indicators -- keep the entry
+            # (M1) layer MACD-only so timeframes don't duplicate signals.
+            indicators = {"macd": default_macd_fn}
+        else:
+            indicators = {
+                "macd": default_macd_fn,
+                "sma": functools.partial(
+                    generate_sma_signal,
+                    short_window=int(getattr(config, "ENTRY_SMA_SHORT_WINDOW", 5)),
+                    long_window=int(getattr(config, "ENTRY_SMA_LONG_WINDOW", 20)),
+                ),
+                "rsi": functools.partial(
+                    calculate_rsi,
+                    period=int(getattr(config, "ENTRY_RSI_PERIOD", 7)),
+                ),
+            }
 
     min_candles = (
         min_candles
