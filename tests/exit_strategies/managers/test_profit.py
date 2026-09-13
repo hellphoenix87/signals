@@ -99,3 +99,107 @@ def test_profit_exit_manager_reads_dict_position_profit_and_exits_on_breach(
     assert result.symbol == "EURUSD"
     assert result.side == "buy"
     assert result.volume == 0.01
+
+
+def test_check_exit_on_candle_close_htf_gating_blocks_exit_when_htf_opposes(
+    profit_manager, make_position
+):
+    """Test that check_exit_on_candle_close respects HTF gating and blocks exit.
+
+    Given:
+      - A dict-shaped buy position with profit=0.05
+      - A PosState pre-armed at break-even with best_profit=0.10 (same as tick test)
+      - An htf_allows_profit_exit that returns False (HTF opposes the exit)
+      - A close_price=1.1000
+
+    When:
+      - check_exit_on_candle_close() is called
+      - The profit (0.05) would normally breach from 0.10 peak by 0.05
+      - But HTF bias blocks the exit
+
+    Then:
+      - It returns None (exit is blocked by HTF gating)
+    """
+    position = make_position(
+        as_dict=True,
+        symbol="EURUSD",
+        type=0,  # buy
+        ticket=1,
+        volume=0.01,
+        price_open=1.1000,
+        profit=0.05,
+    )
+
+    # Pre-armed state with best_profit=0.10 (would trigger breach exit without HTF gating)
+    state = PosState(
+        anchor=1.1000,
+        prev_price=1.1000,
+        ticks_seen=5,
+    )
+    state.be_armed = True
+    state.best_profit = 0.10
+
+    # Mock htf_allows_profit_exit to return False (HTF blocks the exit)
+    profit_manager._htf_allows_profit_exit = MagicMock(return_value=False)
+
+    result = profit_manager.check_exit_on_candle_close(position, 1.1000, state)
+
+    # Should return None because HTF gating blocks the exit
+    assert result is None
+    # Verify that htf_allows_profit_exit was called with correct args
+    profit_manager._htf_allows_profit_exit.assert_called_once_with(
+        symbol="EURUSD", position_side="buy"
+    )
+
+
+def test_check_exit_on_candle_close_trailing_breach_fires_when_htf_allows(
+    profit_manager, make_position
+):
+    """Test that check_exit_on_candle_close executes trailing breach when HTF allows.
+
+    Given:
+      - A dict-shaped buy position with profit=0.05
+      - A PosState pre-armed at break-even with best_profit=0.10
+      - An htf_allows_profit_exit that returns True (HTF allows the exit)
+      - A close_price=1.1000
+
+    When:
+      - check_exit_on_candle_close() is called
+      - The profit (0.05) breaches from best_profit (0.10) by 0.05
+      - This breach exceeds the 0.04 threshold
+      - HTF allows the exit
+
+    Then:
+      - It returns an ExitAction with reason="trailing_breach_gt_5c"
+    """
+    position = make_position(
+        as_dict=True,
+        symbol="EURUSD",
+        type=0,  # buy
+        ticket=1,
+        volume=0.01,
+        price_open=1.1000,
+        profit=0.05,
+    )
+
+    state = PosState(
+        anchor=1.1000,
+        prev_price=1.1000,
+        ticks_seen=5,
+    )
+    state.be_armed = True
+    state.best_profit = 0.10
+
+    # Mock htf_allows_profit_exit to return True (HTF allows the exit)
+    profit_manager._htf_allows_profit_exit = MagicMock(return_value=True)
+
+    result = profit_manager.check_exit_on_candle_close(position, 1.1000, state)
+
+    # Should exit because breach exceeds 0.04 threshold and HTF allows it
+    assert result is not None
+    assert isinstance(result, ExitAction)
+    assert result.reason == "trailing_breach_gt_5c"
+    assert result.ticket == 1
+    assert result.symbol == "EURUSD"
+    assert result.side == "buy"
+    assert result.volume == 0.01
