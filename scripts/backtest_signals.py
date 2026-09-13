@@ -17,17 +17,22 @@ analysis in pandas/Excel; the aggregate summary is still printed to
 stdout. The signal generator's own per-candle logging is suppressed
 during the replay so it doesn't drown out the summary.
 
-Not supported here (see docs/plans/done/remove-demo-mode-fix-config-backtest-signals.md
-for why): `Config.USE_MULTI_TIMEFRAME_SIGNALS` (needs synchronized M1/M5/M15
-historical data, a materially bigger feature) and n-tick confirmation
-(needs live tick data to ever confirm a signal, which a bar-only replay
-can't provide). Full exit-strategy-aware backtesting (real trade
-lifecycle simulation via the actual exit managers, not this fixed
-target/stop proxy) is deliberately deferred until the exit strategy
-itself is finalized.
+`--mtf` replays the multi-timeframe strategy (SMA/M15 bias, RSI/M5
+confirm, MACD/M1 entry) instead of the single-timeframe path, fetching
+synchronized M1/M5/M15 history and feeding each layer only the higher-
+timeframe candles already closed as of each M1 decision point. This is
+independent of `Config.USE_MULTI_TIMEFRAME_SIGNALS`, which stays off for
+live trading regardless of this flag.
+
+Not supported here: n-tick confirmation (needs live tick data to ever
+confirm a signal, which a bar-only replay can't provide). Full
+exit-strategy-aware backtesting (real trade lifecycle simulation via the
+actual exit managers, not this fixed target/stop proxy) is deliberately
+deferred until the exit strategy itself is finalized.
 """
 
 import argparse
+import bisect
 import contextlib
 import csv
 import datetime
@@ -57,6 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-bars", type=int, default=300, help="Lookahead window (bars) to resolve each signal")
     parser.add_argument("--target-pips", type=float, default=None, help="Favorable-move threshold (default: Config.DEFAULT_TP_PIPS)")
     parser.add_argument("--stop-pips", type=float, default=None, help="Adverse-move threshold (default: Config.DEFAULT_SL_PIPS)")
+    parser.add_argument(
+        "--mtf",
+        action="store_true",
+        help="Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm, MACD/M1 entry) instead of the single-timeframe path",
+    )
     return parser.parse_args()
 
 
@@ -98,6 +108,16 @@ def evaluate_signal(
     return "undecided", end - 1 - entry_index
 
 
+def fetch_history(market_data: MarketData, symbol: str, timeframe: int, count: int) -> list[dict]:
+    """Fetch `count` closed candles for `timeframe` and tag each with `symbol`."""
+    candles = market_data.get_historical_candles(
+        symbol, timeframe=timeframe, start_pos=1, count=count
+    )
+    for c in candles:
+        c["symbol"] = symbol
+    return candles
+
+
 def run_backtest(
     symbol: str, count: int, forward_bars: int, target_pips: float, stop_pips: float
 ) -> None:
@@ -107,14 +127,10 @@ def run_backtest(
         sys.exit(1)
 
     market_data = MarketData()
-    candles = market_data.get_historical_candles(
-        symbol, timeframe=Config.TIMEFRAME, start_pos=1, count=count
-    )
+    candles = fetch_history(market_data, symbol, Config.TIMEFRAME, count)
     if not candles:
         print(f"No historical candles returned for {symbol}.")
         return
-    for c in candles:
-        c["symbol"] = symbol
 
     strategy = strategy_factory(config=Config)
     broker = Broker(TradingMode.BACKTEST)
@@ -148,6 +164,94 @@ def run_backtest(
 
     log_path = write_results_csv(results, symbol)
     summarize(results, symbol, log_path)
+
+
+TF_SECONDS = {
+    mt5.TIMEFRAME_M1: 60,
+    mt5.TIMEFRAME_M5: 5 * 60,
+    mt5.TIMEFRAME_M15: 15 * 60,
+}
+
+
+def run_mtf_backtest(
+    symbol: str, m1_count: int, forward_bars: int, target_pips: float, stop_pips: float
+) -> None:
+    """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
+    MACD/M1 entry) and print a summary.
+
+    Fetches M1/M5/M15 history up front, then for each M1 candle passes each
+    higher-timeframe layer only the candles already closed by that M1
+    candle's own close time -- found via `bisect` over each timeframe's
+    precomputed close-time array, so no layer ever sees a bar before it
+    actually finished forming.
+    """
+    if not mt5.initialize():
+        print("MT5 initialization failed.")
+        sys.exit(1)
+
+    market_data = MarketData()
+    tf_entry = getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+    tf_confirm = getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
+    tf_bias = getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15)
+
+    m1_candles = fetch_history(market_data, symbol, tf_entry, m1_count)
+    if not m1_candles:
+        print(f"No historical M1 candles returned for {symbol}.")
+        return
+
+    m5_count = max(int(m1_count / 5), 100)
+    m15_count = max(int(m1_count / 15), 100)
+    m5_candles = fetch_history(market_data, symbol, tf_confirm, m5_count)
+    m15_candles = fetch_history(market_data, symbol, tf_bias, m15_count)
+    if not m5_candles or not m15_candles:
+        print(f"No historical M5/M15 candles returned for {symbol}.")
+        return
+
+    m5_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_confirm]) for c in m5_candles]
+    m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
+    entry_seconds = TF_SECONDS[tf_entry]
+
+    strategy = strategy_factory(config=Config, use_multi=True)
+    broker = Broker(TradingMode.BACKTEST)
+    pip_size = broker.get_pip_size(symbol)
+
+    results: list[dict] = []
+
+    logging.disable(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            for i, m1_candle in enumerate(m1_candles):
+                closed_by = m1_candle["time"] + datetime.timedelta(seconds=entry_seconds)
+                m5_ptr = bisect.bisect_right(m5_close_times, closed_by)
+                m15_ptr = bisect.bisect_right(m15_close_times, closed_by)
+                if m5_ptr == 0 or m15_ptr == 0:
+                    continue
+
+                candles_by_tf = {
+                    tf_entry: m1_candles[: i + 1],
+                    tf_confirm: m5_candles[:m5_ptr],
+                    tf_bias: m15_candles[:m15_ptr],
+                }
+                signal = strategy.generate_signal(candles_by_tf)
+                final_signal = (signal.get("final_signal") or "hold").lower()
+                if final_signal not in ("buy", "sell"):
+                    continue
+                outcome, bars = evaluate_signal(
+                    m1_candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
+                )
+                results.append(
+                    {
+                        "time": m1_candle.get("time"),
+                        "direction": final_signal,
+                        "outcome": outcome,
+                        "bars": bars,
+                    }
+                )
+    finally:
+        logging.disable(logging.NOTSET)
+
+    log_path = write_results_csv(results, f"{symbol}_mtf")
+    summarize(results, f"{symbol} (multi-timeframe)", log_path)
 
 
 def write_results_csv(results: list[dict], symbol: str) -> Path | None:
@@ -212,10 +316,11 @@ def main() -> None:
         else float(getattr(Config, "DEFAULT_SL_PIPS", 2.0))
     )
 
-    if getattr(Config, "USE_MULTI_TIMEFRAME_SIGNALS", False):
+    if not args.mtf and getattr(Config, "USE_MULTI_TIMEFRAME_SIGNALS", False):
         print(
-            "USE_MULTI_TIMEFRAME_SIGNALS is on -- this script only supports "
-            "the single-timeframe signal path. Aborting."
+            "USE_MULTI_TIMEFRAME_SIGNALS is on but --mtf wasn't passed -- this "
+            "would silently replay the single-timeframe path instead of what's "
+            "actually configured. Pass --mtf, or turn the flag off. Aborting."
         )
         sys.exit(1)
 
@@ -229,7 +334,10 @@ def main() -> None:
         )
         sys.exit(1)
 
-    run_backtest(symbol, count, args.forward_bars, target_pips, stop_pips)
+    if args.mtf:
+        run_mtf_backtest(symbol, count, args.forward_bars, target_pips, stop_pips)
+    else:
+        run_backtest(symbol, count, args.forward_bars, target_pips, stop_pips)
 
 
 if __name__ == "__main__":
