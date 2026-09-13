@@ -324,44 +324,9 @@ class SignalOrchestrator:
     def _run_entries(self, *, snapshot: Any, asof: datetime) -> None:
         sg = self.signal_generator
 
-        # Accept multiple generator APIs (backwards/forwards compatible)
-        gen = (
-            getattr(sg, "generate_signal", None)
-            or getattr(sg, "generate_signals", None)
-            or getattr(sg, "__call__", None)
-        )
-        if not callable(gen):
-            self._log(
-                f"[Orchestrator] signal_generator has no callable generate_signal()/generate_signals()/__call__: {type(sg).__name__}"
-            )
-            return
-
-        # Call the generator with best-effort signature matching
+        # Call the signal generator's generate_signal method directly
         try:
-            try:
-                sig_out = gen(snapshot)
-            except TypeError:
-                try:
-                    sig_out = gen(candles_snapshot=snapshot)
-                except TypeError:
-                    try:
-                        sig_out = gen()
-                    except TypeError:
-                        # Last fallback: some generators use account_balance; try to fetch from broker if possible
-                        bal = None
-                        get_bal = (
-                            getattr(self.broker, "get_account_balance", None)
-                            if self.broker
-                            else None
-                        )
-                        if callable(get_bal):
-                            try:
-                                bal = float(get_bal())
-                            except Exception:
-                                bal = None
-                        if bal is None:
-                            raise
-                        sig_out = gen(account_balance=bal)
+            sig_out = sg.generate_signal(snapshot)
         except Exception as exc:
             self._log_exception(f"[Orchestrator] signal generator call failed: {exc!r}")
             return
