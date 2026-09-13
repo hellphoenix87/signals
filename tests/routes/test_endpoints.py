@@ -114,10 +114,11 @@ def test_close_all_endpoint_calls_trade_executor_method(mock_mt5):
       - response status is 200
       - no AttributeError is raised
     """
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from app.routes.endpoints import router
+    from app.factory import get_trade_executor
 
     # Create a mock trade_executor with a realistic close_all_trades() return shape
     mock_trade_executor = MagicMock()
@@ -127,28 +128,30 @@ def test_close_all_endpoint_calls_trade_executor_method(mock_mt5):
     app = FastAPI()
     app.include_router(router)
 
-    # Patch the trade_executor in the endpoints module
-    with patch("app.routes.endpoints.trade_executor", mock_trade_executor):
-        client = TestClient(app)
+    # Set up dependency override for get_trade_executor
+    app.dependency_overrides[get_trade_executor] = lambda: mock_trade_executor
 
-        # Act
-        response = client.post("/close_all")
+    client = TestClient(app)
 
-        # Assert
-        assert response.status_code == 200
-        assert mock_trade_executor.close_all_trades.call_count == 1
-        body = response.json()
-        assert body["status"] == "all trades closed"
-        assert body["closed"] == [1, 2]
-        assert body["failed"] == []
+    # Act
+    response = client.post("/close_all")
+
+    # Assert
+    assert response.status_code == 200
+    assert mock_trade_executor.close_all_trades.call_count == 1
+    body = response.json()
+    assert body["status"] == "all trades closed"
+    assert body["closed"] == [1, 2]
+    assert body["failed"] == []
 
 
 def test_close_all_endpoint_reports_failures():
     """POST /close_all should surface partial failures instead of always claiming success."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from app.routes.endpoints import router
+    from app.factory import get_trade_executor
 
     mock_trade_executor = MagicMock()
     mock_trade_executor.close_all_trades.return_value = {
@@ -159,12 +162,167 @@ def test_close_all_endpoint_reports_failures():
     app = FastAPI()
     app.include_router(router)
 
-    with patch("app.routes.endpoints.trade_executor", mock_trade_executor):
-        client = TestClient(app)
-        response = client.post("/close_all")
+    app.dependency_overrides[get_trade_executor] = lambda: mock_trade_executor
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "some trades failed to close"
-        assert body["closed"] == [1]
-        assert body["failed"] == [{"ticket": 2, "error": "close_position returned False"}]
+    client = TestClient(app)
+    response = client.post("/close_all")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "some trades failed to close"
+    assert body["closed"] == [1]
+    assert body["failed"] == [{"ticket": 2, "error": "close_position returned False"}]
+
+
+def test_status_endpoint_uses_dependency_injection(mock_mt5):
+    """Test that GET /status uses FastAPI dependency injection and does not require real app.factory singletons.
+
+    This test verifies the acceptance criteria: endpoints can work with mocked dependencies
+    via FastAPI's dependency_overrides without needing the real app.factory singletons.
+
+    Given:
+      - A FastAPI app with the router
+      - Dependency overrides set for get_orchestrators and get_trade_executor
+      - Mock orchestrators with is_running() mocked
+      - Mock trade_executor with daily_profit/last_reset attributes
+
+    When:
+      - GET /status is called
+
+    Then:
+      - Response is 200
+      - Response JSON contains orchestrator_running with mocked values
+      - Real app.factory singletons were never accessed
+    """
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes.endpoints import router
+    from app.factory import get_orchestrators, get_trade_executor
+
+    # Create mock orchestrator
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.is_running.return_value = True
+
+    # Create mock trade_executor
+    mock_trade_executor = MagicMock()
+    mock_trade_executor.daily_profit = 123.45
+    mock_trade_executor.last_reset = "2025-01-01"
+
+    # Create app and include router
+    app = FastAPI()
+    app.include_router(router)
+
+    # Set up dependency overrides
+    app.dependency_overrides[get_orchestrators] = lambda: {"EURUSD": mock_orchestrator}
+    app.dependency_overrides[get_trade_executor] = lambda: mock_trade_executor
+
+    # Make request
+    client = TestClient(app)
+    response = client.get("/status")
+
+    # Assert
+    assert response.status_code == 200
+    data = response.json()
+    assert data["orchestrator_running"] == {"EURUSD": True}
+    assert data["daily_profit"] == 123.45
+    assert data["last_reset"] == "2025-01-01"
+
+    # Verify mocks were called
+    assert mock_orchestrator.is_running.call_count >= 1
+    assert mock_trade_executor is not None
+
+
+def test_trading_start_endpoint_uses_dependency_injection(mock_mt5):
+    """Test that POST /trading/start uses dependency injection."""
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes.endpoints import router
+    from app.factory import get_orchestrators
+
+    # Create mock orchestrator
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.start = MagicMock()
+
+    # Create app and include router
+    app = FastAPI()
+    app.include_router(router)
+
+    # Set up dependency override
+    app.dependency_overrides[get_orchestrators] = lambda: {"EURUSD": mock_orchestrator}
+
+    # Make request
+    client = TestClient(app)
+    response = client.post("/trading/start")
+
+    # Assert
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "trading started"
+    assert data["orchestrator_running"] is True
+    assert mock_orchestrator.start.call_count == 1
+
+
+def test_simulated_positions_endpoint_uses_dependency_injection(mock_mt5):
+    """Test that GET /simulated_positions uses dependency injection."""
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes.endpoints import router
+    from app.factory import get_broker
+
+    # Create mock broker
+    mock_broker = MagicMock()
+    mock_broker.open_positions_sim = {"pos1": {"ticket": 1, "volume": 0.01}}
+    mock_broker.mode = MagicMock()
+
+    # Create app and include router
+    app = FastAPI()
+    app.include_router(router)
+
+    # Set up dependency override
+    app.dependency_overrides[get_broker] = lambda: mock_broker
+
+    # Make request
+    client = TestClient(app)
+    response = client.get("/simulated_positions")
+
+    # Assert
+    assert response.status_code == 200
+    data = response.json()
+    assert data == {"pos1": {"ticket": 1, "volume": 0.01}}
+
+
+def test_test_historical_endpoint_uses_dependency_injection(mock_mt5):
+    """Test that GET /test_historical uses dependency injection."""
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes.endpoints import router
+    from app.factory import get_market_data
+
+    # Create mock market_data
+    mock_market_data = MagicMock()
+    mock_market_data.get_historical_candles.return_value = [
+        {"close": 1.1000, "open": 1.0990},
+        {"close": 1.1005, "open": 1.1000},
+    ]
+
+    # Create app and include router
+    app = FastAPI()
+    app.include_router(router)
+
+    # Set up dependency override
+    app.dependency_overrides[get_market_data] = lambda: mock_market_data
+
+    # Make request
+    client = TestClient(app)
+    response = client.get("/test_historical")
+
+    # Assert
+    assert response.status_code == 200
+    data = response.json()
+    assert "candles" in data
+    assert len(data["candles"]) == 2
+    assert mock_market_data.get_historical_candles.call_count == 1
