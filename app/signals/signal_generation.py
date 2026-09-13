@@ -15,6 +15,29 @@ from app.signals.strategies.ntick_confirmed_signal_strategy import (
 )
 
 
+def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
+    """Build one of the production entry-layer indicator callables by name
+    ("macd", "sma", "rsi"), reading its tunables from `config`. Single
+    source of truth so callers other than `strategy_factory` (e.g.
+    backtest tooling running single-indicator ablations) don't duplicate
+    the partial-construction parameters.
+    """
+    if name == "macd":
+        return default_macd_fn
+    if name == "sma":
+        return functools.partial(
+            generate_sma_signal,
+            short_window=int(getattr(config, "ENTRY_SMA_SHORT_WINDOW", 5)),
+            long_window=int(getattr(config, "ENTRY_SMA_LONG_WINDOW", 20)),
+        )
+    if name == "rsi":
+        return functools.partial(
+            calculate_rsi,
+            period=int(getattr(config, "ENTRY_RSI_PERIOD", 7)),
+        )
+    raise ValueError(f"Unknown indicator: {name!r}")
+
+
 def strategy_factory(
     strategy_cls: Type = StrongSignalStrategy,
     config: Any = Config,
@@ -52,19 +75,10 @@ def strategy_factory(
             # Multi-timeframe path: bias (SMA/M15) and confirm (RSI/M5)
             # layers below already own those indicators -- keep the entry
             # (M1) layer MACD-only so timeframes don't duplicate signals.
-            indicators = {"macd": default_macd_fn}
+            indicators = {"macd": build_indicator("macd", config)}
         else:
             indicators = {
-                "macd": default_macd_fn,
-                "sma": functools.partial(
-                    generate_sma_signal,
-                    short_window=int(getattr(config, "ENTRY_SMA_SHORT_WINDOW", 5)),
-                    long_window=int(getattr(config, "ENTRY_SMA_LONG_WINDOW", 20)),
-                ),
-                "rsi": functools.partial(
-                    calculate_rsi,
-                    period=int(getattr(config, "ENTRY_RSI_PERIOD", 7)),
-                ),
+                name: build_indicator(name, config) for name in ("macd", "sma", "rsi")
             }
 
     min_candles = (

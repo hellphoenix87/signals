@@ -36,6 +36,17 @@ seconds) is finalized -- the longer target/stop simulation below still
 matters once that's settled, but assumes a hold time this app doesn't
 actually commit to.
 
+`--indicators macd,sma,rsi,macd_crossover` (comma-separated, any subset)
+overrides the single-timeframe default vote with only the named
+indicator(s) -- for single-indicator ablation, e.g. `--indicators macd`
+to test MACD alone. `macd_crossover` is an experimental, backtest-only
+MACD variant (true crossover trigger instead of the live "still
+accelerating" one) for direct comparison. Not compatible with `--mtf`.
+
+`--mtf-score-threshold`/`--mtf-adx-min-strength` override
+`Config.MTF_SCORE_THRESHOLD`/`MTF_ADX_MIN_STRENGTH` for `--mtf` runs
+(gate-sensitivity sweeps), without touching live settings.
+
 Not supported here: n-tick confirmation (needs live tick data to ever
 confirm a signal, which a bar-only replay can't provide). Full
 exit-strategy-aware backtesting (real trade lifecycle simulation via the
@@ -52,12 +63,14 @@ import io
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.data.market_data import MarketData
-from app.signals.signal_generation import strategy_factory
+from app.signals.indicators.macd import calculate_macd_crossover
+from app.signals.signal_generation import build_indicator, strategy_factory
 from app.trade_execution.broker import Broker
 from app.trade_execution.mode import TradingMode
 
@@ -85,7 +98,23 @@ def parse_args() -> argparse.Namespace:
         help="Report best/worst/end-of-window price excursion over --horizon-bars instead of a fixed target/stop win-loss simulation",
     )
     parser.add_argument("--horizon-bars", type=int, default=1, help="Bars to look ahead for --quick-check (default: 1, i.e. one M1 minute)")
+    parser.add_argument(
+        "--indicators",
+        default=None,
+        help="Comma-separated single-timeframe indicator ablation (e.g. 'macd', 'sma', 'macd_crossover'); overrides the default macd+sma+rsi vote. Not compatible with --mtf.",
+    )
+    parser.add_argument("--mtf-score-threshold", type=float, default=None, help="Override Config.MTF_SCORE_THRESHOLD for --mtf runs")
+    parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
     return parser.parse_args()
+
+
+def build_indicator_for_backtest(name: str, config: Any):
+    """Like `signal_generation.build_indicator`, plus experimental,
+    backtest-only variants (e.g. `macd_crossover`) not used by production
+    `strategy_factory`."""
+    if name == "macd_crossover":
+        return calculate_macd_crossover
+    return build_indicator(name, config)
 
 
 def evaluate_signal(
@@ -183,8 +212,14 @@ def run_backtest(
     stop_pips: float,
     quick_check: bool = False,
     horizon_bars: int = 1,
+    indicator_names: list[str] | None = None,
 ) -> None:
-    """Fetch history, replay it through the real signal generator, and print a summary."""
+    """Fetch history, replay it through the real signal generator, and print a summary.
+
+    `indicator_names`, when given, overrides the default macd+sma+rsi vote
+    with only the named indicator(s) -- for single-indicator ablation runs
+    (see `build_indicator_for_backtest`).
+    """
     if not mt5.initialize():
         print("MT5 initialization failed.")
         sys.exit(1)
@@ -195,7 +230,12 @@ def run_backtest(
         print(f"No historical candles returned for {symbol}.")
         return
 
-    strategy = strategy_factory(config=Config)
+    indicators = (
+        {name: build_indicator_for_backtest(name, Config) for name in indicator_names}
+        if indicator_names
+        else None
+    )
+    strategy = strategy_factory(config=Config, indicators=indicators)
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
 
@@ -229,12 +269,14 @@ def run_backtest(
     finally:
         logging.disable(logging.NOTSET)
 
+    label = f"{symbol}_{'+'.join(indicator_names)}" if indicator_names else symbol
+    display_name = f"{symbol} ({'+'.join(indicator_names)})" if indicator_names else symbol
     if quick_check:
-        log_path = write_quick_results_csv(results, symbol)
-        summarize_quick(results, symbol, horizon_bars, log_path)
+        log_path = write_quick_results_csv(results, label)
+        summarize_quick(results, display_name, horizon_bars, log_path)
     else:
-        log_path = write_results_csv(results, symbol)
-        summarize(results, symbol, log_path)
+        log_path = write_results_csv(results, label)
+        summarize(results, display_name, log_path)
 
 
 TF_SECONDS = {
@@ -252,6 +294,8 @@ def run_mtf_backtest(
     stop_pips: float,
     quick_check: bool = False,
     horizon_bars: int = 1,
+    config: Any = Config,
+    label: str | None = None,
 ) -> None:
     """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
     MACD/M1 entry) and print a summary.
@@ -261,15 +305,19 @@ def run_mtf_backtest(
     candle's own close time -- found via `bisect` over each timeframe's
     precomputed close-time array, so no layer ever sees a bar before it
     actually finished forming.
+
+    `config` defaults to the real `Config` but can be a subclass override
+    (e.g. a different `MTF_SCORE_THRESHOLD`/`MTF_ADX_MIN_STRENGTH`) for
+    gate-sensitivity sweeps, without touching live settings.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")
         sys.exit(1)
 
     market_data = MarketData()
-    tf_entry = getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1)
-    tf_confirm = getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
-    tf_bias = getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15)
+    tf_entry = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+    tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
+    tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15)
 
     m1_candles = fetch_history(market_data, symbol, tf_entry, m1_count)
     if not m1_candles:
@@ -288,7 +336,7 @@ def run_mtf_backtest(
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
     entry_seconds = TF_SECONDS[tf_entry]
 
-    strategy = strategy_factory(config=Config, use_multi=True)
+    strategy = strategy_factory(config=config, use_multi=True)
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
 
@@ -331,12 +379,14 @@ def run_mtf_backtest(
     finally:
         logging.disable(logging.NOTSET)
 
+    file_tag = f"{symbol}_mtf" + (f"_{label}" if label else "")
+    display_name = f"{symbol} (multi-timeframe" + (f", {label})" if label else ")")
     if quick_check:
-        log_path = write_quick_results_csv(results, f"{symbol}_mtf")
-        summarize_quick(results, f"{symbol} (multi-timeframe)", horizon_bars, log_path)
+        log_path = write_quick_results_csv(results, file_tag)
+        summarize_quick(results, display_name, horizon_bars, log_path)
     else:
-        log_path = write_results_csv(results, f"{symbol}_mtf")
-        summarize(results, f"{symbol} (multi-timeframe)", log_path)
+        log_path = write_results_csv(results, file_tag)
+        summarize(results, display_name, log_path)
 
 
 def write_results_csv(results: list[dict], symbol: str) -> Path | None:
@@ -478,15 +528,37 @@ def main() -> None:
         )
         sys.exit(1)
 
+    if args.indicators and args.mtf:
+        print("--indicators is a single-timeframe ablation flag, not compatible with --mtf. Aborting.")
+        sys.exit(1)
+
     if args.mtf:
+        config = Config
+        label_parts = []
+        if args.mtf_score_threshold is not None or args.mtf_adx_min_strength is not None:
+            overrides = {}
+            if args.mtf_score_threshold is not None:
+                overrides["MTF_SCORE_THRESHOLD"] = args.mtf_score_threshold
+                label_parts.append(f"score{args.mtf_score_threshold}")
+            if args.mtf_adx_min_strength is not None:
+                overrides["MTF_ADX_MIN_STRENGTH"] = args.mtf_adx_min_strength
+                label_parts.append(f"adx{args.mtf_adx_min_strength}")
+            config = type("ConfigOverride", (Config,), overrides)
         run_mtf_backtest(
             symbol, count, args.forward_bars, target_pips, stop_pips,
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
+            config=config, label="_".join(label_parts) or None,
         )
     else:
+        indicator_names = (
+            [n.strip() for n in args.indicators.split(",") if n.strip()]
+            if args.indicators
+            else None
+        )
         run_backtest(
             symbol, count, args.forward_bars, target_pips, stop_pips,
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
+            indicator_names=indicator_names,
         )
 
 
