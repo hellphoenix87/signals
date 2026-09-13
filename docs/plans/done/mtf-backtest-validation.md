@@ -1,6 +1,6 @@
 # Activate Entry-Layer Indicators + Multi-Timeframe Backtest Validation
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -41,8 +41,29 @@ Two things, bundled since the second can't be judged without the first:
 - Report signal count, win/loss/undecided, and win rate for both, side by side. No code changes expected in this phase unless the comparison surfaces an actual bug (e.g. MTF signal count of zero would indicate a wiring problem, not a real result, and should be root-caused before treating the win rate as meaningful).
 - Decision on whether to flip `USE_MULTI_TIMEFRAME_SIGNALS` for live trading is the user's, made after seeing these numbers — not automated by this plan.
 
+### Results (4 weeks EURUSD, target=50 pips throughout)
+
+| Strategy | Stop (pips) | Signals | Win rate (decided) | Wins/Losses/Undecided |
+|---|---|---|---|---|
+| Single-tf (MACD only, pre-Phase-1) | 5 | 16,082 | 0.4% | 37/10326/5719 |
+| Single-tf (MACD only, pre-Phase-1) | 10 | 16,082 | 1.1% | 62/5502/10518 |
+| Single-tf (MACD only, pre-Phase-1) | 20 | 16,082 | 7.1% | 131/1706/14245 |
+| Single-tf (MACD+SMA+RSI, Phase 1) | 10 | 5,657 | 1.3% | 28/2067/3562 |
+| Multi-timeframe (SMA/M15, RSI/M5, MACD/M1) | 5 | 846 | 1.9% | 12/613/221 |
+| Multi-timeframe | 10 | 846 | 5.3% | 18/322/506 |
+| Multi-timeframe | 20 | 846 | 16.5% | 18/91/737 |
+
+**Findings:**
+
+1. Phase 1 (activating SMA+RSI in the single-timeframe path) cut signal count 65% (16,082 -> 5,657) but barely moved win rate (1.1% -> 1.3% at stop=10) — the vote-gating fixed overtrading, not the underlying lack of directional edge.
+2. Multi-timeframe is far more selective (846 signals vs. 5,657-16,082) and beats both single-timeframe variants at every matched stop size — the weighted confluence + ADX gate is doing real filtering, not just noise reduction.
+3. Even MTF's best result (stop=20) is a 16.5% win rate, well under the ~28.6% breakeven a 20:50 risk/reward requires, and 87% of those signals never resolved within 300 bars (undecided) — that figure rests on a small decided sample (n=109).
+4. None of these configurations are net-profitable at `DEFAULT_TP_PIPS = 50`. Average bars-to-resolution creeps to 151 (~2.5 hours) at stop=20, suggesting 50 pips may simply be too far a target for M1 EURUSD to reach reliably — untested here, flagged as a natural next step.
+
+**Decision (user's call, not automated by this plan): `Config.USE_MULTI_TIMEFRAME_SIGNALS` stays `False`.** MTF is directionally better than the single-timeframe path but not yet profitable at any stop size tested — not ready to trade live. Follow-up (separate future work, not this plan): re-run the MTF sweep with a target closer to what M1 EURUSD can realistically reach (e.g. 10-15 pips) before deciding whether to enable it.
+
 ## Verification (manual, per MVP/POC mode)
 
-- `strategy_factory(config=Config)` (use_multi defaulting from config, currently `False`) exposes `indicators.keys() == {"macd", "sma", "rsi"}`; `strategy_factory(config=Config, use_multi=True)`'s `entry_strategy` still exposes `indicators.keys() == {"macd"}` only.
-- `scripts/backtest_signals.py --mtf` produces a nonzero signal count and a plausible-looking summary without placing any real order.
-- Confirm the M5/M15 pointer alignment is genuinely causal (a candle isn't visible to the strategy before its own close time) by spot-checking a few M1 timestamps against the M5/M15 windows passed at that point.
+- `strategy_factory(config=Config)` (use_multi defaulting from config, currently `False`) exposes `indicators.keys() == {"macd", "sma", "rsi"}`; `strategy_factory(config=Config, use_multi=True)`'s `entry_strategy` still exposes `indicators.keys() == {"macd"}` only. Confirmed directly via `strategy_factory(config=Config)` -> `['macd', 'sma', 'rsi']`.
+- `scripts/backtest_signals.py --mtf` produces a nonzero signal count and a plausible-looking summary without placing any real order. Confirmed (846 signals/4 weeks, all three stop sizes above).
+- Confirmed the M5/M15 pointer alignment is genuinely causal by spot-checking 4 M1 timestamps against their M5/M15 windows: in every case the last visible higher-timeframe candle's close time was `<=` the M1 candle's own close time, and the next one (if any) was strictly later.
