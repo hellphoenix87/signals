@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push origin master)",
+      "Bash(git push origin main)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -f*)",
+      "Bash(git clean -fd*)",
+      "Bash(git branch -D*)",
+      "Bash(git commit --no-verify*)",
+      "Bash(git commit --no-gpg-sign*)",
+      "Bash(git * --no-verify*)",
+      "Bash(rm -rf*)",
+      "PowerShell(git push --force*)",
+      "PowerShell(git push -f*)",
+      "PowerShell(git push * --force*)",
+      "PowerShell(git push origin master)",
+      "PowerShell(git push origin main)",
+      "PowerShell(git reset --hard*)",
+      "PowerShell(git clean -f*)",
+      "PowerShell(git clean -fd*)",
+      "PowerShell(git branch -D*)",
+      "PowerShell(git commit --no-verify*)",
+      "PowerShell(git commit --no-gpg-sign*)",
+      "PowerShell(git * --no-verify*)",
+      "PowerShell(Remove-Item * -Recurse -Force*)",
+      "PowerShell(rm * -Recurse -Force*)"
+    ]
+  }
+}

@@ -54,9 +54,11 @@ Non-trivial work goes through a plan-driven, test-first flow using four project 
 | Agent | Model | Job |
 |---|---|---|
 | `architect` | sonnet (opus when triage says elevated) | Turns a request into a phased plan under `docs/plans/`, using the `plan` skill. Never writes application code. |
-| `developer` | haiku | Implements exactly one subphase at a time, test-first (unit/integration tests only), using the `tdd-subphase` skill. |
-| `qa` | sonnet | Owns the quality gate. Writes/extends the full-stack e2e suite (`tests/e2e/` — MT5 mocked at the boundary via `mock_mt5`, everything else real, driven through the real FastAPI app) using the `qa-verify` skill, runs it every subphase alongside the developer's unit/integration tests, and verifies both against the plan's acceptance criteria; edits `tests/e2e/**` and the plan's QA section. |
-| `pr-reviewer` | sonnet (opus when triage says elevated) | Reviews one phase/subphase branch's diff before it merges, via the built-in `code-review` skill. |
+| `developer` | haiku | Implements exactly one subphase at a time, test-first (unit/integration tests only), using the `tdd-subphase` skill. Done when its own unit/integration tests are green — nothing more. |
+| `qa` | sonnet | Owns the quality gate, in two passes. **Author** (runs in parallel with `developer`, starts as soon as the subphase exists): writes/extends `tests/e2e/` straight from the plan's stated requirements/acceptance criteria alone — never reads `developer`'s in-progress diff. **Verify** (starts only once `developer` reports its unit/integration tests green): runs the full suite (its own e2e tests plus `developer`'s unit/integration tests) against the real implementation and checks both against the plan's acceptance criteria. Edits `tests/e2e/**` and the plan's QA section; never pushes, opens a PR, or merges. |
+| `pr-reviewer` | sonnet (opus when triage says elevated) | Reviews one phase/subphase branch's diff before it merges, via the built-in `code-review` skill. Starts only after `qa`'s verify pass signs off. Never pushes, opens a PR, or merges. |
+
+**Only the main session pushes, opens PRs, or merges branches — no exceptions.** None of the four agents above ever runs `git push`, `gh pr create`, or `gh pr merge`; that is the main session's job alone, everywhere in this workflow (plan-branch setup, every phase/subphase branch, and anywhere else). This is a hard governance rule, not just a convention — see the permission hardening below.
 
 **Plan lifecycle** — one markdown file per feature/bugfix, physically moved as its status changes:
 
@@ -81,10 +83,12 @@ For each phase/subphase, in order:
 1. `git checkout master && git pull` — always branch from the latest merged state (this repo's trunk is `master`, not `main`).
 2. Create `<plan-slug>-<phase[.subphase]>` off master.
 3. First subphase of the plan: move the plan file `docs/plans/todo/<slug>.md` → `docs/plans/in-progress/<slug>.md` as part of this branch's commit.
-4. Invoke `developer` (haiku) to implement it test-first — unit/integration tests, written and run against just this subphase's code — (`tdd-subphase` skill).
-5. Invoke `qa` (sonnet) to write/extend `tests/e2e/` coverage for this subphase, run the full e2e suite plus the developer's unit/integration tests, and verify both against the plan's acceptance criteria (`qa-verify` skill); loop back to `developer` on the same branch until it passes.
-6. Invoke `pr-reviewer` (sonnet, or opus per the plan's triage) against the branch diff; loop back to `developer` on the same branch until there are no blocking findings.
-7. Push the branch, open a PR against master, and **merge it automatically** — no user confirmation needed for this merge specifically.
+4. Invoke `developer` and `qa` **at the same time** on this branch, as two independent agents:
+   - `developer` (haiku, `tdd-subphase` skill) implements the subphase test-first — unit/integration tests only — and iterates on its own until those tests are green. That's `developer` done; it does not wait for or coordinate with `qa`.
+   - `qa` (sonnet, `qa-verify` skill's author step) writes/extends `tests/e2e/` for this subphase using only the plan's stated requirements/acceptance criteria — it must not read `developer`'s in-progress diff while authoring, so the e2e test stays a black-box check against the spec rather than a mirror of whatever `developer` happened to implement. `qa` does not run this suite against real code yet; if the two agents' concurrent edits risk colliding on the same checkout, run `qa`'s author pass in an isolated worktree instead.
+5. Once `developer` reports its unit/integration tests green, resume the same `qa` agent (continue its session rather than starting a fresh one, so it still has the e2e tests it authored) for its **verify** pass: run the full suite — its `tests/e2e/` plus `developer`'s unit/integration tests — against the actual implementation, and check both against the plan's acceptance criteria. Loop back to `developer` on the same branch on any gap, then re-run `qa`'s verify pass.
+6. Only once `qa`'s verify pass signs off, invoke `pr-reviewer` (sonnet, or opus per the plan's triage) against the branch diff; loop back to `developer` on the same branch until there are no blocking findings.
+7. Push the branch, open a PR against master, and **merge it automatically** — no user confirmation needed for this merge specifically. This step is always performed by the main session; none of the four agents does it themselves.
 8. Last subphase of the plan: move the plan file `docs/plans/in-progress/<slug>.md` → `docs/plans/done/<slug>.md` as part of this final branch's commit, before opening its PR.
 9. `git checkout master && git pull` to pick up the merge, then proceed to the next phase/subphase's branch.
 

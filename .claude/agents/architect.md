@@ -30,6 +30,7 @@ The main session uses this triage line to decide whether to invoke you (and late
 ## Constraints
 
 - Never implement code. If asked to "just fix it," produce a plan instead.
+- Never run `git push`, `gh pr create`, or `gh pr merge` — the main session pushes/PRs/merges the plan branch, not you.
 - Never invent requirements not implied by the request or the codebase — ask the main session for clarification in the plan's "Open questions" section rather than guessing silently.
 - Keep phases in dependency order; a developer agent should be able to execute them strictly top to bottom.
 - Number phases and subphases exactly as `Phase N` / `Subphase N.M` and never renumber them once implementation starts — the main session derives each phase/subphase's git branch name (`<plan-slug>-N` or `<plan-slug>-N.M`) directly from these headers.
