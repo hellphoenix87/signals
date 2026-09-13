@@ -439,3 +439,62 @@ class TestSignalOrchestratorExecuteExitActions:
         logged_msg = call_args[0][0]
         assert "broker close failed" in logged_msg
         assert "ValueError" in logged_msg
+
+    def test_execute_exit_actions_logs_trading_service_failure_but_continues(self):
+        """
+        When trading_service.execute_exit raises for one action, that failure
+        should be logged, but the loop must continue to process remaining actions.
+        """
+        # Setup mocks
+        collector_mock = MagicMock()
+        signal_generator_mock = MagicMock()
+        logger_mock = MagicMock()
+
+        # Create a trading_service where execute_exit fails on the first call
+        # but succeeds on the second
+        trading_service_mock = MagicMock()
+        trading_service_mock.execute_exit = MagicMock(
+            side_effect=[
+                RuntimeError("MT5 connection lost"),
+                None,  # Second call succeeds
+            ]
+        )
+
+        # Create orchestrator with trading_service
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator_mock,
+            trading_service=trading_service_mock,
+            logger=logger_mock,
+        )
+
+        # Create two exit actions
+        actions = [
+            {
+                "ticket": 1,
+                "symbol": "EURUSD",
+                "side": "sell",
+                "volume": 0.01,
+            },
+            {
+                "ticket": 2,
+                "symbol": "GBPUSD",
+                "side": "buy",
+                "volume": 0.02,
+            },
+        ]
+
+        # Call _execute_exit_actions
+        orchestrator._execute_exit_actions(actions)
+
+        # Assert that trading_service.execute_exit was called twice (both actions attempted)
+        assert trading_service_mock.execute_exit.call_count == 2
+
+        # Assert that logger.exception was called exactly once (for the first failure)
+        logger_mock.exception.assert_called_once()
+        call_args = logger_mock.exception.call_args
+        logged_msg = call_args[0][0]
+        assert "exit execution failed" in logged_msg
+        assert "ticket=1" in logged_msg
+        assert "symbol=EURUSD" in logged_msg
+        assert "RuntimeError" in logged_msg

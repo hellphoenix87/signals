@@ -443,7 +443,22 @@ class SignalOrchestrator:
         # Prefer trading_service (TradeExecutor) for exits if available
         if self.trading_service and hasattr(self.trading_service, "execute_exit"):
             for a in actions:
-                self.trading_service.execute_exit(a)
+                try:
+                    self.trading_service.execute_exit(a)
+                except Exception as exc:
+                    ticket = (
+                        getattr(a, "ticket", None)
+                        if not isinstance(a, dict)
+                        else a.get("ticket")
+                    )
+                    symbol = (
+                        getattr(a, "symbol", None)
+                        if not isinstance(a, dict)
+                        else a.get("symbol")
+                    )
+                    self._log_exception(
+                        f"[Orchestrator] exit execution failed for ticket={ticket} symbol={symbol}: {exc!r}"
+                    )
             return
 
         # Fallback: call broker directly
@@ -487,9 +502,13 @@ class SignalOrchestrator:
                 try:
                     closer(ticket, symbol, side, volume)
                 except Exception as exc:
-                    self._log_exception(f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}")
+                    self._log_exception(
+                        f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}"
+                    )
             except Exception as exc:
-                self._log_exception(f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}")
+                self._log_exception(
+                    f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}"
+                )
 
     # -------------------------
     # Candle snapshot helpers
