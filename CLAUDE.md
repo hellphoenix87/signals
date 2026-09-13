@@ -91,7 +91,8 @@ For each phase/subphase, in order:
 6. Only once `qa`'s verify pass signs off, invoke `pr-reviewer` (sonnet, or opus per the plan's triage) against the branch diff; loop back to `developer` on the same branch until there are no blocking findings.
 7. Push the branch, open a PR against master, and **merge it automatically** — no user confirmation needed for this merge specifically. This step is always performed by the main session; none of the four agents does it themselves.
 8. Last subphase of the plan: move the plan file `docs/plans/in-progress/<slug>.md` → `docs/plans/done/<slug>.md` as part of this final branch's commit, before opening its PR.
-9. `git checkout master && git pull` to pick up the merge, then proceed to the next phase/subphase's branch.
+9. **Delete the branch, both remote and local**, right after it merges (e.g. `gh pr merge --squash --delete-branch`, or a separate `git push origin --delete <branch>` plus `git branch -d <branch>`) — don't let merged phase/subphase branches accumulate on `origin`.
+10. `git checkout master && git pull` to pick up the merge, then proceed to the next phase/subphase's branch.
 
 ## Conventions (from prior Copilot instructions)
 
