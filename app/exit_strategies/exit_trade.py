@@ -1,5 +1,3 @@
-# -- TO BE DELETED OR REFACTORED LATER TO UNIFY MANAGERS --
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,7 +28,12 @@ def create_exit_trade(
 @dataclass(frozen=True)
 class ExitTradeConfig:
     """
-    Hybrid exit configuration.
+    Hybrid exit configuration, grouped by concern: trailing buffer, tick-only
+    noisy rules (normally off), soft-SL money/price/pips controls, early-abort
+    (a spread-safe alternative to "exit on first tick not favorable"),
+    break-even arming, higher-timeframe gating (blocks profit-taking exits
+    only -- protective exits are never gated), and hybrid tick-vs-candle-close
+    mode switches.
 
     Tick-driven (protective):
       - optional "exit on first tick not favorable" (usually OFF)
@@ -43,23 +46,18 @@ class ExitTradeConfig:
       - optionally HTF-gated (blocks profit exits while HTF supports the position)
     """
 
-    # Trailing buffer (pips)
     buffer_pips: float = float(getattr(Config, "EXIT_BUFFER_PIPS", 0.5) or 0.5)
     buffer_start_tick: int = int(getattr(Config, "EXIT_BUFFER_START_TICK", 3) or 3)
     buffer_start_candle: int = int(getattr(Config, "EXIT_BUFFER_START_CANDLE", 2) or 2)
 
-    # Epsilon (pips) to avoid flip-flopping on equal prices
     eps_pips: float = float(getattr(Config, "EXIT_EPS_PIPS", 0.0) or 0.0)
 
-    # Tick-only noisy rule (normally OFF)
     exit_on_first_tick_not_favorable: bool = bool(
         getattr(Config, "EXIT_ON_FIRST_TICK_NOT_FAVORABLE", False)
     )
 
-    # Disabled in this implementation (kept for compatibility)
     exit_on_first_profit_tick: bool = False
 
-    # Profit rule (reversal in profit)
     exit_on_first_reversal_in_profit: bool = bool(
         getattr(Config, "EXIT_ON_FIRST_REVERSAL_IN_PROFIT", True)
     )
@@ -67,39 +65,29 @@ class ExitTradeConfig:
         getattr(Config, "EXIT_TREAT_FLAT_AS_REVERSAL", False)
     )
 
-    # Soft SL controls
     max_loss_money: float = float(getattr(Config, "EXIT_MAX_LOSS_MONEY", 0.0) or 0.0)
     max_loss_price: float = float(getattr(Config, "EXIT_MAX_LOSS_PRICE", 0.0) or 0.0)
     max_loss_pips: float = float(getattr(Config, "EXIT_MAX_LOSS_PIPS", 0.0) or 0.0)
 
-    # Profit threshold for "in profit" checks (0 => any profit)
     min_profit_pips: float = float(getattr(Config, "EXIT_MIN_PROFIT_PIPS", 0.0) or 0.0)
 
-    # Early-abort (spread-safe alternative to "first tick not favorable")
     early_abort_enabled: bool = bool(getattr(Config, "EXIT_EARLY_ABORT_ENABLED", False))
     early_abort_ticks: int = int(getattr(Config, "EXIT_EARLY_ABORT_TICKS", 0) or 0)
     early_abort_loss_pips: float = float(
         getattr(Config, "EXIT_EARLY_ABORT_LOSS_PIPS", 0.0) or 0.0
     )
 
-    # Grace period for money soft-SL to avoid instant exits from spread right after entry
     soft_sl_money_grace_ticks: int = int(
         getattr(Config, "EXIT_SOFT_SL_MONEY_GRACE_TICKS", 0) or 0
     )
 
-    # ----------------------------
-    # Higher-timeframe gating
-    # ----------------------------
-    # If enabled, only profit-taking exits (reversal/buffer) are gated.
-    # Protective exits (soft SL / early abort) are NOT gated.
+    be_arming_ticks: int = int(getattr(Config, "EXIT_BE_ARMING_TICKS", 20) or 20)
+
     htf_filter_enabled: bool = bool(getattr(Config, "EXIT_HTF_FILTER_ENABLED", False))
     htf_stale_seconds: int = int(getattr(Config, "EXIT_HTF_STALE_SECONDS", 180) or 180)
     htf_use_m15: bool = bool(getattr(Config, "EXIT_HTF_USE_M15", True))
     htf_use_m5: bool = bool(getattr(Config, "EXIT_HTF_USE_M5", True))
 
-    # ----------------------------
-    # Hybrid mode switches
-    # ----------------------------
     profit_exits_on_tick: bool = bool(
         getattr(Config, "EXIT_PROFIT_EXITS_ON_TICK", True)
     )
@@ -109,6 +97,10 @@ class ExitTradeConfig:
 
 
 class ExitTrade:
+    """Composes `LossExitManager` (protective) and `ProfitExitManager`
+    (profit-taking) per open position, on both the tick path (`on_tick`) and
+    the candle-close path (`on_candle_close`)."""
+
     def __init__(
         self,
         broker: Any,
@@ -132,7 +124,6 @@ class ExitTrade:
             Config, "EXIT_MIN_PROFIT_PIPS_BY_SYMBOL", {}
         )
 
-        # Managers
         self._profit_manager = ProfitExitManager(
             config=self._config,
             broker=self._broker,
@@ -152,7 +143,6 @@ class ExitTrade:
             exit_action=self._exit_action,
         )
 
-    # --- HTF context and gating (unchanged) ---
     def update_bias(
         self,
         symbol: str,
@@ -161,6 +151,7 @@ class ExitTrade:
         m15: Optional[str] = None,
         asof_epoch: Optional[float] = None,
     ) -> None:
+        """Record the latest M5/M15 bias for `symbol`, read by `_htf_allows_profit_exit`."""
         if not symbol:
             return
         sym = str(symbol)
@@ -173,6 +164,11 @@ class ExitTrade:
         self._bias_by_symbol[sym] = row
 
     def _htf_allows_profit_exit(self, *, symbol: str, position_side: str) -> bool:
+        """Return whether HTF bias permits a profit-taking exit for `position_side`.
+
+        Defaults to permissive (`True`) when gating is disabled, no bias has
+        been recorded yet, or the recorded bias is stale.
+        """
         if not bool(getattr(self._config, "htf_filter_enabled", False)):
             return True
         info = self._bias_by_symbol.get(str(symbol))
@@ -196,8 +192,9 @@ class ExitTrade:
             return m5 == opposing
         return True
 
-    # --- Public API ---
     def on_tick(self, tick: Any) -> list[ExitAction]:
+        """Check every open position for a protective (loss) exit, then --
+        if enabled -- a profit-taking exit, and return any actions found."""
         positions = self._safe_get_positions()
         if not positions:
             self._state_by_ticket.clear()
@@ -216,13 +213,11 @@ class ExitTrade:
             state = self._state_by_ticket.setdefault(
                 ticket, PosState(anchor=0.0, prev_price=0.0)
             )
-            # Loss exits (always checked)
             loss_action = self._loss_manager.check_exit_on_tick(pos, tick, state)
             if loss_action:
                 self._log_exit_action(loss_action, pos, tick)
                 actions.append(loss_action)
                 continue
-            # Profit exits (if enabled)
             if getattr(self._config, "profit_exits_on_tick", False):
                 profit_action = self._profit_manager.check_exit_on_tick(
                     pos, tick, state
@@ -236,6 +231,8 @@ class ExitTrade:
     def on_candle_close(
         self, *, symbol: str, close_price: float, asof_epoch: Optional[float] = None
     ) -> list[ExitAction]:
+        """Check every open position for `symbol` for an HTF-gated
+        profit-taking exit at this candle's close price."""
         if not bool(getattr(self._config, "profit_exits_on_candle_close", False)):
             return []
         if not symbol:
@@ -266,8 +263,9 @@ class ExitTrade:
                 actions.append(profit_action)
         return actions
 
-    # --- Helper methods (unchanged, copy from your original ExitTrade) ---
     def _should_exit(self, ticket: Any, cooldown: Optional[float] = None) -> bool:
+        """Per-ticket cooldown gate: `True` (and resets the cooldown clock)
+        at most once per `cooldown` seconds for the same ticket."""
         cooldown = cooldown if cooldown is not None else self._exit_cooldown
         now = time.time()
         last = self._last_exit_time.get(ticket, 0)

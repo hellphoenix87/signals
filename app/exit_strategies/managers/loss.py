@@ -34,7 +34,25 @@ class LossExitManager:
         self._exit_action = exit_action
 
     def check_exit_on_tick(self, position, tick, state: PosState):
+        """Protective exit check for one position/tick.
 
+        Before break-even is armed: exits immediately if profit drops to
+        `-$5` or lower (`reason="profit_drop"`); arms break-even the moment
+        `is_break_even(position)` is true. If the arming window
+        (`config.be_arming_ticks`) expires without ever reaching break-even,
+        force-closes (`reason="failed_to_reach_be"`) -- unless *this exact
+        tick* is the one reaching break-even, in which case it arms instead
+        of closing a position that just turned profitable. A configured
+        `be_arming_ticks <= 0` disables this forced-timeout safety net
+        entirely (the arming window never "expires"), rather than force-
+        closing every position on tick 1 the way an unguarded `0` would.
+
+        After arming: exits if profit drops back to `-$5` or lower
+        (`reason="profit_drop_after_be"`); if profit went negative after
+        arming and then recovers into `0 < profit < $0.05`, exits with
+        `reason="be_recovered_after_unprofit"` to lock in a marginal win
+        rather than let it round-trip again.
+        """
         symbol = pos_symbol(position)
         side = pos_side(position)
         ticket = pos_ticket(position)
@@ -48,18 +66,18 @@ class LossExitManager:
         if profit is None:
             profit = 0.0
 
-        be_arming_ticks = int(getattr(self.config, "EXIT_BE_ARMING_TICKS", 20))
-        drop_profit = -5  # Exit if profit drops to -5 or lower
+        be_arming_ticks = int(getattr(self.config, "be_arming_ticks", 20))
+        drop_profit = -5
 
-        # State init
         if not hasattr(state, "be_armed"):
             state.be_armed = False
             state.be_arming_ticks = 0
             state.was_unprofitable_after_be = False
             state.was_profitable_after_unprofit = False
 
-        # 1. During first N ticks, exit if profit drops to -0.20 or lower
-        if not state.be_armed and state.be_arming_ticks < be_arming_ticks:
+        if not state.be_armed and (
+            be_arming_ticks <= 0 or state.be_arming_ticks < be_arming_ticks
+        ):
             state.be_arming_ticks += 1
 
             if profit <= drop_profit:
@@ -70,19 +88,13 @@ class LossExitManager:
                     volume=volume,
                     reason="profit_drop",
                 )
-            # If BE reached (profit >= 0), arm BE
             if is_break_even(position):
                 state.be_armed = True
                 state.was_profitable_after_unprofit = False
                 state.was_unprofitable_after_be = False
             return None
 
-        # If N ticks passed and BE not reached, exit -- unless this very tick is the
-        # one that reaches BE, in which case arm instead of force-closing a position
-        # that just turned profitable (pr-review finding: the original nested
-        # placement checked this before deciding to exit; hoisting the check to a
-        # separate top-level block otherwise loses that ordering).
-        if not state.be_armed and state.be_arming_ticks >= be_arming_ticks:
+        if not state.be_armed and be_arming_ticks > 0 and state.be_arming_ticks >= be_arming_ticks:
             if is_break_even(position):
                 state.be_armed = True
                 state.was_profitable_after_unprofit = False
@@ -96,15 +108,12 @@ class LossExitManager:
                 reason="failed_to_reach_be",
             )
 
-        # 2. After BE is reached
         if state.be_armed:
-            drop_profit_after_be = -5  # Exit if profit drops to -0.30 or lower after BE
-            # Track if profit moves to unprofit after BE
+            drop_profit_after_be = -5
             if profit < 0.0:
                 if not state.was_unprofitable_after_be:
                     state.was_unprofitable_after_be = True
                     state.unprofit_profit = profit
-                # If profit drops to -0.05 or lower after BE, exit
                 if profit <= drop_profit_after_be:
                     return self._exit_action(
                         ticket=ticket,
@@ -113,7 +122,6 @@ class LossExitManager:
                         volume=volume,
                         reason="profit_drop_after_be",
                     )
-            # If profit returns to BE or above after being unprofitable, exit immediately
 
             if state.was_unprofitable_after_be:
                 if 0.0 < profit < 0.05:

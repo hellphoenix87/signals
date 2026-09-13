@@ -11,12 +11,18 @@ from app.exit_strategies.exit_shared import (
 
 
 def get_tick_value(tick, key):
+    """Read `key` from a tick, whether it's a dict or an object."""
     if isinstance(tick, dict):
         return tick.get(key)
     return getattr(tick, key, None)
 
 
 class ProfitExitManager:
+    """Profit-taking exit checks, on both the tick path (`check_exit_on_tick`,
+    never HTF-gated -- this is the fast/protective path) and the candle-close
+    path (`check_exit_on_candle_close`, HTF-gated -- suppressed while the
+    higher-timeframe bias still supports the position's direction)."""
+
     def __init__(
         self,
         config,
@@ -41,6 +47,8 @@ class ProfitExitManager:
         return bool(getattr(self.config, "htf_filter_enabled", False))
 
     def check_exit_on_tick(self, position, tick, state: PosState):
+        """Arm break-even, track best-profit-seen, and exit if profit pulls
+        back more than $0.04 from that peak (`reason="trailing_breach_gt_5c"`)."""
         if not getattr(self.config, "profit_exits_on_tick", True):
             return None
 
@@ -59,12 +67,6 @@ class ProfitExitManager:
             else get_tick_value(tick, "ask")
         )
 
-        min_profit_pips = self._get_min_profit_pips(symbol)
-        min_profit_price = (
-            self._pips_to_price(symbol=symbol, pips=min_profit_pips) or 0.0
-        )
-
-        # --- State Initialization ---
         if state is None:
             state = PosState(
                 anchor=float(price),
@@ -77,12 +79,6 @@ class ProfitExitManager:
                 closes_seen=0,
             )
 
-        # --- Break-Even Arming ---
-        be_distance = float(getattr(self.config, "be_distance_pips", 3.0))
-        pip_value = self._pips_to_price(symbol=symbol, pips=1) or 0.0001
-        be_price = float(entry) + (
-            be_distance * pip_value if side == "buy" else -be_distance * pip_value
-        )
         if not getattr(state, "be_armed", False):
             if is_break_even(position):
                 state.be_armed = True
@@ -93,12 +89,10 @@ class ProfitExitManager:
                 state.prev_price = float(price)
                 return None
 
-        # --- Trailing Logic: Profit-based trailing with breach and timeout ---
         profit = pos_profit(position)
         if profit is None:
             profit = 0.0
 
-        # Track the best profit seen so far
         if not hasattr(state, "best_profit"):
             state.best_profit = profit
             state.breach_ticks = 0
@@ -107,11 +101,9 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        breach_threshold = 0.04  # Immediate exit if breached by more than $0.04
-        breach_tick_limit = 5  # Wait up to 5 ticks for recovery
+        breach_threshold = 0.04
 
         if 0.00 < profit < state.best_profit:
-            # Immediate exit if breach is too large
             if state.best_profit - profit > breach_threshold:
                 return self._exit_action(
                     ticket=ticket,
@@ -120,30 +112,20 @@ class ProfitExitManager:
                     volume=volume,
                     reason="trailing_breach_gt_5c",
                 )
-            # Start or increment breach tick countdown
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
-            # If profit recovers, reset countdown
             if profit >= state.best_profit:
                 state.breach_ticks = 0
-            # Exit if breach lasts too long
-            """
-            elif state.breach_ticks >= breach_tick_limit:
-                return self._exit_action(
-                    ticket=ticket,
-                    symbol=symbol,
-                    position_side=side,
-                    volume=volume,
-                    reason="trailing_breach_timeout",
-                )
-                """
         else:
-            state.breach_ticks = 0  # No breach, reset
+            state.breach_ticks = 0
 
         state.prev_price = float(price)
         state.ticks_seen += 1
         return None
 
     def check_exit_on_candle_close(self, position, close_price, state: PosState):
+        """Same break-even-arming/best-profit-tracking logic as
+        `check_exit_on_tick`, reading a candle's `close_price` in place of a
+        tick's bid/ask, gated on `_htf_allows_profit_exit`."""
         if not getattr(self.config, "profit_exits_on_candle_close", False):
             return None
 
@@ -156,18 +138,11 @@ class ProfitExitManager:
         if not symbol or not side or ticket is None or entry is None or volume is None:
             return None
 
-        # Gate on HTF bias (candle-close exits respect HTF, tick exits do not)
         if not self._htf_allows_profit_exit(symbol=symbol, position_side=side):
             return None
 
         price = float(close_price)
 
-        min_profit_pips = self._get_min_profit_pips(symbol)
-        min_profit_price = (
-            self._pips_to_price(symbol=symbol, pips=min_profit_pips) or 0.0
-        )
-
-        # --- State Initialization ---
         if state is None:
             state = PosState(
                 anchor=float(price),
@@ -180,12 +155,6 @@ class ProfitExitManager:
                 closes_seen=0,
             )
 
-        # --- Break-Even Arming ---
-        be_distance = float(getattr(self.config, "be_distance_pips", 3.0))
-        pip_value = self._pips_to_price(symbol=symbol, pips=1) or 0.0001
-        be_price = float(entry) + (
-            be_distance * pip_value if side == "buy" else -be_distance * pip_value
-        )
         if not getattr(state, "be_armed", False):
             if is_break_even(position):
                 state.be_armed = True
@@ -196,12 +165,10 @@ class ProfitExitManager:
                 state.prev_price = float(price)
                 return None
 
-        # --- Trailing Logic: Profit-based trailing with breach and timeout ---
         profit = pos_profit(position)
         if profit is None:
             profit = 0.0
 
-        # Track the best profit seen so far
         if not hasattr(state, "best_profit"):
             state.best_profit = profit
             state.breach_ticks = 0
@@ -210,11 +177,9 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        breach_threshold = 0.04  # Immediate exit if breached by more than $0.04
-        breach_tick_limit = 5  # Wait up to 5 ticks for recovery
+        breach_threshold = 0.04
 
         if 0.00 < profit < state.best_profit:
-            # Immediate exit if breach is too large
             if state.best_profit - profit > breach_threshold:
                 return self._exit_action(
                     ticket=ticket,
@@ -223,24 +188,11 @@ class ProfitExitManager:
                     volume=volume,
                     reason="trailing_breach_gt_5c",
                 )
-            # Start or increment breach tick countdown
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
-            # If profit recovers, reset countdown
             if profit >= state.best_profit:
                 state.breach_ticks = 0
-            # Exit if breach lasts too long
-            """
-            elif state.breach_ticks >= breach_tick_limit:
-                return self._exit_action(
-                    ticket=ticket,
-                    symbol=symbol,
-                    position_side=side,
-                    volume=volume,
-                    reason="trailing_breach_timeout",
-                )
-                """
         else:
-            state.breach_ticks = 0  # No breach, reset
+            state.breach_ticks = 0
 
         state.prev_price = float(price)
         state.ticks_seen += 1
