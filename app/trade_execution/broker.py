@@ -13,6 +13,7 @@ class Broker:
     def __init__(self, mode: str):
         self.mode = mode
         self.open_positions_sim = []
+        self._next_sim_ticket = 1
 
         # MT5 is required for live/backtest and also for demo if you want real ticks/info.
         if not mt5.initialize():
@@ -62,13 +63,15 @@ class Broker:
         trade = {
             "symbol": symbol,
             "direction": direction,
-            "lot": lot,
+            "volume": lot,
             "open_price": price,
             "sl": sl,
             "tp": tp,
             "profit": 0.0,
+            "ticket": self._next_sim_ticket,
         }
         self.open_positions_sim.append(trade)
+        self._next_sim_ticket += 1
         print(f"Demo mode: {direction} {symbol} {lot} lots at {price}")
 
     def _backtest_trade(self, symbol, direction, lot, sl, tp, price):
@@ -80,13 +83,15 @@ class Broker:
         trade = {
             "symbol": symbol,
             "direction": direction,
-            "lot": lot,
+            "volume": lot,
             "open_price": price,
             "sl": sl,
             "tp": tp,
             "profit": 0.0,
+            "ticket": self._next_sim_ticket,
         }
         self.open_positions_sim.append(trade)
+        self._next_sim_ticket += 1
         print(f"Backtest mode: {direction} {symbol} {lot} lots at {price}")
 
     # -----------------------------
