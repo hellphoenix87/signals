@@ -23,9 +23,9 @@ class StrongSignalStrategy(BaseSignalStrategy):
         self.confidence_threshold = float(confidence_threshold)
         self.config = config
 
-    def generate_signal(
-        self, candles: List[dict], *, apply_entry_filters: bool = False
-    ) -> dict:
+    def generate_signal(self, candles: List[dict]) -> dict:
+        """Run every indicator against `candles` and combine their buy/sell
+        votes by simple majority, gated by `confidence_threshold`."""
         print(f"candles received: {len(candles)}")
         symbol = self._resolve_symbol(candles, getattr(self, "config", None))
         print(f"Generating signal for {symbol} using StrongSignalStrategy")
@@ -43,8 +43,6 @@ class StrongSignalStrategy(BaseSignalStrategy):
                 self.logger.error(f"{name} indicator failed: {e}")
                 results[name] = None
 
-        # Example logic: combine indicators (customize as needed)
-        # Here, we just check for 'buy'/'sell' in any indicator
         buy_votes = sum(1 for v in results.values() if v == "buy")
         sell_votes = sum(1 for v in results.values() if v == "sell")
         total_votes = buy_votes + sell_votes
@@ -55,8 +53,6 @@ class StrongSignalStrategy(BaseSignalStrategy):
             raw_signal = "buy"
         elif sell_votes > buy_votes and confidence >= self.confidence_threshold:
             raw_signal = "sell"
-
-        # Optionally, add entry filters here if needed
 
         self.logger.info(
             f"Indicators: {results}, Raw signal: {raw_signal}, Confidence: {confidence:.2f}"
