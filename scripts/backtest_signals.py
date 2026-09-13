@@ -9,7 +9,13 @@ proxy for signal quality, not a full trade simulation.
 
 Usage:
     pipenv run python scripts/backtest_signals.py [--symbol EURUSD]
-        [--count 5000] [--forward-bars 300] [--target-pips 50] [--stop-pips 2]
+        [--weeks 4 | --count 5000] [--forward-bars 300] [--target-pips 50] [--stop-pips 2]
+
+Per-signal results are written to a CSV under `backtest_results/` (one row
+per signal: time, direction, outcome, bars-to-resolution) for offline
+analysis in pandas/Excel; the aggregate summary is still printed to
+stdout. The signal generator's own per-candle logging is suppressed
+during the replay so it doesn't drown out the summary.
 
 Not supported here (see docs/plans/done/remove-demo-mode-fix-config-backtest-signals.md
 for why): `Config.USE_MULTI_TIMEFRAME_SIGNALS` (needs synchronized M1/M5/M15
@@ -22,7 +28,13 @@ itself is finalized.
 """
 
 import argparse
+import contextlib
+import csv
+import datetime
+import io
+import logging
 import sys
+from pathlib import Path
 
 import MetaTrader5 as mt5
 
@@ -32,12 +44,16 @@ from app.signals.signal_generation import strategy_factory
 from app.trade_execution.broker import Broker
 from app.trade_execution.mode import TradingMode
 
+M1_BARS_PER_TRADING_WEEK = 5 * 24 * 60
+RESULTS_DIR = Path(__file__).resolve().parent.parent / "backtest_results"
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments, defaulting symbol/target/stop pips from `Config`."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", default=None, help="Symbol to backtest (default: Config.SYMBOLS[0])")
-    parser.add_argument("--count", type=int, default=5000, help="Number of historical M1 candles to fetch")
+    parser.add_argument("--weeks", type=float, default=None, help="Weeks of M1 history to fetch (approximate; overrides --count)")
+    parser.add_argument("--count", type=int, default=5000, help="Number of historical M1 candles to fetch (ignored if --weeks is given)")
     parser.add_argument("--forward-bars", type=int, default=300, help="Lookahead window (bars) to resolve each signal")
     parser.add_argument("--target-pips", type=float, default=None, help="Favorable-move threshold (default: Config.DEFAULT_TP_PIPS)")
     parser.add_argument("--stop-pips", type=float, default=None, help="Adverse-move threshold (default: Config.DEFAULT_SL_PIPS)")
@@ -107,28 +123,54 @@ def run_backtest(
     min_candles = int(getattr(Config, "MIN_CANDLES_FOR_INDICATORS", 1) or 1)
     results: list[dict] = []
 
-    for i in range(min_candles, len(candles)):
-        window = candles[: i + 1]
-        signal = strategy.generate_signal(window)
-        final_signal = (signal.get("final_signal") or "hold").lower()
-        if final_signal not in ("buy", "sell"):
-            continue
-        outcome, bars = evaluate_signal(
-            candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
-        )
-        results.append(
-            {
-                "time": candles[i].get("time"),
-                "direction": final_signal,
-                "outcome": outcome,
-                "bars": bars,
-            }
-        )
+    logging.disable(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            for i in range(min_candles, len(candles)):
+                window = candles[: i + 1]
+                signal = strategy.generate_signal(window)
+                final_signal = (signal.get("final_signal") or "hold").lower()
+                if final_signal not in ("buy", "sell"):
+                    continue
+                outcome, bars = evaluate_signal(
+                    candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
+                )
+                results.append(
+                    {
+                        "time": candles[i].get("time"),
+                        "direction": final_signal,
+                        "outcome": outcome,
+                        "bars": bars,
+                    }
+                )
+    finally:
+        logging.disable(logging.NOTSET)
 
-    summarize(results, symbol)
+    log_path = write_results_csv(results, symbol)
+    summarize(results, symbol, log_path)
 
 
-def summarize(results: list[dict], symbol: str) -> None:
+def write_results_csv(results: list[dict], symbol: str) -> Path | None:
+    """Write one row per signal to a timestamped CSV under `backtest_results/`.
+
+    Returns the path written, or `None` if there were no results to write.
+    """
+    if not results:
+        return None
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_{run_stamp}.csv"
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["time", "direction", "outcome", "bars"])
+        writer.writeheader()
+        writer.writerows(results)
+
+    return path
+
+
+def summarize(results: list[dict], symbol: str, log_path: Path | None) -> None:
     """Print aggregate signal/outcome stats to stdout."""
     total = len(results)
     if total == 0:
@@ -149,11 +191,16 @@ def summarize(results: list[dict], symbol: str) -> None:
     print(f"Wins: {len(wins)}  Losses: {len(losses)}  Undecided: {len(undecided)}")
     print(f"Win rate (of decided): {win_rate:.1f}%")
     print(f"Average bars to resolution: {avg_bars:.1f}")
+    if log_path:
+        print(f"Per-signal log: {log_path}")
 
 
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
+    count = (
+        int(args.weeks * M1_BARS_PER_TRADING_WEEK) if args.weeks is not None else args.count
+    )
     target_pips = (
         args.target_pips
         if args.target_pips is not None
@@ -182,7 +229,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    run_backtest(symbol, args.count, args.forward_bars, target_pips, stop_pips)
+    run_backtest(symbol, count, args.forward_bars, target_pips, stop_pips)
 
 
 if __name__ == "__main__":
