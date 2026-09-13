@@ -1,6 +1,6 @@
 # Multi-Timeframe Signal Folding (Weighted Confluence + ADX)
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
