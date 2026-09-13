@@ -49,6 +49,8 @@ All strategies inherit from `BaseSignalStrategy` (`app/signals/strategies/base_s
 
 ## Development workflow: spec/TDD multi-agent flow
 
+**Opt-in only.** MVP/POC mode (below) is the default workflow for all work in this repo. Use this spec/TDD flow instead only when the user explicitly asks for it (e.g. "use the full spec/TDD flow for this," "I want tests and a pr-reviewer pass on this one").
+
 Non-trivial work goes through a plan-driven, test-first flow using four project agents (`.claude/agents/`) and three skills (`.claude/skills/`). **The main session is the sole orchestrator** — it invokes agents via the Agent tool and moves plan files between folders; agents never call each other directly.
 
 | Agent | Model | Job |
@@ -104,7 +106,7 @@ For each phase/subphase, in order:
 
 ## Development workflow: MVP/POC mode
 
-An alternate, lighter-weight workflow for when the user explicitly asks for it (e.g. "build this as an MVP/POC," "just do it yourself, no subagents") — not the default. Absent that explicit signal, use the spec/TDD multi-agent flow above.
+**This is the default workflow for all work in this repo, standing instruction from the user.** Use the spec/TDD multi-agent flow above only if the user explicitly asks for it instead.
 
 **The main session does everything itself — no `architect`, `developer`, `qa`, or `pr-reviewer` subagents.** The main session thinks through the solution, writes the plan, and implements every phase/subphase directly, without spawning agents or delegating any part of the work.
 
