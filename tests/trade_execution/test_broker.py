@@ -1,9 +1,8 @@
 """Tests for app/trade_execution/broker.py"""
 
-import pytest
-from app.trade_execution.broker import Broker, create_broker
+from app.trade_execution.broker import Broker
 from app.trade_execution.mode import TradingMode
-from app.exit_strategies.exit_shared import pos_volume, pos_ticket
+from app.exit_strategies.exit_shared import pos_volume
 
 
 class TestBrokerSimulatedTickets:
