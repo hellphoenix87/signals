@@ -345,3 +345,157 @@ class TestSignalOrchestratorOnTickEnterTrade:
         call_args = enter_trade_mock.enter_trade.call_args
         assert call_args[0][0] == signal_dict
         assert call_args[0][1] == 5000.0
+
+
+class TestSignalOrchestratorExecuteExitActions:
+    """Tests for _execute_exit_actions exit logging."""
+
+    def test_execute_exit_actions_logs_broker_close_position_failure(self):
+        """
+        When broker.close_position raises an exception on the keyword-argument
+        call, the exception should be logged via logger.exception instead of
+        being silently swallowed. The positional-argument fallback path is
+        covered separately by
+        test_execute_exit_actions_logs_positional_args_fallback_failure below.
+        """
+        # Setup mocks
+        collector_mock = MagicMock()
+        signal_generator_mock = MagicMock()
+        logger_mock = MagicMock()
+
+        # Create a broker where close_position raises RuntimeError
+        # Use spec=["close_position"] to ensure close_trade and close_order
+        # are not auto-created as MagicMock attributes
+        broker_mock = MagicMock(spec=["close_position"])
+        broker_mock.close_position = MagicMock(side_effect=RuntimeError("boom"))
+
+        # Create orchestrator with the broker and logger
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator_mock,
+            broker=broker_mock,
+            logger=logger_mock,
+        )
+
+        # Create an exit action
+        action = {
+            "ticket": 1,
+            "symbol": "EURUSD",
+            "side": "sell",
+            "volume": 0.01,
+        }
+
+        # Call _execute_exit_actions
+        orchestrator._execute_exit_actions([action])
+
+        # Assert that logger.exception was called (proving the failure was logged)
+        logger_mock.exception.assert_called_once()
+        # Verify the logged message mentions the error and relevant context
+        call_args = logger_mock.exception.call_args
+        logged_msg = call_args[0][0]
+        assert "broker close failed" in logged_msg
+        assert "ticket=1" in logged_msg
+        assert "symbol=EURUSD" in logged_msg
+        assert "RuntimeError" in logged_msg
+
+    def test_execute_exit_actions_logs_positional_args_fallback_failure(self):
+        """
+        When the keyword-argument call to broker.close_position raises TypeError
+        (wrong signature) and the positional-argument fallback also raises an exception,
+        that exception should be logged instead of silently swallowed.
+        """
+        # Setup mocks
+        collector_mock = MagicMock()
+        signal_generator_mock = MagicMock()
+        logger_mock = MagicMock()
+
+        # Create a broker where close_position raises TypeError first, then ValueError in fallback
+        broker_mock = MagicMock(spec=["close_position"])
+        broker_mock.close_position = MagicMock(
+            side_effect=[TypeError("wrong sig"), ValueError("positional failed")]
+        )
+
+        # Create orchestrator
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator_mock,
+            broker=broker_mock,
+            logger=logger_mock,
+        )
+
+        # Create an exit action
+        action = {
+            "ticket": 1,
+            "symbol": "EURUSD",
+            "side": "sell",
+            "volume": 0.01,
+        }
+
+        # Call _execute_exit_actions
+        orchestrator._execute_exit_actions([action])
+
+        # Assert that logger.exception was called for the second failure
+        logger_mock.exception.assert_called_once()
+        call_args = logger_mock.exception.call_args
+        logged_msg = call_args[0][0]
+        assert "broker close failed" in logged_msg
+        assert "ValueError" in logged_msg
+
+    def test_execute_exit_actions_logs_trading_service_failure_but_continues(self):
+        """
+        When trading_service.execute_exit raises for one action, that failure
+        should be logged, but the loop must continue to process remaining actions.
+        """
+        # Setup mocks
+        collector_mock = MagicMock()
+        signal_generator_mock = MagicMock()
+        logger_mock = MagicMock()
+
+        # Create a trading_service where execute_exit fails on the first call
+        # but succeeds on the second
+        trading_service_mock = MagicMock()
+        trading_service_mock.execute_exit = MagicMock(
+            side_effect=[
+                RuntimeError("MT5 connection lost"),
+                None,  # Second call succeeds
+            ]
+        )
+
+        # Create orchestrator with trading_service
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator_mock,
+            trading_service=trading_service_mock,
+            logger=logger_mock,
+        )
+
+        # Create two exit actions
+        actions = [
+            {
+                "ticket": 1,
+                "symbol": "EURUSD",
+                "side": "sell",
+                "volume": 0.01,
+            },
+            {
+                "ticket": 2,
+                "symbol": "GBPUSD",
+                "side": "buy",
+                "volume": 0.02,
+            },
+        ]
+
+        # Call _execute_exit_actions
+        orchestrator._execute_exit_actions(actions)
+
+        # Assert that trading_service.execute_exit was called twice (both actions attempted)
+        assert trading_service_mock.execute_exit.call_count == 2
+
+        # Assert that logger.exception was called exactly once (for the first failure)
+        logger_mock.exception.assert_called_once()
+        call_args = logger_mock.exception.call_args
+        logged_msg = call_args[0][0]
+        assert "exit execution failed" in logged_msg
+        assert "ticket=1" in logged_msg
+        assert "symbol=EURUSD" in logged_msg
+        assert "RuntimeError" in logged_msg
