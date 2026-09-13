@@ -143,6 +143,160 @@ class TestSignalOrchestratorEnterTrade:
         assert call_args[0][1] == 0.0  # Second arg should be 0.0
 
 
+class TestSignalOrchestratorGenerateSignalCall:
+    """Tests for the direct call to signal_generator.generate_signal()."""
+
+    def test_run_entries_calls_generate_signal_directly_with_snapshot(self):
+        """
+        Verifies that _run_entries calls signal_generator.generate_signal exactly once
+        with snapshot as the sole positional argument (no fallback lookups or calling
+        conventions).
+        """
+        # Setup mocks
+        collector_mock = MagicMock()
+        signal_generator_mock = MagicMock()
+        broker_mock = MagicMock()
+
+        # Create orchestrator
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator_mock,
+            broker=broker_mock,
+        )
+
+        # Create a signal dict to return
+        signal_dict = {
+            "symbol": "EURUSD",
+            "final_signal": "hold",
+        }
+
+        # Configure signal_generator.generate_signal to return the signal
+        signal_generator_mock.generate_signal = MagicMock(return_value=signal_dict)
+
+        # Call _run_entries with snapshot and timestamp
+        snapshot = {"some": "data"}
+        asof = datetime.now(timezone.utc)
+        orchestrator._run_entries(snapshot=snapshot, asof=asof)
+
+        # Assert that generate_signal was called exactly once with snapshot as sole positional arg
+        signal_generator_mock.generate_signal.assert_called_once_with(snapshot)
+
+    def test_run_entries_handles_exception_from_generate_signal(self):
+        """
+        Verifies that exceptions from generate_signal are caught and logged,
+        and execution continues gracefully without raising.
+        """
+        # Setup mocks
+        collector_mock = MagicMock()
+        signal_generator_mock = MagicMock()
+        logger_mock = MagicMock()
+
+        # Create orchestrator with a logger
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator_mock,
+            logger=logger_mock,
+        )
+
+        # Configure signal_generator.generate_signal to raise
+        signal_generator_mock.generate_signal = MagicMock(
+            side_effect=ValueError("Signal generation failed")
+        )
+
+        # Call _run_entries - should not raise
+        snapshot = {}
+        asof = datetime.now(timezone.utc)
+        orchestrator._run_entries(snapshot=snapshot, asof=asof)
+
+        # Assert that generate_signal was called
+        signal_generator_mock.generate_signal.assert_called_once_with(snapshot)
+        # Assert that the exception was logged
+        logger_mock.exception.assert_called_once()
+
+
+class TestSignalOrchestratorRealStrategies:
+    """Tests for _run_entries with real strategy implementations."""
+
+    @pytest.mark.parametrize(
+        "strategy_class",
+        [
+            "StrongSignalStrategy",
+            "MultiTimeframeStrongSignalStrategy",
+            "NTickConfirmedSignalStrategy",
+        ],
+    )
+    def test_run_entries_works_with_real_strategy_implementations(self, strategy_class):
+        """
+        Parametrized test: instantiate each real strategy class with minimal
+        constructor args and verify _run_entries can call generate_signal without raising.
+        """
+        from app.signals.strategies.strong_signal_strategy import StrongSignalStrategy
+        from app.signals.strategies.multi_timeframe import MultiTimeframeStrongSignalStrategy
+        from app.signals.strategies.ntick_confirmed_signal_strategy import (
+            NTickConfirmedSignalStrategy,
+        )
+
+        # Setup mocks
+        collector_mock = MagicMock()
+        broker_mock = MagicMock()
+        logger_mock = MagicMock()
+
+        # Create the strategy instance based on the parametrized class name
+        if strategy_class == "StrongSignalStrategy":
+            # Minimal: empty indicators dict
+            signal_generator = StrongSignalStrategy(indicators={})
+        elif strategy_class == "MultiTimeframeStrongSignalStrategy":
+            # Minimal: base strategy with empty indicators
+            base_strategy = StrongSignalStrategy(indicators={})
+            signal_generator = MultiTimeframeStrongSignalStrategy(base=base_strategy)
+        elif strategy_class == "NTickConfirmedSignalStrategy":
+            # Minimal: base strategy with empty indicators
+            base_strategy = StrongSignalStrategy(indicators={})
+            signal_generator = NTickConfirmedSignalStrategy(
+                base_strategy=base_strategy
+            )
+
+        # Spy on the real generate_signal so we can assert it was actually
+        # invoked, rather than only checking that _run_entries didn't raise
+        # (which every real implementation also satisfies vacuously, since
+        # _run_entries swallows all exceptions).
+        real_generate_signal = signal_generator.generate_signal
+        generate_signal_spy = MagicMock(wraps=real_generate_signal)
+        signal_generator.generate_signal = generate_signal_spy
+
+        # Create orchestrator
+        orchestrator = SignalOrchestrator(
+            collector=collector_mock,
+            signal_generator=signal_generator,
+            broker=broker_mock,
+            logger=logger_mock,
+        )
+
+        # Create a candles snapshot (format depends on strategy)
+        if strategy_class == "MultiTimeframeStrongSignalStrategy":
+            # MultiTimeframe expects dict[int, list[dict]]
+            snapshot = {
+                1: [{"close": 1.1000, "symbol": "EURUSD", "time": datetime.now(timezone.utc)}],
+                5: [{"close": 1.1001, "symbol": "EURUSD", "time": datetime.now(timezone.utc)}],
+                15: [{"close": 1.1002, "symbol": "EURUSD", "time": datetime.now(timezone.utc)}],
+            }
+        else:
+            # StrongSignalStrategy and NTickConfirmedSignalStrategy expect list[dict]
+            snapshot = [
+                {"close": 1.1000, "symbol": "EURUSD", "time": datetime.now(timezone.utc)}
+            ]
+
+        # Call _run_entries - should not raise
+        asof = datetime.now(timezone.utc)
+        orchestrator._run_entries(snapshot=snapshot, asof=asof)
+
+        # generate_signal must have actually been invoked with the snapshot
+        # positionally, and its call must not have raised (no exception logged) -
+        # a real regression check, not just "no exception propagated out".
+        generate_signal_spy.assert_called_once_with(snapshot)
+        logger_mock.exception.assert_not_called()
+
+
 class TestSignalOrchestratorOnTickEnterTrade:
     """Tests for the EnterTrade integration in SignalOrchestrator._on_tick."""
 
