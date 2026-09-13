@@ -102,6 +102,22 @@ For each phase/subphase, in order:
 9. **Delete the branch, both remote and local**, right after it merges (e.g. `gh pr merge --squash --delete-branch`, or a separate `git push origin --delete <branch>` plus `git branch -d <branch>`) — don't let merged phase/subphase branches accumulate on `origin`.
 10. `git checkout master && git pull` to pick up the merge, then proceed to the next phase/subphase's branch.
 
+## Development workflow: MVP/POC mode
+
+An alternate, lighter-weight workflow for when the user explicitly asks for it (e.g. "build this as an MVP/POC," "just do it yourself, no subagents") — not the default. Absent that explicit signal, use the spec/TDD multi-agent flow above.
+
+**The main session does everything itself — no `architect`, `developer`, `qa`, or `pr-reviewer` subagents.** The main session thinks through the solution, writes the plan, and implements every phase/subphase directly, without spawning agents or delegating any part of the work.
+
+**The plan file still goes through the same lifecycle** (`docs/plans/todo/<slug>.md` → `docs/plans/in-progress/<slug>.md` → `docs/plans/done/<slug>.md`), written by the main session itself instead of the `architect` agent, still using the `plan` skill's phase/subphase structure. A `Triage` line isn't needed here — there's no `architect`/`pr-reviewer` model gating to drive with it.
+
+**One branch for the whole plan, not one per phase/subphase.** Create `<plan-slug>` off latest `master` before starting, and do all of that plan's work — the plan file itself and every phase/subphase's implementation — on that single branch. `git checkout master && git pull` first, same as the spec/TDD flow, since `master` is still the trunk and still has branch protection (PRs required — a direct push is rejected by the remote regardless of workflow).
+
+**No tests.** The main session does not write or run tests in this mode — the user tests manually. This is an explicit, scoped exception to this repo's normal test-first convention; it doesn't apply outside MVP/POC-mode work.
+
+**Commit and push after each phase/subphase**, onto that same branch, so progress is saved and visible incrementally — but don't open a PR yet.
+
+**Only one PR, opened once the whole plan is complete** — move the plan file to `docs/plans/done/<slug>.md` as part of the final commit, push, and open the PR against `master`. **The main session never merges it.** Merge authority in this mode belongs to the user alone — open the PR and stop; wait for the user to merge (or ask for changes) rather than auto-merging the way the spec/TDD flow's docs-only plan-branch PR does.
+
 ## Conventions (from prior Copilot instructions)
 
 - Use Python 3.10+ type hints on function signatures; Google-style docstrings on public classes/methods; PEP 8.
