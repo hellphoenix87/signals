@@ -203,18 +203,19 @@ class SignalOrchestrator:
                             f"[Orchestrator] trading_service.process_signal error: {exc!r}"
                         )
                 elif self.enter_trade:
-                    fn = (
-                        getattr(self.enter_trade, "on_signal", None)
-                        or getattr(self.enter_trade, "execute", None)
-                        or getattr(self.enter_trade, "enter", None)
-                    )
-                    if callable(fn):
-                        try:
-                            fn(sig)
-                        except Exception as exc:
-                            self._log_exception(
-                                f"[Orchestrator] enter_trade execution error: {exc!r}"
-                            )
+                    try:
+                        account_balance = 0.0
+                        get_bal = getattr(self.broker, "get_account_balance", None)
+                        if callable(get_bal):
+                            try:
+                                account_balance = float(get_bal())
+                            except Exception:
+                                pass
+                        self.enter_trade.enter_trade(sig, account_balance)
+                    except Exception as exc:
+                        self._log_exception(
+                            f"[Orchestrator] enter_trade execution error: {exc!r}"
+                        )
                 elif self.broker:
                     self.broker.place_market_order(
                         symbol=sig["symbol"], side=sig["final_signal"]
@@ -433,19 +434,20 @@ class SignalOrchestrator:
                 continue  # Do not execute trade yet
 
             if self.enter_trade:
-                fn = (
-                    getattr(self.enter_trade, "on_signal", None)
-                    or getattr(self.enter_trade, "execute", None)
-                    or getattr(self.enter_trade, "enter", None)
-                )
-                if callable(fn):
-                    try:
-                        fn(sig)
-                        continue
-                    except Exception as exc:
-                        self._log_exception(
-                            f"[Orchestrator] enter_trade execution error: {exc!r}"
-                        )
+                try:
+                    account_balance = 0.0
+                    get_bal = getattr(self.broker, "get_account_balance", None)
+                    if callable(get_bal):
+                        try:
+                            account_balance = float(get_bal())
+                        except Exception:
+                            pass
+                    self.enter_trade.enter_trade(sig, account_balance)
+                    continue
+                except Exception as exc:
+                    self._log_exception(
+                        f"[Orchestrator] enter_trade execution error: {exc!r}"
+                    )
 
             if not self.broker:
                 continue
