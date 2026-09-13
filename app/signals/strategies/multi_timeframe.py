@@ -28,7 +28,16 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
         self.tf_entry = int(tf_entry)
 
     def generate_signal(self, candles_by_tf: Dict[int, List[dict]]) -> dict:
-        # Accept collectors that key by int (1/5/15) OR by strings ("m1"/"m5"/"m15"/"1"/"5"/"15")
+        """Combine per-timeframe signals into one final_signal.
+
+        `candles_by_tf` may key its timeframes by int (1/5/15) or by string
+        ("m1"/"m5"/"m15"/"1"/"5"/"15") -- both forms are accepted. `symbol`
+        is resolved before any early return, so a `tf_error` hold still
+        carries the symbol it applies to. Bias/confirm use each TF's
+        `raw_signal` (directional only); entry uses `final_signal`
+        (already confidence-gated, since it's the one that must be
+        executable).
+        """
         lower_map: Dict[str, Any] = {
             str(k).lower(): v for k, v in (candles_by_tf or {}).items()
         }
@@ -36,7 +45,6 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
         def _get(tf: int) -> List[dict]:
             if candles_by_tf and tf in candles_by_tf:
                 return candles_by_tf.get(tf, []) or []
-            # string versions
             v = lower_map.get(str(tf).lower())
             if v is not None:
                 return v or []
@@ -65,7 +73,6 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
             else {"final_signal": "hold", "raw_signal": "hold"}
         )
 
-        # Resolve symbol early so early-returns are not "missing symbol"
         symbol = (
             (s_entry.get("symbol") if isinstance(s_entry, dict) else None)
             or (s_conf.get("symbol") if isinstance(s_conf, dict) else None)
@@ -73,7 +80,6 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
             or self.base.config.SYMBOLS[0]
         )
 
-        # If any timeframe returns an error or is waiting for a closed candle -> hold
         for s in (s_bias, s_conf, s_entry):
             if isinstance(s, dict) and s.get("error"):
                 return {
@@ -83,21 +89,11 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
                     "reason": "tf_error",
                     "details": {"m15": s_bias, "m5": s_conf, "m1": s_entry},
                 }
-            if isinstance(s, dict) and s.get("reason") == "waiting_for_closed_candle":
-                return {
-                    "symbol": symbol,
-                    "final_signal": "hold",
-                    "raw_signal": "hold",
-                    "reason": "waiting_for_closed_candle",
-                    "details": {"m15": s_bias, "m5": s_conf, "m1": s_entry},
-                }
 
-        # Bias/confirm should be directional (use raw), entry should be executable (use final)
         bias = (s_bias.get("raw_signal", "hold") or "hold").lower()
         confirm = (s_conf.get("raw_signal", "hold") or "hold").lower()
         entry = (s_entry.get("final_signal", "hold") or "hold").lower()
 
-        # --- Pullback logic: require pullback_completed for entry ---
         c_entry = _get(self.tf_entry)
         pullback_ok = self._pullback_completed(c_entry) if c_entry else False
 
@@ -120,7 +116,8 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
         }
 
     def _pullback_completed(self, candles: list[dict]) -> bool:
-        # Example: last close above 20-period SMA after being below it
+        """Return whether price was below the 20-period SMA in the recent
+        past and has since closed back above it."""
         closes = [c["close"] for c in candles if "close" in c]
         if len(closes) < 21:
             return False
