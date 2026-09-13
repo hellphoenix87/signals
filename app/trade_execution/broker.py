@@ -10,51 +10,55 @@ def create_broker(mode):
 
 
 class Broker:
+    """Thin wrapper around the MT5 terminal API plus a local position simulator.
+
+    `mode` selects how orders are placed: `"live"` sends real orders via MT5
+    (against whatever account the terminal is logged into, demo or real),
+    `"demo"` and `"backtest"` instead append to `open_positions_sim` without
+    touching the MT5 trading API. MT5 itself is still initialized in every
+    mode, since ticks/symbol info are always fetched from the real terminal.
+    """
+
     def __init__(self, mode: str):
         self.mode = mode
         self.open_positions_sim = []
         self._next_sim_ticket = 1
 
-        # MT5 is required for live/backtest and also for demo if you want real ticks/info.
         if not mt5.initialize():
             raise RuntimeError("MT5 initialization failed")
 
         info(f"Broker initialized in {self.mode} mode")
 
-    # -----------------------------
-    # Public trading API
-    # -----------------------------
-
     def place_buy(self, symbol, lot, sl, tp, price=None):
+        """Open a long position, routed to the simulator or real MT5 per `self.mode`."""
         print(f"Broker.place_buy called: {symbol}, lot={lot}, sl={sl}, tp={tp}")
         if self.mode == "backtest":
             self._backtest_trade(symbol, "BUY", lot, sl, tp, price)
         elif self.mode == "demo":
             self._simulate_trade(symbol, "BUY", lot, sl, tp)
         else:
-            return self._mt5_place_order(symbol, "BUY", lot, sl, tp)  # live mode/
+            return self._mt5_place_order(symbol, "BUY", lot, sl, tp)
 
     def place_sell(self, symbol, lot, sl, tp, price=None):
+        """Open a short position, routed to the simulator or real MT5 per `self.mode`."""
         print(f"Broker.place_sell called: {symbol}, lot={lot}, sl={sl}, tp={tp}")
         if self.mode == "backtest":
             self._backtest_trade(symbol, "SELL", lot, sl, tp, price)
         elif self.mode == "demo":
             self._simulate_trade(symbol, "SELL", lot, sl, tp)
         else:
-            return self._mt5_place_order(symbol, "SELL", lot, sl, tp)  # live mode/
+            return self._mt5_place_order(symbol, "SELL", lot, sl, tp)
 
     def get_open_positions(self, symbol=None):
+        """Return open positions -- from the local simulator in demo/backtest mode, from MT5 otherwise."""
         if self.mode in ("demo", "backtest"):
             if symbol:
                 return [p for p in self.open_positions_sim if p["symbol"] == symbol]
             return self.open_positions_sim
         return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
 
-    # -----------------------------
-    # Simulation / backtest
-    # -----------------------------
-
     def _simulate_trade(self, symbol, direction, lot, sl, tp):
+        """Append a simulated demo-mode position, priced off the live tick."""
         price = 1.0
         tick = mt5.symbol_info_tick(symbol)
         if tick:
@@ -75,6 +79,7 @@ class Broker:
         print(f"Demo mode: {direction} {symbol} {lot} lots at {price}")
 
     def _backtest_trade(self, symbol, direction, lot, sl, tp, price):
+        """Append a simulated backtest-mode position at the given historical price."""
         if price is None:
             raise ValueError(
                 "Backtest mode requires a historical price for simulation."
@@ -94,24 +99,20 @@ class Broker:
         self._next_sim_ticket += 1
         print(f"Backtest mode: {direction} {symbol} {lot} lots at {price}")
 
-    # -----------------------------
-    # Symbol helpers
-    # -----------------------------
-
     def get_symbol_info(self, symbol):
+        """Return MT5's `symbol_info` for `symbol`, or `None` if unknown."""
         return mt5.symbol_info(symbol)
 
     def get_point_size(self, symbol: str) -> float:
-        """Returns MT5 'point' (minimum price increment)."""
+        """Return MT5's 'point' (minimum price increment), with a conservative FX fallback if the symbol is unknown."""
         si = self.get_symbol_info(symbol)
         if si is None:
-            # Conservative FX fallback
             return 0.00001 if "JPY" not in symbol else 0.001
         return float(si.point)
 
     def get_pip_size(self, symbol: str) -> float:
         """
-        Returns the price value of 1 pip.
+        Return the price value of 1 pip.
         Common FX:
           - 5 digits => pip = 10 * point
           - 3 digits => pip = 10 * point
@@ -128,39 +129,41 @@ class Broker:
         return point
 
     def get_min_stop_distance(self, symbol: str) -> float:
-        """Returns minimum SL/TP distance in price units."""
+        """Return the minimum SL/TP distance in price units, falling back to 2 points if the symbol is unknown."""
         si = self.get_symbol_info(symbol)
         if si is None:
-            # Fallback: 2 points
             return 2.0 * self.get_point_size(symbol)
         return float(si.trade_stops_level) * float(si.point)
 
-    # Backward-compatible name (CONSISTENT: returns point size only)
     def _get_symbol_point(self, symbol):
+        """Backward-compatible alias for `get_point_size`."""
         return self.get_point_size(symbol)
 
     def _digits(self, symbol: str) -> int:
+        """Return the symbol's decimal digit count, defaulting to 5 if unknown."""
         si = self.get_symbol_info(symbol)
         if si is None:
             return 5
         return int(getattr(si, "digits", 5))
 
     def _normalize_price(self, symbol: str, value: float) -> float:
-        """Round to symbol digits to avoid MT5 'Invalid stops' from float noise."""
+        """Round to the symbol's digit count, to avoid MT5 'Invalid stops' from float noise."""
         digits = self._digits(symbol)
         return float(f"{float(value):.{digits}f}")
 
-    # -----------------------------
-    # MT5 execution
-    # -----------------------------
-
     def _mt5_place_order(self, symbol, direction, lot, sl, tp):
+        """Place a real MT5 market order at the live tick price.
+
+        Normalizes `lot` to the symbol's volume step/min/max, normalizes
+        `sl`/`tp` (treating `None`/`0` as "no stop") and widens either one
+        that's closer to price than the symbol's minimum stop distance, then
+        tries each MT5 filling mode in turn until one is accepted.
+        """
         si = self.get_symbol_info(symbol)
         if si is None:
             print(f"Symbol {symbol} not found")
             return None
 
-        # Normalize volume to broker constraints
         step = float(si.volume_step)
         vmin = float(si.volume_min)
         vmax = float(si.volume_max)
@@ -172,17 +175,14 @@ class Broker:
             print(f"Failed to get tick for {symbol}")
             return None
 
-        # Use live tick price
         price = tick.ask if direction == "BUY" else tick.bid
         price = self._normalize_price(symbol, price)
 
-        # Normalize "no stops" to None
         sl = None if sl in (None, 0, 0.0) else self._normalize_price(symbol, float(sl))
         tp = None if tp in (None, 0, 0.0) else self._normalize_price(symbol, float(tp))
 
         min_dist = float(self.get_min_stop_distance(symbol))
 
-        # Enforce minimum distance (price units) against live tick
         if sl is not None and abs(price - sl) < min_dist:
             print(f"SL too close for {symbol}, adjusting")
             sl = price - min_dist if direction == "BUY" else price + min_dist
@@ -206,8 +206,8 @@ class Broker:
                 "volume": lot,
                 "type": order_type,
                 "price": price,
-                "deviation": 5,
-                "magic": 123456,
+                "deviation": int(getattr(Config, "MAX_DEVIATION", 5)),
+                "magic": int(getattr(Config, "MAGIC_NUMBER", 123456)),
                 "comment": "Placed by Python",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": filling_mode,
@@ -230,11 +230,8 @@ class Broker:
         print(f"All filling modes failed for {symbol}")
         return None
 
-    # -----------------------------
-    # Misc helpers used by risk/strategy
-    # -----------------------------
-
     def get_lot_value(self, symbol, price=None):
+        """Return the symbol's contract size (value of 1.0 lot), defaulting to 100000.0 for FX if unknown."""
         si = self.get_symbol_info(symbol)
         if si and hasattr(si, "trade_contract_size"):
             return float(si.trade_contract_size)
@@ -247,7 +244,7 @@ class Broker:
         sl_pips,
         tp_pips,
         symbol,
-        units: str = "pips",  # <-- was "points"
+        units: str = "pips",
     ):
         """
         Convert SL/TP distances to absolute prices.
@@ -255,11 +252,13 @@ class Broker:
         units:
           - "points" (distance units are MT5 points)
           - "pips"   (distance units are true pips, uses get_pip_size)
+
+        When units are pips, `sl_pips` is clamped up to `Config.MIN_SL_PIPS`
+        so the configured minimum actually applies to every real order.
         """
         if units not in ("points", "pips"):
             raise ValueError("units must be 'points' or 'pips'")
 
-        # Safety clamp so upstream "min SL pips" actually applies to real orders
         if units == "pips":
             min_sl = float(getattr(Config, "MIN_SL_PIPS", 5.0) or 5.0)
             sl_pips = max(float(sl_pips), min_sl)
@@ -277,7 +276,7 @@ class Broker:
         if direction == "BUY":
             sl_price = float(price) - sl_distance
             tp_price = float(price) + tp_distance
-        else:  # SELL
+        else:
             sl_price = float(price) + sl_distance
             tp_price = float(price) - tp_distance
 
@@ -287,14 +286,17 @@ class Broker:
 
     def close_position(self, ticket=None, symbol=None, side=None, volume=None):
         """
-        Closes a position by ticket (preferred), or by symbol/side if ticket is not provided.
+        Close a position by ticket (preferred), or by symbol/side if ticket is not provided.
+
+        In demo/backtest mode this removes matching entries from
+        `open_positions_sim` locally; in live mode it sends a real closing
+        MT5 order for the given ticket.
         """
         print(
             f"Broker.close_position called: ticket={ticket}, symbol={symbol}, side={side}, volume={volume}"
         )
 
         if self.mode in ("demo", "backtest"):
-            # Simulate closing in demo/backtest mode
             before = len(self.open_positions_sim)
             if ticket is not None:
                 self.open_positions_sim = [
@@ -308,7 +310,6 @@ class Broker:
             print(f"Simulated close: {before - after} positions closed.")
             return True
 
-        # Live mode: use MT5
         if ticket is None:
             print("No ticket provided for close_position; cannot close.")
             return False
@@ -337,8 +338,8 @@ class Broker:
             "type": mt5.ORDER_TYPE_SELL if side == "BUY" else mt5.ORDER_TYPE_BUY,
             "position": ticket,
             "price": price,
-            "deviation": 5,
-            "magic": 123456,
+            "deviation": int(getattr(Config, "MAX_DEVIATION", 5)),
+            "magic": int(getattr(Config, "MAGIC_NUMBER", 123456)),
             "comment": "Closed by Python",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
