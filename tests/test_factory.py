@@ -1,7 +1,5 @@
 """Tests for factory getter functions."""
 
-import pytest
-
 
 def test_get_market_data_returns_singleton():
     """get_market_data() returns the exact md singleton."""

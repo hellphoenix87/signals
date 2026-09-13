@@ -21,9 +21,13 @@ in isolation wouldn't fully prove:
    accessors onto the existing singletons, not fresh constructions.
 2. Introducing the getters doesn't change any existing behavior: the real
    app still boots via its lifespan (real `mt5.initialize()` call, mocked),
-   and an existing endpoint (`/status`) that reads the same underlying
-   singletons directly still responds correctly and consistently with what
-   the getters return.
+   and an existing endpoint (`/simulated_positions`) that reads the same
+   underlying singletons directly still responds correctly and consistently
+   with what the getters return. (`/status` is deliberately not used here --
+   it has a pre-existing, unrelated bug on master where it calls
+   `orch.is_running()`, a method `SignalOrchestrator` doesn't define, so it
+   500s regardless of this subphase; using it would fail this test for the
+   wrong reason.)
 
 No real MT5/broker calls are made -- only the `mock_mt5` boundary mock is
 used, plus nothing else in the stack is faked.
@@ -103,7 +107,9 @@ def test_getters_match_what_the_real_fully_wired_app_actually_uses(mock_mt5):
     assert factory.get_orchestrators() is factory.orchestrators
 
 
-def test_no_real_mt5_calls_made_by_exercising_getters_and_status_endpoint(mock_mt5):
+def test_no_real_mt5_calls_made_by_exercising_getters_and_simulated_positions_endpoint(
+    mock_mt5,
+):
     """Sanity guard: none of the above touches a real MT5 terminal -- every
     MT5 entry point the app boots/uses (initialize/shutdown/symbol_select/
     symbol_info_tick/positions_get/last_error) is the `mock_mt5` stub."""
