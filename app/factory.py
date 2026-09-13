@@ -51,3 +51,19 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
 signal_orchestrator = next(iter(orchestrators.values()))
 
 # Export orchestrators dict, trade_executor, br, md for endpoints
+
+
+def get_market_data():
+    return md
+
+
+def get_broker():
+    return br
+
+
+def get_trade_executor():
+    return trade_executor
+
+
+def get_orchestrators():
+    return orchestrators
