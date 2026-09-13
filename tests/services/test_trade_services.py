@@ -239,6 +239,7 @@ class TestSignalOrchestratorRealStrategies:
         # Setup mocks
         collector_mock = MagicMock()
         broker_mock = MagicMock()
+        logger_mock = MagicMock()
 
         # Create the strategy instance based on the parametrized class name
         if strategy_class == "StrongSignalStrategy":
@@ -255,11 +256,20 @@ class TestSignalOrchestratorRealStrategies:
                 base_strategy=base_strategy
             )
 
+        # Spy on the real generate_signal so we can assert it was actually
+        # invoked, rather than only checking that _run_entries didn't raise
+        # (which every real implementation also satisfies vacuously, since
+        # _run_entries swallows all exceptions).
+        real_generate_signal = signal_generator.generate_signal
+        generate_signal_spy = MagicMock(wraps=real_generate_signal)
+        signal_generator.generate_signal = generate_signal_spy
+
         # Create orchestrator
         orchestrator = SignalOrchestrator(
             collector=collector_mock,
             signal_generator=signal_generator,
             broker=broker_mock,
+            logger=logger_mock,
         )
 
         # Create a candles snapshot (format depends on strategy)
@@ -280,7 +290,11 @@ class TestSignalOrchestratorRealStrategies:
         asof = datetime.now(timezone.utc)
         orchestrator._run_entries(snapshot=snapshot, asof=asof)
 
-        # If we got here without raising, the test passes
+        # generate_signal must have actually been invoked with the snapshot
+        # positionally, and its call must not have raised (no exception logged) -
+        # a real regression check, not just "no exception propagated out".
+        generate_signal_spy.assert_called_once_with(snapshot)
+        logger_mock.exception.assert_not_called()
 
 
 class TestSignalOrchestratorOnTickEnterTrade:

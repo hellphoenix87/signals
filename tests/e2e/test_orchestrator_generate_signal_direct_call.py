@@ -47,10 +47,16 @@ strategy instances (no stubs/mocks standing in for `sg`) through
    collaborators standing in for `sg` -- not something a real strategy class
    can currently exhibit.
 
-Only MT5 itself is mocked at the boundary (`mock_mt5` fixture, tests/conftest.py,
-plus a local mt5.symbol_info stub matching test_orchestrator_enter_trade_dispatch.py)
--- everything else (SignalOrchestrator, the strategy classes, EnterTrade,
-RiskManager, TradeExecutor, Broker) is real.
+What's real here vs. mocked: `SignalOrchestrator` and the signal-generator
+strategy instances (`StrongSignalStrategy`, `MultiTimeframeStrongSignalStrategy`,
+`NTickConfirmedSignalStrategy`) are real -- this subphase is scoped to the
+generator-dispatch call site only, so those are the collaborators under test.
+`enter_trade` is a bare `MagicMock` (it's the downstream consumer of
+`generate_signal`'s output, not part of what this subphase changes) and
+`broker=None`/`collector=MagicMock()`. No MT5 import, no real `Broker`/
+`RiskManager`/`TradeExecutor`/`EnterTrade` construction in this file --
+that full-stack chain is covered by `test_orchestrator_enter_trade_dispatch.py`
+(Subphase 3.1), which this file does not duplicate.
 """
 
 from __future__ import annotations
