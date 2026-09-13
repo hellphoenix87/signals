@@ -1,6 +1,7 @@
 from app.exit_strategies.exit_shared import (
     PosState,
     is_break_even,
+    pos_profit,
     pos_symbol,
     pos_side,
     pos_ticket,
@@ -43,7 +44,7 @@ class LossExitManager:
         if not symbol or not side or ticket is None or entry is None or volume is None:
             return None
 
-        profit = getattr(position, "profit", None)
+        profit = pos_profit(position)
         if profit is None:
             profit = 0.0
 
@@ -74,19 +75,26 @@ class LossExitManager:
                 state.be_armed = True
                 state.was_profitable_after_unprofit = False
                 state.was_unprofitable_after_be = False
-                return None
-            """
-            # If N ticks passed and BE not reached, exit
-            if state.be_arming_ticks >= be_arming_ticks:
-                return self._exit_action(
-                    ticket=ticket,
-                    symbol=symbol,
-                    position_side=side,
-                    volume=volume,
-                    reason="failed_to_reach_be",
-                )
             return None
-            """
+
+        # If N ticks passed and BE not reached, exit -- unless this very tick is the
+        # one that reaches BE, in which case arm instead of force-closing a position
+        # that just turned profitable (pr-review finding: the original nested
+        # placement checked this before deciding to exit; hoisting the check to a
+        # separate top-level block otherwise loses that ordering).
+        if not state.be_armed and state.be_arming_ticks >= be_arming_ticks:
+            if is_break_even(position):
+                state.be_armed = True
+                state.was_profitable_after_unprofit = False
+                state.was_unprofitable_after_be = False
+                return None
+            return self._exit_action(
+                ticket=ticket,
+                symbol=symbol,
+                position_side=side,
+                volume=volume,
+                reason="failed_to_reach_be",
+            )
 
         # 2. After BE is reached
         if state.be_armed:
