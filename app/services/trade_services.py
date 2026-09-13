@@ -486,10 +486,10 @@ class SignalOrchestrator:
             except TypeError:
                 try:
                     closer(ticket, symbol, side, volume)
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                except Exception as exc:
+                    self._log_exception(f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}")
+            except Exception as exc:
+                self._log_exception(f"[Orchestrator] broker close failed for ticket={ticket} symbol={symbol}: {exc!r}")
 
     # -------------------------
     # Candle snapshot helpers
