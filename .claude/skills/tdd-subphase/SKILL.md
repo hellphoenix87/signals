@@ -1,11 +1,11 @@
 ---
 name: tdd-subphase
-description: Red-green-refactor loop for implementing exactly one subphase from a plan. Used by the developer agent.
+description: Red-green-refactor loop for implementing exactly one subphase from a plan, with unit/integration tests (not e2e — that's qa's job). Used by the developer agent.
 ---
 
-Implement one subphase, following this loop:
+Implement one subphase, following this loop. Scope is unit/integration tests only — the full-stack `tests/e2e/` suite belongs to the `qa` agent; don't write or touch it here.
 
-1. **Red** — write the test(s) described by the subphase's acceptance criteria under `tests/`, in the path mirroring the `app/` module being changed. Run it (`pipenv run pytest <path> -v`) and confirm it fails, and fails for the expected reason (missing function/wrong behavior, not a typo or import error).
+1. **Red** — write the test(s) described by the subphase's acceptance criteria under `tests/` (never `tests/e2e/`), in the path mirroring the `app/` module being changed. Run it (`pipenv run pytest <path> -v`) and confirm it fails, and fails for the expected reason (missing function/wrong behavior, not a typo or import error).
 2. **Green** — write the minimum production code under `app/` to make the test pass. Don't implement anything the subphase didn't ask for.
 3. **Refactor** — with tests green, clean up naming/duplication introduced by this subphase only. Don't refactor unrelated code.
 4. **Confirm** — re-run the test file, and the rest of the affected module's tests if they exist, to make sure nothing else broke.

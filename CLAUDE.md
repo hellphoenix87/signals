@@ -18,7 +18,7 @@ just format    # pipenv run black .
 just shell     # pipenv shell
 ```
 
-Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `scripts/mt5_smoke.py` is a separate manual MT5 connectivity smoke script, not a pytest test.
+Tests live under `tests/`, mirroring the `app/` module they cover (e.g. `app/signals/strategies/foo.py` → `tests/signals/strategies/test_foo.py`). `tests/e2e/` is the exception — it holds full-stack tests that drive the real, wired-together app (real FastAPI app, real `SignalOrchestrator`/`ExitTrade`/`Broker`, only MT5 itself mocked at the boundary) rather than mirroring one `app/` module; per the spec/TDD workflow below, it's owned and written by the `qa` agent, not the `developer` agent. Run a single test with `pipenv run pytest tests/path/to/test_foo.py::test_name -v`. Shared fixtures (`mock_mt5`, `mock_broker`, `make_tick`, `make_position`) live in `tests/conftest.py` — use them instead of calling MT5 or a broker for real. `scripts/mt5_smoke.py` is a separate manual MT5 connectivity smoke script, not a pytest test.
 
 Running the app requires a running/configured MetaTrader 5 terminal — `app/main.py` calls `mt5.initialize()` on startup and raises if it fails.
 
@@ -54,8 +54,8 @@ Non-trivial work goes through a plan-driven, test-first flow using four project 
 | Agent | Model | Job |
 |---|---|---|
 | `architect` | sonnet (opus when triage says elevated) | Turns a request into a phased plan under `docs/plans/`, using the `plan` skill. Never writes application code. |
-| `developer` | haiku | Implements exactly one subphase at a time, test-first, using the `tdd-subphase` skill. |
-| `qa` | sonnet | Verifies a finished subphase/phase against the plan's acceptance criteria using the `qa-verify` skill; only edits the plan's QA section. |
+| `developer` | haiku | Implements exactly one subphase at a time, test-first (unit/integration tests only), using the `tdd-subphase` skill. |
+| `qa` | sonnet | Owns the quality gate. Writes/extends the full-stack e2e suite (`tests/e2e/` — MT5 mocked at the boundary via `mock_mt5`, everything else real, driven through the real FastAPI app) using the `qa-verify` skill, runs it every subphase alongside the developer's unit/integration tests, and verifies both against the plan's acceptance criteria; edits `tests/e2e/**` and the plan's QA section. |
 | `pr-reviewer` | sonnet (opus when triage says elevated) | Reviews one phase/subphase branch's diff before it merges, via the built-in `code-review` skill. |
 
 **Plan lifecycle** — one markdown file per feature/bugfix, physically moved as its status changes:
@@ -81,8 +81,8 @@ For each phase/subphase, in order:
 1. `git checkout master && git pull` — always branch from the latest merged state (this repo's trunk is `master`, not `main`).
 2. Create `<plan-slug>-<phase[.subphase]>` off master.
 3. First subphase of the plan: move the plan file `docs/plans/todo/<slug>.md` → `docs/plans/in-progress/<slug>.md` as part of this branch's commit.
-4. Invoke `developer` (haiku) to implement it test-first (`tdd-subphase` skill).
-5. Invoke `qa` (sonnet) to verify against the plan's acceptance criteria (`qa-verify` skill); loop back to `developer` on the same branch until it passes.
+4. Invoke `developer` (haiku) to implement it test-first — unit/integration tests, written and run against just this subphase's code — (`tdd-subphase` skill).
+5. Invoke `qa` (sonnet) to write/extend `tests/e2e/` coverage for this subphase, run the full e2e suite plus the developer's unit/integration tests, and verify both against the plan's acceptance criteria (`qa-verify` skill); loop back to `developer` on the same branch until it passes.
 6. Invoke `pr-reviewer` (sonnet, or opus per the plan's triage) against the branch diff; loop back to `developer` on the same branch until there are no blocking findings.
 7. Push the branch, open a PR against master, and **merge it automatically** — no user confirmation needed for this merge specifically.
 8. Last subphase of the plan: move the plan file `docs/plans/in-progress/<slug>.md` → `docs/plans/done/<slug>.md` as part of this final branch's commit, before opening its PR.
