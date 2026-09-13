@@ -1,6 +1,6 @@
 # Remove Demo Mode, Fix Exit Config Wiring, Backtest Signal Generation
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
