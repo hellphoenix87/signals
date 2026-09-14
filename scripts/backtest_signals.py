@@ -45,6 +45,13 @@ Not compatible with `--mtf`.
 `Config.MTF_SCORE_THRESHOLD`/`MTF_ADX_MIN_STRENGTH` for `--mtf` runs
 (gate-sensitivity sweeps), without touching live settings.
 
+`--spread-pips` models a round-trip spread cost against bid-based OHLC
+bars in the target/stop simulation (default 0, unmodeled, matching every
+report before this flag existed) -- see `evaluate_signal` for the exact
+mechanics. `--start-pos` shifts the M1 window back by that many bars from
+now (default 1, the most recent window); use it with `--weeks`/`--count`
+to backtest an older, non-overlapping period for out-of-sample checks.
+
 Not supported here: n-tick confirmation (needs live tick data to ever
 confirm a signal, which a bar-only replay can't provide). Full
 exit-strategy-aware backtesting (real trade lifecycle simulation via the
@@ -84,6 +91,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-bars", type=int, default=300, help="Lookahead window (bars) to resolve each signal")
     parser.add_argument("--target-pips", type=float, default=None, help="Favorable-move threshold (default: Config.DEFAULT_TP_PIPS)")
     parser.add_argument("--stop-pips", type=float, default=None, help="Adverse-move threshold (default: Config.DEFAULT_SL_PIPS)")
+    parser.add_argument("--spread-pips", type=float, default=0.0, help="Round-trip spread cost to model in the target/stop simulation (default: 0, i.e. unmodeled as before)")
+    parser.add_argument("--start-pos", type=int, default=1, help="MT5 bars back from now to start the M1 window (default: 1, i.e. the most recent window); use a larger value to backtest an older, non-overlapping period")
     parser.add_argument(
         "--mtf",
         action="store_true",
@@ -113,16 +122,28 @@ def evaluate_signal(
     target_pips: float,
     stop_pips: float,
     forward_bars: int,
+    spread_pips: float = 0.0,
 ) -> tuple[str, int]:
     """Look forward from `entry_index` and return `("win"|"loss"|"undecided", bars_to_resolution)`.
 
     A bar that would satisfy both the target and the stop (its high/low
     range spans both) counts as a loss -- a conservative assumption, since
     the actual intrabar order of price movement isn't known from OHLC alone.
+
+    `spread_pips`, when nonzero, models a round-trip cost against bid-based
+    OHLC bars (the MT5 convention): you buy at ask (bid+spread) and sell at
+    bid, so a target needs `spread_pips` more favorable movement to clear,
+    while a stop needs that much less adverse movement to hit (you're
+    already down the spread the instant you enter). If the stop is
+    entirely consumed by the spread, the trade can't survive entry at all
+    -- scored as an immediate loss.
     """
     entry_price = float(candles[entry_index]["close"])
-    target_distance = target_pips * pip_size
-    stop_distance = stop_pips * pip_size
+    spread_distance = spread_pips * pip_size
+    target_distance = target_pips * pip_size + spread_distance
+    stop_distance = stop_pips * pip_size - spread_distance
+    if stop_distance <= 0:
+        return "loss", 0
     end = min(entry_index + 1 + forward_bars, len(candles))
 
     for i in range(entry_index + 1, end):
@@ -182,10 +203,12 @@ def evaluate_immediate_move(
     }
 
 
-def fetch_history(market_data: MarketData, symbol: str, timeframe: int, count: int) -> list[dict]:
-    """Fetch `count` closed candles for `timeframe` and tag each with `symbol`."""
+def fetch_history(
+    market_data: MarketData, symbol: str, timeframe: int, count: int, start_pos: int = 1
+) -> list[dict]:
+    """Fetch `count` closed candles for `timeframe` ending `start_pos` bars back from now, and tag each with `symbol`."""
     candles = market_data.get_historical_candles(
-        symbol, timeframe=timeframe, start_pos=1, count=count
+        symbol, timeframe=timeframe, start_pos=start_pos, count=count
     )
     for c in candles:
         c["symbol"] = symbol
@@ -201,6 +224,8 @@ def run_backtest(
     quick_check: bool = False,
     horizon_bars: int = 1,
     indicator_names: list[str] | None = None,
+    spread_pips: float = 0.0,
+    start_pos: int = 1,
 ) -> None:
     """Fetch history, replay it through the real signal generator, and print a summary.
 
@@ -212,7 +237,7 @@ def run_backtest(
         sys.exit(1)
 
     market_data = MarketData()
-    candles = fetch_history(market_data, symbol, Config.TIMEFRAME, count)
+    candles = fetch_history(market_data, symbol, Config.TIMEFRAME, count, start_pos)
     if not candles:
         print(f"No historical candles returned for {symbol}.")
         return
@@ -243,7 +268,7 @@ def run_backtest(
                     results.append({"time": candles[i].get("time"), "direction": final_signal, **move})
                 else:
                     outcome, bars = evaluate_signal(
-                        candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
+                        candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars, spread_pips
                     )
                     results.append(
                         {
@@ -256,6 +281,7 @@ def run_backtest(
     finally:
         logging.disable(logging.NOTSET)
 
+    print(f"Window: start_pos={start_pos}, spread_pips={spread_pips}")
     label = f"{symbol}_{'+'.join(indicator_names)}" if indicator_names else symbol
     display_name = f"{symbol} ({'+'.join(indicator_names)})" if indicator_names else symbol
     if quick_check:
@@ -283,6 +309,8 @@ def run_mtf_backtest(
     horizon_bars: int = 1,
     config: Any = Config,
     label: str | None = None,
+    spread_pips: float = 0.0,
+    start_pos: int = 1,
 ) -> None:
     """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
     MACD/M1 entry) and print a summary.
@@ -306,15 +334,17 @@ def run_mtf_backtest(
     tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
     tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15)
 
-    m1_candles = fetch_history(market_data, symbol, tf_entry, m1_count)
+    m1_candles = fetch_history(market_data, symbol, tf_entry, m1_count, start_pos)
     if not m1_candles:
         print(f"No historical M1 candles returned for {symbol}.")
         return
 
     m5_count = max(int(m1_count / 5), 100)
     m15_count = max(int(m1_count / 15), 100)
-    m5_candles = fetch_history(market_data, symbol, tf_confirm, m5_count)
-    m15_candles = fetch_history(market_data, symbol, tf_bias, m15_count)
+    m5_start_pos = max(1, int(start_pos / 5))
+    m15_start_pos = max(1, int(start_pos / 15))
+    m5_candles = fetch_history(market_data, symbol, tf_confirm, m5_count, m5_start_pos)
+    m15_candles = fetch_history(market_data, symbol, tf_bias, m15_count, m15_start_pos)
     if not m5_candles or not m15_candles:
         print(f"No historical M5/M15 candles returned for {symbol}.")
         return
@@ -353,7 +383,7 @@ def run_mtf_backtest(
                     results.append({"time": m1_candle.get("time"), "direction": final_signal, **move})
                 else:
                     outcome, bars = evaluate_signal(
-                        m1_candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars
+                        m1_candles, i, final_signal, pip_size, target_pips, stop_pips, forward_bars, spread_pips
                     )
                     results.append(
                         {
@@ -366,6 +396,7 @@ def run_mtf_backtest(
     finally:
         logging.disable(logging.NOTSET)
 
+    print(f"Window: start_pos={start_pos}, spread_pips={spread_pips}")
     file_tag = f"{symbol}_mtf" + (f"_{label}" if label else "")
     display_name = f"{symbol} (multi-timeframe" + (f", {label})" if label else ")")
     if quick_check:
@@ -535,6 +566,7 @@ def main() -> None:
             symbol, count, args.forward_bars, target_pips, stop_pips,
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
             config=config, label="_".join(label_parts) or None,
+            spread_pips=args.spread_pips, start_pos=args.start_pos,
         )
     else:
         indicator_names = (
@@ -546,6 +578,7 @@ def main() -> None:
             symbol, count, args.forward_bars, target_pips, stop_pips,
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
             indicator_names=indicator_names,
+            spread_pips=args.spread_pips, start_pos=args.start_pos,
         )
 
 
