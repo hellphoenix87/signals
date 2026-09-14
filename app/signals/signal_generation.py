@@ -88,12 +88,23 @@ def strategy_factory(
     )
     confidence_threshold = float(getattr(config, "CONFIDENCE_THRESHOLD", 0.5) or 0.5)
 
+    # Ablation (docs/test-results/single-indicator-ablation.md) found RSI
+    # carries more individual edge than MACD/SMA, which an equal-weight
+    # vote dilutes -- weight it higher by default. No-op for the MTF entry
+    # layer (MACD only, nothing to weigh against).
+    weights = {
+        "macd": float(getattr(config, "ENTRY_MACD_WEIGHT", 1.0)),
+        "sma": float(getattr(config, "ENTRY_SMA_WEIGHT", 1.0)),
+        "rsi": float(getattr(config, "ENTRY_RSI_WEIGHT", 2.0)),
+    }
+
     base = strategy_cls(
         indicators=indicators,
         logger=logger,
         min_candles=min_candles,
         confidence_threshold=confidence_threshold,
         config=config,
+        weights=weights,
         **kwargs
     )
 

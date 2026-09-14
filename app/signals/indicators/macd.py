@@ -55,44 +55,14 @@ def calculate_macd(
 ):
     """
     MACD indicator that returns a simple signal: 'buy', 'sell', or 'hold'.
-    """
-    log = logger or logging.getLogger(__name__)
 
-    try:
-        hist = _macd_histogram(data, fast_period, slow_period, signal_period, log)
-        if hist is None:
-            return "hold"
-        hist_last, hist_prev = hist
-
-        # Histogram logic: Buy only if positive AND growing (accelerating)
-        if hist_last > 0 and hist_last > hist_prev:
-            return "buy"
-        elif hist_last < 0 and hist_last < hist_prev:
-            return "sell"
-        else:
-            return "hold"
-
-    except Exception as e:
-        log.error("Error in calculate_macd: %s", str(e))
-        return "hold"
-
-
-def calculate_macd_crossover(
-    data,
-    *,
-    fast_period: int = 7,
-    slow_period: int = 16,
-    signal_period: int = 5,
-    logger: logging.Logger | None = None,
-):
-    """
-    Experimental alternate MACD trigger: fires only on a true crossover
-    (the histogram flipping sign, equivalent to the MACD line crossing the
-    signal line) instead of `calculate_macd`'s "still accelerating in the
-    same direction" condition, which re-fires on most candles throughout
-    an entire trending stretch rather than just at its start. Not used by
-    `strategy_factory`/live trading -- exists for backtest comparison
-    (see docs/test-results/macd-crossover-fix.md).
+    Fires on a true crossover -- the histogram flipping sign, equivalent
+    to the MACD line crossing the signal line -- not on every candle where
+    the histogram is merely still growing in the same direction (that
+    weaker condition re-fired on most candles throughout an entire
+    trending stretch rather than just at its start; see
+    docs/test-results/macd-crossover-fix.md for the backtest comparison
+    that motivated this).
     """
     log = logger or logging.getLogger(__name__)
 
@@ -110,5 +80,5 @@ def calculate_macd_crossover(
             return "hold"
 
     except Exception as e:
-        log.error("Error in calculate_macd_crossover: %s", str(e))
+        log.error("Error in calculate_macd: %s", str(e))
         return "hold"

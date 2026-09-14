@@ -36,12 +36,10 @@ seconds) is finalized -- the longer target/stop simulation below still
 matters once that's settled, but assumes a hold time this app doesn't
 actually commit to.
 
-`--indicators macd,sma,rsi,macd_crossover` (comma-separated, any subset)
-overrides the single-timeframe default vote with only the named
-indicator(s) -- for single-indicator ablation, e.g. `--indicators macd`
-to test MACD alone. `macd_crossover` is an experimental, backtest-only
-MACD variant (true crossover trigger instead of the live "still
-accelerating" one) for direct comparison. Not compatible with `--mtf`.
+`--indicators macd,sma,rsi` (comma-separated, any subset) overrides the
+single-timeframe default vote with only the named indicator(s) -- for
+single-indicator ablation, e.g. `--indicators macd` to test MACD alone.
+Not compatible with `--mtf`.
 
 `--mtf-score-threshold`/`--mtf-adx-min-strength` override
 `Config.MTF_SCORE_THRESHOLD`/`MTF_ADX_MIN_STRENGTH` for `--mtf` runs
@@ -69,7 +67,6 @@ import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.data.market_data import MarketData
-from app.signals.indicators.macd import calculate_macd_crossover
 from app.signals.signal_generation import build_indicator, strategy_factory
 from app.trade_execution.broker import Broker
 from app.trade_execution.mode import TradingMode
@@ -101,20 +98,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--indicators",
         default=None,
-        help="Comma-separated single-timeframe indicator ablation (e.g. 'macd', 'sma', 'macd_crossover'); overrides the default macd+sma+rsi vote. Not compatible with --mtf.",
+        help="Comma-separated single-timeframe indicator ablation (e.g. 'macd', 'sma'); overrides the default macd+sma+rsi vote. Not compatible with --mtf.",
     )
     parser.add_argument("--mtf-score-threshold", type=float, default=None, help="Override Config.MTF_SCORE_THRESHOLD for --mtf runs")
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
     return parser.parse_args()
-
-
-def build_indicator_for_backtest(name: str, config: Any):
-    """Like `signal_generation.build_indicator`, plus experimental,
-    backtest-only variants (e.g. `macd_crossover`) not used by production
-    `strategy_factory`."""
-    if name == "macd_crossover":
-        return calculate_macd_crossover
-    return build_indicator(name, config)
 
 
 def evaluate_signal(
@@ -217,8 +205,7 @@ def run_backtest(
     """Fetch history, replay it through the real signal generator, and print a summary.
 
     `indicator_names`, when given, overrides the default macd+sma+rsi vote
-    with only the named indicator(s) -- for single-indicator ablation runs
-    (see `build_indicator_for_backtest`).
+    with only the named indicator(s) -- for single-indicator ablation runs.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -231,7 +218,7 @@ def run_backtest(
         return
 
     indicators = (
-        {name: build_indicator_for_backtest(name, Config) for name in indicator_names}
+        {name: build_indicator(name, Config) for name in indicator_names}
         if indicator_names
         else None
     )

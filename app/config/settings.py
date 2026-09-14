@@ -44,6 +44,10 @@ class Config:
     ENTRY_SMA_LONG_WINDOW: int = 20
     ENTRY_RSI_PERIOD: int = 7
 
+    ENTRY_MACD_WEIGHT: float = 1.0
+    ENTRY_SMA_WEIGHT: float = 1.0
+    ENTRY_RSI_WEIGHT: float = 2.0
+
     USE_CLOSED_CANDLES_ONLY: bool = True
     DROP_LAST_CANDLE_ALWAYS: bool = False
 
