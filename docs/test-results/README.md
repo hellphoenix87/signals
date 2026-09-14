@@ -10,5 +10,10 @@ All runs so far were made against real MT5 historical data (`MetaQuotes-Demo`, E
 | [single-timeframe-macd-sma-rsi.md](single-timeframe-macd-sma-rsi.md) | Single-timeframe, MACD+SMA+RSI | Fixed target/stop | 2026-09-14 |
 | [multi-timeframe-target-stop-sweep.md](multi-timeframe-target-stop-sweep.md) | Multi-timeframe (SMA/M15, RSI/M5, MACD/M1) | Fixed target/stop, stop sweep | 2026-09-14 |
 | [quick-check-1-minute-exit-analysis.md](quick-check-1-minute-exit-analysis.md) | Single-timeframe + multi-timeframe + random baseline | `--quick-check`, 1-minute horizon | 2026-09-14 |
+| [target-stop-realistic-resweep.md](target-stop-realistic-resweep.md) | Single-timeframe + multi-timeframe | Fixed target/stop, 15:5 and 10:5 | 2026-09-14 |
+| [single-indicator-ablation.md](single-indicator-ablation.md) | MACD-only, SMA-only, RSI-only (isolated) | Fixed target/stop | 2026-09-14 |
+| [macd-crossover-fix.md](macd-crossover-fix.md) | MACD crossover variant (solo + combined) | Fixed target/stop | 2026-09-14 |
+| [mtf-gate-sensitivity-sweep.md](mtf-gate-sensitivity-sweep.md) | Multi-timeframe, `MTF_SCORE_THRESHOLD`/`MTF_ADX_MIN_STRENGTH` overrides | Fixed target/stop | 2026-09-14 |
+| [quick-check-multi-horizon.md](quick-check-multi-horizon.md) | Single-timeframe + multi-timeframe + random baseline | `--quick-check`, 2/5/10/15-minute horizons | 2026-09-14 |
 
 Related plan: [`docs/plans/done/mtf-backtest-validation.md`](../plans/done/mtf-backtest-validation.md).
