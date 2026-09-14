@@ -18,7 +18,8 @@ All runs so far were made against real MT5 historical data (`MetaQuotes-Demo`, E
 | [production-fix-validation.md](production-fix-validation.md) | Single-timeframe + multi-timeframe, post MACD-crossover + RSI-weighting fix | Fixed target/stop, 15:5/10:5/**7:5** | 2026-09-14 |
 | [mtf-adx-finer-sweep.md](mtf-adx-finer-sweep.md) | Multi-timeframe, post-fix, `MTF_ADX_MIN_STRENGTH` 24/26/28/30 | Fixed target/stop | 2026-09-14 |
 | [spread-and-second-window-validation.md](spread-and-second-window-validation.md) | Single-timeframe + multi-timeframe | `--spread-pips`/`--start-pos`, 7:5 and 10:5, two windows | 2026-09-14 |
+| [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md) | Single-timeframe + multi-timeframe, spread-adjusted | Fixed target/stop, target=3-10 sweep at stop=5 | 2026-09-14 |
 
-**Headline result**: [spread-and-second-window-validation.md](spread-and-second-window-validation.md) — the 7:5 win-rate edge **reproduces across two independent 4-week windows** (single-tf 43.8%/42.4%, both above the 41.7% breakeven) but **does not survive a realistic 1-pip round-trip spread** in either window (drops to 32.7%/33.0%). Net verdict: a small, real, reproducible edge exists, but it isn't currently large enough to cover realistic transaction costs.
+**Headline result**: [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md) — with a realistic 1-pip spread modeled, the win-rate-vs-breakeven gap **plateaus around -7 points for single-timeframe across target=3-5 pips (stop=5)** and doesn't close at any ratio tested (3 through 10 pips). This looks like a structural floor for this signal engine + spread combination, not a matter of finding the right ratio — further target/stop tuning has diminishing returns as a lever.
 
 Related plan: [`docs/plans/done/mtf-backtest-validation.md`](../plans/done/mtf-backtest-validation.md).
