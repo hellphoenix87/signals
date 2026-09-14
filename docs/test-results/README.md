@@ -19,7 +19,8 @@ All runs so far were made against real MT5 historical data (`MetaQuotes-Demo`, E
 | [mtf-adx-finer-sweep.md](mtf-adx-finer-sweep.md) | Multi-timeframe, post-fix, `MTF_ADX_MIN_STRENGTH` 24/26/28/30 | Fixed target/stop | 2026-09-14 |
 | [spread-and-second-window-validation.md](spread-and-second-window-validation.md) | Single-timeframe + multi-timeframe | `--spread-pips`/`--start-pos`, 7:5 and 10:5, two windows | 2026-09-14 |
 | [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md) | Single-timeframe + multi-timeframe, spread-adjusted | Fixed target/stop, target=3-10 sweep at stop=5 | 2026-09-14 |
+| [rsi-weight-sweep.md](rsi-weight-sweep.md) | Single-timeframe, `ENTRY_RSI_WEIGHT` 1.0-4.0 | Fixed target/stop, spread-adjusted | 2026-09-14 |
 
-**Headline result**: [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md) — with a realistic 1-pip spread modeled, the win-rate-vs-breakeven gap **plateaus around -7 points for single-timeframe across target=3-5 pips (stop=5)** and doesn't close at any ratio tested (3 through 10 pips). This looks like a structural floor for this signal engine + spread combination, not a matter of finding the right ratio — further target/stop tuning has diminishing returns as a lever.
+**Headline result**: [rsi-weight-sweep.md](rsi-weight-sweep.md) — `ENTRY_RSI_WEIGHT` sweep found the win-rate curve **saturates at 2.5 and above** (3.0/4.0 are bit-identical to 2.5 — RSI's vote already dominates alone past that point), a real but modest improvement over the previous default of 2.0 (-6.6 vs -7.1 point gap to breakeven). **Config default updated to 2.5.** Still doesn't close the gap — consistent with [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md)'s conclusion that the remaining gap looks structural, not a tuning problem.
 
 Related plan: [`docs/plans/done/mtf-backtest-validation.md`](../plans/done/mtf-backtest-validation.md).
