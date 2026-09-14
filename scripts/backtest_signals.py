@@ -111,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mtf-score-threshold", type=float, default=None, help="Override Config.MTF_SCORE_THRESHOLD for --mtf runs")
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
+    parser.add_argument("--rsi-weight", type=float, default=None, help="Override Config.ENTRY_RSI_WEIGHT for the single-timeframe vote (default: Config's own value, 2.0)")
     return parser.parse_args()
 
 
@@ -226,32 +227,37 @@ def run_backtest(
     indicator_names: list[str] | None = None,
     spread_pips: float = 0.0,
     start_pos: int = 1,
+    config: Any = Config,
 ) -> None:
     """Fetch history, replay it through the real signal generator, and print a summary.
 
     `indicator_names`, when given, overrides the default macd+sma+rsi vote
     with only the named indicator(s) -- for single-indicator ablation runs.
+
+    `config` defaults to the real `Config` but can be a subclass override
+    (e.g. a different `ENTRY_RSI_WEIGHT`) for weight-sensitivity sweeps,
+    without touching live settings.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")
         sys.exit(1)
 
     market_data = MarketData()
-    candles = fetch_history(market_data, symbol, Config.TIMEFRAME, count, start_pos)
+    candles = fetch_history(market_data, symbol, config.TIMEFRAME, count, start_pos)
     if not candles:
         print(f"No historical candles returned for {symbol}.")
         return
 
     indicators = (
-        {name: build_indicator(name, Config) for name in indicator_names}
+        {name: build_indicator(name, config) for name in indicator_names}
         if indicator_names
         else None
     )
-    strategy = strategy_factory(config=Config, indicators=indicators)
+    strategy = strategy_factory(config=config, indicators=indicators)
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
 
-    min_candles = int(getattr(Config, "MIN_CANDLES_FOR_INDICATORS", 1) or 1)
+    min_candles = int(getattr(config, "MIN_CANDLES_FOR_INDICATORS", 1) or 1)
     results: list[dict] = []
 
     logging.disable(logging.CRITICAL)
@@ -281,7 +287,7 @@ def run_backtest(
     finally:
         logging.disable(logging.NOTSET)
 
-    print(f"Window: start_pos={start_pos}, spread_pips={spread_pips}")
+    print(f"Window: start_pos={start_pos}, spread_pips={spread_pips}, rsi_weight={getattr(config, 'ENTRY_RSI_WEIGHT', 2.0)}")
     label = f"{symbol}_{'+'.join(indicator_names)}" if indicator_names else symbol
     display_name = f"{symbol} ({'+'.join(indicator_names)})" if indicator_names else symbol
     if quick_check:
@@ -574,11 +580,15 @@ def main() -> None:
             if args.indicators
             else None
         )
+        config = Config
+        if args.rsi_weight is not None:
+            config = type("ConfigOverride", (Config,), {"ENTRY_RSI_WEIGHT": args.rsi_weight})
         run_backtest(
             symbol, count, args.forward_bars, target_pips, stop_pips,
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
             indicator_names=indicator_names,
             spread_pips=args.spread_pips, start_pos=args.start_pos,
+            config=config,
         )
 
 
