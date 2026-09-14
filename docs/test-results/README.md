@@ -20,7 +20,8 @@ All runs so far were made against real MT5 historical data (`MetaQuotes-Demo`, E
 | [spread-and-second-window-validation.md](spread-and-second-window-validation.md) | Single-timeframe + multi-timeframe | `--spread-pips`/`--start-pos`, 7:5 and 10:5, two windows | 2026-09-14 |
 | [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md) | Single-timeframe + multi-timeframe, spread-adjusted | Fixed target/stop, target=3-10 sweep at stop=5 | 2026-09-14 |
 | [rsi-weight-sweep.md](rsi-weight-sweep.md) | Single-timeframe, `ENTRY_RSI_WEIGHT` 1.0-4.0 | Fixed target/stop, spread-adjusted | 2026-09-14 |
+| [final-signal-quality-summary.md](final-signal-quality-summary.md) | Single-timeframe + multi-timeframe, final production config | Fixed target/stop, spread-adjusted, 3-ratio summary | 2026-09-14 |
 
-**Headline result**: [rsi-weight-sweep.md](rsi-weight-sweep.md) — `ENTRY_RSI_WEIGHT` sweep found the win-rate curve **saturates at 2.5 and above** (3.0/4.0 are bit-identical to 2.5 — RSI's vote already dominates alone past that point), a real but modest improvement over the previous default of 2.0 (-6.6 vs -7.1 point gap to breakeven). **Config default updated to 2.5.** Still doesn't close the gap — consistent with [ratio-sweet-spot-search.md](ratio-sweet-spot-search.md)'s conclusion that the remaining gap looks structural, not a tuning problem.
+**Headline result**: [final-signal-quality-summary.md](final-signal-quality-summary.md) — with every fix and tuning pass applied, **single-timeframe at 5:5 (1:1 R:R) is the best configuration found across the whole investigation** (-6.6 points from breakeven), while MTF peaks separately at 7:5 (-8.0 points). Neither strategy clears breakeven at its own best ratio, and both tunable levers (ratio, RSI weight) are now exhausted. `USE_MULTI_TIMEFRAME_SIGNALS` stays `False`.
 
 Related plan: [`docs/plans/done/mtf-backtest-validation.md`](../plans/done/mtf-backtest-validation.md).
