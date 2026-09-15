@@ -15,6 +15,29 @@ from app.signals.strategies.ntick_confirmed_signal_strategy import (
 )
 
 
+def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
+    """Build one of the production entry-layer indicator callables by name
+    ("macd", "sma", "rsi"), reading its tunables from `config`. Single
+    source of truth so callers other than `strategy_factory` (e.g.
+    backtest tooling running single-indicator ablations) don't duplicate
+    the partial-construction parameters.
+    """
+    if name == "macd":
+        return default_macd_fn
+    if name == "sma":
+        return functools.partial(
+            generate_sma_signal,
+            short_window=int(getattr(config, "ENTRY_SMA_SHORT_WINDOW", 5)),
+            long_window=int(getattr(config, "ENTRY_SMA_LONG_WINDOW", 20)),
+        )
+    if name == "rsi":
+        return functools.partial(
+            calculate_rsi,
+            period=int(getattr(config, "ENTRY_RSI_PERIOD", 7)),
+        )
+    raise ValueError(f"Unknown indicator: {name!r}")
+
+
 def strategy_factory(
     strategy_cls: Type = StrongSignalStrategy,
     config: Any = Config,
@@ -48,7 +71,15 @@ def strategy_factory(
     )
 
     if indicators is None:
-        indicators = {"macd": default_macd_fn}
+        if use_multi:
+            # Multi-timeframe path: bias (SMA/M15) and confirm (RSI/M5)
+            # layers below already own those indicators -- keep the entry
+            # (M1) layer MACD-only so timeframes don't duplicate signals.
+            indicators = {"macd": build_indicator("macd", config)}
+        else:
+            indicators = {
+                name: build_indicator(name, config) for name in ("macd", "sma", "rsi")
+            }
 
     min_candles = (
         min_candles
@@ -57,12 +88,23 @@ def strategy_factory(
     )
     confidence_threshold = float(getattr(config, "CONFIDENCE_THRESHOLD", 0.5) or 0.5)
 
+    # Ablation (docs/test-results/single-indicator-ablation.md) found RSI
+    # carries more individual edge than MACD/SMA, which an equal-weight
+    # vote dilutes -- weight it higher by default. No-op for the MTF entry
+    # layer (MACD only, nothing to weigh against).
+    weights = {
+        "macd": float(getattr(config, "ENTRY_MACD_WEIGHT", 1.0)),
+        "sma": float(getattr(config, "ENTRY_SMA_WEIGHT", 1.0)),
+        "rsi": float(getattr(config, "ENTRY_RSI_WEIGHT", 2.0)),
+    }
+
     base = strategy_cls(
         indicators=indicators,
         logger=logger,
         min_candles=min_candles,
         confidence_threshold=confidence_threshold,
         config=config,
+        weights=weights,
         **kwargs
     )
 
