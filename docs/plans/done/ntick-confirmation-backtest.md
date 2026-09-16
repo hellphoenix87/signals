@@ -1,6 +1,6 @@
 # N-Tick Confirmation Backtest
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -32,8 +32,13 @@ One `copy_ticks_range` call per pending signal (not per candle) -- bounded by ho
 - **`app/signals/strategies/ntick_confirmed_signal_strategy.py`**: fix `generate_signal` to resolve the latest entry-timeframe candle for both list and dict-shaped `candles` (see bug section above).
 - **`scripts/backtest_signals.py`**: add `--ntick N` (and `--ntick-min-pip-move`, mirroring `Config`'s own `min_pip_move` default of `0.0`) to both the single-tf and `--mtf` paths. Add `evaluate_signal_from_price` (explicit entry price/start index variant of `evaluate_signal`) and the real-tick confirmation loop described above. Update the module docstring (the "not supported" note becomes stale).
 
-## Phase 2: Run the sweep, report results
+## Phase 2: Run the sweep, report results -- done
 
-- Run `--ntick 2`, `--ntick 3`, `--ntick 5` against the current live shape (`--mtf`, session filter on, `target=8/stop=5`, zero spread -- matching the validated live config from `retune-zero-spread`), plus the equivalent single-tf runs for comparison, over a recent window sized for real-tick-fetch runtime.
-- Write `docs/test-results/ntick-confirmation-backtest.md` with the comparison against the no-confirmation baseline (already known from `zero-spread-retune`).
-- Report the result plainly; leave the config decision to the user.
+- Ran `--ntick 2/3/5` against the live shape (`--mtf`, session filter on, `target=8/stop=5`, zero spread) over the same 4-week window as baseline.
+- **Second bug found while running the sweep (not part of the original plan, confirmed and documented, not yet fixed)**: `SessionFilteredSignalStrategy` only gates `generate_signal`, not `get_confirmed_signal` -- which `SignalOrchestrator._on_tick` calls directly to execute confirmed entries. Measured: 55-59% of every "confirmed" signal in this backtest fell inside the session filter's blocked hours. This bypasses the exact protection that got MTF from breakeven to profitable, and must be fixed before `N_TICK_CONFIRMATION` is ever raised in production, independent of the result below.
+- Applied a corrected (session-hours-respected) recompute to compare fairly against baseline (which is already correctly filtered).
+- **Window 1**: every corrected n-tick config (2/3/5) beat baseline and cleared breakeven, improving with N. **Window 2 (independent, non-overlapping)**: `--ntick 3` corrected *underperformed* baseline and fell below breakeven -- flatly contradicting window 1.
+- **Conclusion: no recommendation to enable.** The window-1 result doesn't survive an out-of-sample check -- looks like that window's specific price action, not a reproducible edge. `N_TICK_CONFIRMATION` stays at `1`.
+- Full tables and detail: `docs/test-results/ntick-confirmation-backtest.md`.
+- Single-timeframe comparison (originally planned) skipped -- MTF is the live default and already gave a clear (negative) answer; not worth the extra real-tick-fetch runtime for a strategy that isn't live anyway.
+- `--ntick-min-pip-move` (originally planned) dropped -- there's no matching `Config` field for it, so a CLI-only knob wouldn't reflect anything the live system can actually be configured to do; used the class's own `min_pip_move=0.0` default throughout instead.
