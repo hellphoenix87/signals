@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", default=None, help="Symbol to train on (default: Config.SYMBOLS[0])")
     parser.add_argument("--weeks", type=float, default=4.0, help="Weeks of M1 history to fetch")
+    parser.add_argument("--start-pos", type=int, default=1, help="MT5 bars back from now to start the window (default: 1, most recent); use to keep training data disjoint from backtest evaluation windows")
     parser.add_argument("--target-pips", type=float, default=7.0, help="Favorable-move threshold for labeling (default: MTF's validated ratio)")
     parser.add_argument("--stop-pips", type=float, default=5.0, help="Adverse-move threshold for labeling")
     parser.add_argument("--spread-pips", type=float, default=1.0, help="Round-trip spread cost modeled in labeling")
@@ -99,7 +100,7 @@ def main() -> None:
         sys.exit(1)
 
     market_data = MarketData()
-    candles = fetch_history(market_data, symbol, Config.TIMEFRAME, count)
+    candles = fetch_history(market_data, symbol, Config.TIMEFRAME, count, args.start_pos)
     if not candles:
         print(f"No historical candles returned for {symbol}.")
         sys.exit(1)
