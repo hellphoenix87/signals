@@ -26,8 +26,8 @@ class Config:
     SESSION_START_TIME = time(hour=0, minute=0)
     SESSION_END_TIME = time(hour=22, minute=0)
 
-    DEFAULT_SL_PIPS: float = 2.0
-    DEFAULT_TP_PIPS: float = 50.0
+    DEFAULT_SL_PIPS: float = 5.0
+    DEFAULT_TP_PIPS: float = 7.0
     STAGNATION_EXIT_MINUTES = 3
     MIN_SL_PIPS: float = 5.0
 
@@ -56,7 +56,7 @@ class Config:
 
     MAX_SPREAD_POINTS: float = 0
 
-    USE_MULTI_TIMEFRAME_SIGNALS = False
+    USE_MULTI_TIMEFRAME_SIGNALS = True
     MTF_BIAS_SMA_SHORT: int = 10
     MTF_BIAS_SMA_LONG: int = 50
     MTF_ADX_PERIOD: int = 14
@@ -69,6 +69,20 @@ class Config:
     USE_N_TICK_CONFIRMATION = True
     N_TICK_CONFIRMATION = 1
     LIQUIDITY_CHECK_AFTER_NTICK = True
+
+    # Backtest found MTF badly underperforms during 08:00-18:59 UTC
+    # (London open through the NY session) across two independent
+    # windows -- see docs/test-results/session-filter-analysis.md. No
+    # effect found for single-timeframe, so this is harmless there.
+    USE_SESSION_FILTER: bool = True
+    SESSION_FILTER_BLOCKED_HOURS_UTC = list(range(8, 19))
+    # None = auto-detect live via a real MT5 tick vs. true UTC (see
+    # signal_generation.get_broker_utc_offset_hours) -- depends on both
+    # the local machine's timezone and the broker server's, so hardcoding
+    # it would silently drift wrong across a DST change or a new
+    # deployment machine. Pin an int only for offline/deterministic tests
+    # without an MT5 connection.
+    SESSION_FILTER_UTC_OFFSET_HOURS = None
 
     MAGIC_NUMBER: int = 123456
     MAX_DEVIATION: int = 5

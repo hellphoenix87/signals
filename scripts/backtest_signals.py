@@ -52,6 +52,12 @@ mechanics. `--start-pos` shifts the M1 window back by that many bars from
 now (default 1, the most recent window); use it with `--weeks`/`--count`
 to backtest an older, non-overlapping period for out-of-sample checks.
 
+`--session-filter` forces `Config.USE_SESSION_FILTER` on for this run
+(already the live default -- see `Config.SESSION_FILTER_BLOCKED_HOURS_UTC`),
+holding entries during 08:00-18:59 UTC regardless of the underlying
+signal. Useful to force it on/verify explicitly even if a future config
+change flips the default back off.
+
 Not supported here: n-tick confirmation (needs live tick data to ever
 confirm a signal, which a bar-only replay can't provide). Full
 exit-strategy-aware backtesting (real trade lifecycle simulation via the
@@ -112,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mtf-score-threshold", type=float, default=None, help="Override Config.MTF_SCORE_THRESHOLD for --mtf runs")
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
     parser.add_argument("--rsi-weight", type=float, default=None, help="Override Config.ENTRY_RSI_WEIGHT for the single-timeframe vote (default: Config's own value, 2.0)")
+    parser.add_argument("--session-filter", action="store_true", help="Force Config.USE_SESSION_FILTER on for this run, regardless of Config's own value")
     return parser.parse_args()
 
 
@@ -559,14 +566,17 @@ def main() -> None:
     if args.mtf:
         config = Config
         label_parts = []
-        if args.mtf_score_threshold is not None or args.mtf_adx_min_strength is not None:
-            overrides = {}
-            if args.mtf_score_threshold is not None:
-                overrides["MTF_SCORE_THRESHOLD"] = args.mtf_score_threshold
-                label_parts.append(f"score{args.mtf_score_threshold}")
-            if args.mtf_adx_min_strength is not None:
-                overrides["MTF_ADX_MIN_STRENGTH"] = args.mtf_adx_min_strength
-                label_parts.append(f"adx{args.mtf_adx_min_strength}")
+        overrides = {}
+        if args.mtf_score_threshold is not None:
+            overrides["MTF_SCORE_THRESHOLD"] = args.mtf_score_threshold
+            label_parts.append(f"score{args.mtf_score_threshold}")
+        if args.mtf_adx_min_strength is not None:
+            overrides["MTF_ADX_MIN_STRENGTH"] = args.mtf_adx_min_strength
+            label_parts.append(f"adx{args.mtf_adx_min_strength}")
+        if args.session_filter:
+            overrides["USE_SESSION_FILTER"] = True
+            label_parts.append("sessionfilter")
+        if overrides:
             config = type("ConfigOverride", (Config,), overrides)
         run_mtf_backtest(
             symbol, count, args.forward_bars, target_pips, stop_pips,
@@ -581,8 +591,13 @@ def main() -> None:
             else None
         )
         config = Config
+        overrides = {}
         if args.rsi_weight is not None:
-            config = type("ConfigOverride", (Config,), {"ENTRY_RSI_WEIGHT": args.rsi_weight})
+            overrides["ENTRY_RSI_WEIGHT"] = args.rsi_weight
+        if args.session_filter:
+            overrides["USE_SESSION_FILTER"] = True
+        if overrides:
+            config = type("ConfigOverride", (Config,), overrides)
         run_backtest(
             symbol, count, args.forward_bars, target_pips, stop_pips,
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
