@@ -1,3 +1,4 @@
+import datetime
 import functools
 from typing import Any, Callable, List, Optional, Type, Dict
 import MetaTrader5 as mt5
@@ -12,6 +13,9 @@ from app.signals.strategies.strong_signal_strategy import StrongSignalStrategy
 from app.signals.strategies.multi_timeframe import MultiTimeframeStrongSignalStrategy
 from app.signals.strategies.ntick_confirmed_signal_strategy import (
     NTickConfirmedSignalStrategy,
+)
+from app.signals.strategies.session_filtered_signal_strategy import (
+    SessionFilteredSignalStrategy,
 )
 
 
@@ -36,6 +40,28 @@ def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
             period=int(getattr(config, "ENTRY_RSI_PERIOD", 7)),
         )
     raise ValueError(f"Unknown indicator: {name!r}")
+
+
+def get_broker_utc_offset_hours(default: int = 5) -> int:
+    """Determine the hour offset between candle timestamps (as
+    `MarketData` constructs them, via `datetime.fromtimestamp` on the raw
+    MT5 epoch) and true UTC, by comparing a live tick against the current
+    true UTC instant. Depends on both the local machine's timezone and
+    the broker server's, so it's computed live rather than hardcoded --
+    a hardcoded value would silently drift wrong across a DST change or
+    a new deployment machine. Falls back to `default` if MT5 isn't
+    reachable (e.g. offline/deterministic tests).
+    """
+    try:
+        symbol = getattr(Config, "SYMBOLS", ["EURUSD"])[0]
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None or not tick.time:
+            return default
+        candle_frame_now = datetime.datetime.fromtimestamp(tick.time)
+        true_utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        return round((candle_frame_now - true_utc_now).total_seconds() / 3600)
+    except Exception:
+        return default
 
 
 def strategy_factory(
@@ -146,5 +172,19 @@ def strategy_factory(
 
     if use_n_tick and n_ticks > 1:
         strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks)
+
+    if getattr(config, "USE_SESSION_FILTER", False):
+        blocked_hours = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC", [])
+        utc_offset = getattr(config, "SESSION_FILTER_UTC_OFFSET_HOURS", None)
+        if utc_offset is None:
+            utc_offset = get_broker_utc_offset_hours()
+        if use_multi:
+            entry_tf = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+            time_extractor = lambda candles_by_tf, _tf=entry_tf: (
+                (candles_by_tf.get(_tf) or [None])[-1] or {}
+            ).get("time")
+        else:
+            time_extractor = lambda candles: (candles[-1] if candles else {}).get("time")
+        strategy = SessionFilteredSignalStrategy(strategy, blocked_hours, time_extractor, utc_offset)
 
     return strategy
