@@ -33,6 +33,13 @@ class Config:
 
     LOT_RISK_PERCENT = 1
 
+    # This demo account's actual balance ($100,000) is unrealistically
+    # large and produces proportionally-correct but oversized lots
+    # (~20 lots at LOT_RISK_PERCENT=1%, DEFAULT_SL_PIPS=5). Size against
+    # this instead of the live balance so lot sizes reflect a realistic
+    # account. Set to None to fall back to the live account balance.
+    RISK_SIZING_BALANCE_OVERRIDE: float | None = 1000.0
+
     LOG_FILE = "trading_bot.log"
     LOG_LEVEL = "INFO"
 

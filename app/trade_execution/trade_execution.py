@@ -150,13 +150,19 @@ class TradeExecutor:
         self, *, symbol: str, price: float, sl_pips: float, signal: Dict[str, Any]
     ) -> Optional[float]:
         """Return the signal's own `lot` if given, else a risk-percentage
-        lot size from `risk_manager`, sized against the live account balance."""
+        lot size from `risk_manager`, sized against
+        `Config.RISK_SIZING_BALANCE_OVERRIDE` if set, else the live account
+        balance."""
         lot = signal.get("lot")
         if lot is not None:
             return float(lot)
 
-        account_info = self.market_data.get_account_info()
-        balance = float(account_info.balance) if account_info is not None else 0.0
+        override_balance = getattr(Config, "RISK_SIZING_BALANCE_OVERRIDE", None)
+        if override_balance is not None:
+            balance = float(override_balance)
+        else:
+            account_info = self.market_data.get_account_info()
+            balance = float(account_info.balance) if account_info is not None else 0.0
 
         return self.risk_manager.calculate_lot_size(
             balance,
