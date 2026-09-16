@@ -1,6 +1,6 @@
 # Re-tune Ratio + RSI Weight Under Confirmed Real-Account Spread (~0)
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -38,8 +38,11 @@ Every tuning decision since [spread-and-second-window-validation.md](../../docs/
 - If a materially better ratio/weight is found (not just noise-level difference from the current 7:5/2.5), update `Config.DEFAULT_TP_PIPS`/`DEFAULT_SL_PIPS`/`ENTRY_RSI_WEIGHT` accordingly, and update `Config`'s implicit spread assumption where documented in comments (`app/config/settings.py`, `session_filtered_signal_strategy.py`'s docstring references, etc.) to note the confirmed real-account spread rather than the earlier 1-pip placeholder.
 - If the current config already turns out near-optimal under spread=0 too, no config change -- just document that the earlier tuning happens to transfer, and why.
 
-## Verification (manual, per MVP/POC mode)
+## Verification (manual, per MVP/POC mode) -- all confirmed
 
-- Every new sweep run reproducible via `scripts/backtest_signals.py` with `--spread-pips 0` and the flags already built (`--ml-entry` not used here, `--rsi-weight`, `--session-filter`, `--start-pos`).
-- Write up the full re-tune as `docs/test-results/zero-spread-retune.md`, following the established report format -- explicit before/after comparison against the spread=1-era numbers, honest about whether the optimum moved or not.
-- If Phase 4 changes production config, confirm the new values via direct `Config` import, same as every prior config-changing plan in this investigation.
+- All sweeps run via `scripts/backtest_signals.py` with `--spread-pips 0`.
+- **Phase 1 result**: the optimum genuinely shifted. Single-timeframe's spread=1-era plateau (3:5-5:5) sharpened into a peak at 4:5 (+4.3 pts) that then declines and crosses back below breakeven past ~7:5-8:5. MTF's spread=1-era single point (7:5, -8.0 pts under spread=1) became a much wider profitable zone -- every ratio from 3:5 to 10:5 clears breakeven, peaking at 8:5 (+9.2 pts), not 7:5.
+- **Phase 2 result**: `ENTRY_RSI_WEIGHT=2.5` remains at least tied-best (59.2%-59.9% across 1.5-4.0, all within noise) -- no change needed.
+- **Phase 3 result**: both new optima reproduced out-of-sample on window 2 -- single-tf 59.7% (vs. window 1's 59.9%, remarkably stable); MTF 44.4% (vs. window 1's 47.7%, shrinks but stays clearly positive, +5.9 pts).
+- **Phase 4: `Config.DEFAULT_TP_PIPS` updated from 7.0 to 8.0`** (MTF's new optimum -- MTF is the live strategy via `USE_MULTI_TIMEFRAME_SIGNALS=True`). `DEFAULT_SL_PIPS` unchanged at 5.0. `ENTRY_RSI_WEIGHT` unchanged at 2.5. Confirmed all three via direct `Config` import.
+- Full write-up: `docs/test-results/zero-spread-retune.md`, with explicit before/after comparison against the spread=1-era numbers.

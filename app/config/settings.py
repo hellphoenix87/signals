@@ -27,7 +27,7 @@ class Config:
     SESSION_END_TIME = time(hour=22, minute=0)
 
     DEFAULT_SL_PIPS: float = 5.0
-    DEFAULT_TP_PIPS: float = 7.0
+    DEFAULT_TP_PIPS: float = 8.0
     STAGNATION_EXIT_MINUTES = 3
     MIN_SL_PIPS: float = 5.0
 
