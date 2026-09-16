@@ -1,6 +1,6 @@
 # Realistic Lot Sizing (Decouple from Demo Account's Inflated Balance)
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -18,8 +18,8 @@ Mode: MVP/POC (main session plans and implements directly; no subagents, no test
 - **`app/config/settings.py`**: add `RISK_SIZING_BALANCE_OVERRIDE: Optional[float] = 1000.0` -- when set, `_resolve_lot` uses this instead of the live account balance for the risk-percentage calculation. `None` would fall back to the real live balance (not used here, but keeps the override meaningfully optional if ever needed).
 - **`app/trade_execution/trade_execution.py::_resolve_lot`**: read `getattr(Config, "RISK_SIZING_BALANCE_OVERRIDE", None)`; if set, use it in place of `account_info.balance` when calling `risk_manager.calculate_lot_size`. Live balance is still fetched (harmless) but only used as the fallback when the override is `None`.
 
-## Verification (manual, per MVP/POC mode)
+## Verification (manual, per MVP/POC mode) -- all confirmed
 
-- Confirm `Config.RISK_SIZING_BALANCE_OVERRIDE == 1000.0` via direct import.
-- Confirm `TradeExecutor._resolve_lot` calls `risk_manager.calculate_lot_size` with `1000.0` (not the live $100,000 balance) when the override is set, via direct construction with a mocked `market_data.get_account_info()`.
-- Recompute by hand: $1,000 balance x 1% risk / (5 pips x 0.0001 x 100,000 contract size) = 0.2 lots -- confirm this is what `calculate_lot_size` actually returns for `DEFAULT_SL_PIPS=5`.
+- Confirmed `Config.RISK_SIZING_BALANCE_OVERRIDE == 1000.0` via direct import.
+- Confirmed `TradeExecutor._resolve_lot` (constructed with real `RiskManager`/`Broker`/`MarketData` against the live MT5 connection) returns `0.2` lots for `DEFAULT_SL_PIPS=5` -- and explicitly confirmed the live account balance queried at the same moment was still `$100,000`, proving the override (not the live balance) drove the calculation.
+- Hand calculation matches exactly: $1,000 x 1% / (5 pips x 0.0001 x 100,000 contract size) = $10 / $50 = 0.2 lots.
