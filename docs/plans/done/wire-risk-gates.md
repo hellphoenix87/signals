@@ -1,6 +1,6 @@
 # Wire Risk Gates (ATR Momentum Filter, Spread Gate, Daily Profit/Risk Cap)
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -53,10 +53,16 @@ Three tunables in `Config` have existed for a while with no logic behind them (o
   - `close_all_trades`: same `pos_profit(pos)` capture before `broker.close_position(...)`, accumulated on success, for the same reason (manual flattens are still today's realized P&L).
 - **`app/routes/endpoints.py::get_status`**: add `"daily_cap_reason": trade_executor._daily_cap_reason()` (or a small public `get_daily_cap_reason()` wrapper on `TradeExecutor` if reaching for a `_`-prefixed method from the route feels wrong -- match whichever style the rest of `get_status` already uses) so the cap's live state is observable without digging through logs.
 
-## Verification (manual, per MVP/POC mode)
+## Verification (manual, per MVP/POC mode) -- all confirmed
 
-- Direct import: `AtrMomentumFilteredSignalStrategy` and `calculate_atr` behave correctly against a small synthetic candle list (known ATR, known move, confirm the gate fires/doesn't fire at the boundary) -- run ad hoc via `pipenv run python -c "..."`, not committed as a test.
-- Direct import: `TradeExecutor._spread_ok` against a real MT5 connection at whatever the live spread is right now, with `MAX_SPREAD_POINTS` temporarily set low/high to confirm both branches.
-- Direct import: `TradeExecutor._daily_cap_reason` after manually setting `trade_executor.daily_profit` to values above/below both thresholds, confirming the right reason string (or `None`) comes back, and that it resets across a simulated day boundary (monkeypatch `last_reset` to yesterday).
-- Confirm `strategy_factory(config=Config)` still produces a strategy whose `generate_signal` behaves identically to before this plan, given `ENTRY_ATR_PERIOD=0`/`MAX_SPREAD_POINTS=0` are unchanged defaults (i.e. no new wrapper actually gets applied).
-- Hit `/status` and confirm `daily_cap_reason` is present and `None` at a fresh day/zero profit.
+- `calculate_atr`/`AtrMomentumFilteredSignalStrategy` confirmed against synthetic candles: computed ATR matched hand calculation; a tiny last-candle move (1e-5) was correctly forced to `hold` with `reason="atr_momentum_filtered"` against `atr=0.001`/`move_mult=1.0`, a large move (0.01) passed a `buy` through unchanged.
+- `strategy_factory(config=Config)` confirmed still returns `SessionFilteredSignalStrategy` as the outermost type (unchanged) with `ENTRY_ATR_PERIOD=0`/`ENTRY_ATR_MOVE_MULT=0` -- no new wrapper applied, byte-for-byte same live behavior.
+- `TradeExecutor._spread_ok` confirmed against this account's real live tick (spread was 0.0 at test time, consistent with PR #49) and, since that made the "below threshold" branch untestable live, against a stubbed tick (bid=1.10000/ask=1.10015, point=0.00001 -> 15 points): `MAX_SPREAD_POINTS=0` -> `True` (disabled), `=10` -> `False` (15 > 10), `=20` -> `True` (15 <= 20).
+- `TradeExecutor._resolve_sizing_balance`/`_daily_cap_reason`/`_accumulate_daily_pnl` confirmed against stubs: sizing balance correctly returns the `$1000` override; fresh state -> `None`; `daily_profit=250` -> `"daily_target_reached"`; `daily_profit=-25` (over the `$20` = 2%-of-$1000 max loss) -> `"daily_max_loss_reached"`; setting `last_reset` to yesterday resets `daily_profit` to `0.0` and clears the cap reason on the next check; `execute_signals` confirmed to short-circuit (prints the cap message, no `"Executing trade"` line) when capped; `_resolve_lot` re-confirmed still returns `0.2` lots against the `$1000` basis (refactor didn't change behavior); `_accumulate_daily_pnl` confirmed additive (`12.5` then `-3.0` -> `9.5`).
+- Full end-to-end smoke test: real MT5 connection, real `app.main.app` via `TestClient`, `GET /status` returned `200` with `daily_profit: 0.0`, `daily_cap_reason: None`, confirming the whole wiring holds together through the actual composition root (`app/factory.py`), not just in isolation.
+
+## Follow-ups raised for the user, not actioned here
+
+- `DAILY_TARGET_PROFIT=200`/`DAILY_MAX_RISK_PERCENT=2` are now live and gate real entries -- worth revisiting now that they mean something (`$20` max daily loss against the current `$1000` sizing basis is roughly two stop-outs).
+- ATR gate and spread gate are built correctly but deliberately left disabled (`0`/`0`) pending the same backtest-validation step every other feature flag here got before being flipped on.
+- `SessionFilteredSignalStrategy` doesn't proxy `on_new_tick`/`get_confirmed_signal` to the strategy it wraps, so it silently makes those methods unreachable on whatever it wraps (currently harmless since `N_TICK_CONFIRMATION=1` means nothing depends on that path today, but would silently break n-tick confirmation if `N_TICK_CONFIRMATION>1` is ever combined with `USE_SESSION_FILTER=True`). Not fixed here -- out of scope, flagged for awareness.
