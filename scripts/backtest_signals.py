@@ -261,7 +261,7 @@ def run_backtest(
         if indicator_names
         else None
     )
-    strategy = strategy_factory(config=config, indicators=indicators)
+    strategy = strategy_factory(config=config, indicators=indicators, use_multi=False)
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
 
@@ -542,7 +542,8 @@ def main() -> None:
         else float(getattr(Config, "DEFAULT_SL_PIPS", 2.0))
     )
 
-    if not args.mtf and getattr(Config, "USE_MULTI_TIMEFRAME_SIGNALS", False):
+    single_tf_test_flag = bool(args.indicators or args.rsi_weight is not None or args.ml_entry)
+    if not args.mtf and not single_tf_test_flag and getattr(Config, "USE_MULTI_TIMEFRAME_SIGNALS", False):
         print(
             "USE_MULTI_TIMEFRAME_SIGNALS is on but --mtf wasn't passed -- this "
             "would silently replay the single-timeframe path instead of what's "
