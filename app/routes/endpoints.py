@@ -26,6 +26,11 @@ def get_status(
         "orchestrator_running": running,
         "daily_profit": getattr(trade_executor, "daily_profit", None),
         "last_reset": getattr(trade_executor, "last_reset", None),
+        "daily_cap_reason": (
+            trade_executor._daily_cap_reason()
+            if hasattr(trade_executor, "_daily_cap_reason")
+            else None
+        ),
         "active_symbols": list(getattr(Config, "SYMBOLS", ["EURUSD"])),
     }
 

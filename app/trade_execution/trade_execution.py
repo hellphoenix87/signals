@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.config.settings import Config
-from app.exit_strategies.exit_shared import pos_ticket
+from app.exit_strategies.exit_shared import pos_ticket, pos_profit
 
 
 def create_trade_executor(
@@ -27,9 +27,10 @@ class TradeExecutor:
         self.risk_manager = risk_manager
         self.broker = broker
         self.market_data = market_data
-        self.daily_profit = 0
+        self.daily_profit = 0.0
         self.last_reset = datetime.now()
         self._last_exit_attempt_at: Dict[Any, datetime] = {}
+        self._daily_cap_logged: Optional[str] = None
 
     def process_signal(self, signal: Any, candles: Any = None):
         """Normalize `signal` (a list, a `{"signals": [...]}` dict, or a
@@ -57,6 +58,13 @@ class TradeExecutor:
         can't be resolved.
         """
         print(f"TradeExecutor.execute_signals called at {datetime.now()}")
+
+        cap_reason = self._daily_cap_reason()
+        if cap_reason is not None:
+            if self._daily_cap_logged != cap_reason:
+                print(f"Daily cap reached ({cap_reason}); no new entries until reset.")
+                self._daily_cap_logged = cap_reason
+            return
 
         any_actionable = False
 
@@ -185,20 +193,54 @@ class TradeExecutor:
         if lot is not None:
             return float(lot)
 
-        override_balance = getattr(Config, "RISK_SIZING_BALANCE_OVERRIDE", None)
-        if override_balance is not None:
-            balance = float(override_balance)
-        else:
-            account_info = self.market_data.get_account_info()
-            balance = float(account_info.balance) if account_info is not None else 0.0
-
         return self.risk_manager.calculate_lot_size(
-            balance,
+            self._resolve_sizing_balance(),
             sl_pips,
             symbol_price=price,
             symbol=symbol,
             risk_percent=getattr(Config, "LOT_RISK_PERCENT", 1.0),
         )
+
+    def _resolve_sizing_balance(self) -> float:
+        """Return the balance to size against: `Config.RISK_SIZING_BALANCE_OVERRIDE`
+        if set, else the live MT5 account balance. Shared by lot sizing and
+        the daily max-loss cap so both risk calculations use the same basis."""
+        override_balance = getattr(Config, "RISK_SIZING_BALANCE_OVERRIDE", None)
+        if override_balance is not None:
+            return float(override_balance)
+
+        account_info = self.market_data.get_account_info()
+        return float(account_info.balance) if account_info is not None else 0.0
+
+    def _maybe_reset_daily(self) -> None:
+        """Reset `daily_profit` (and the cap-logged flag) at a day boundary."""
+        now = datetime.now()
+        if now.date() != self.last_reset.date():
+            self.daily_profit = 0.0
+            self.last_reset = now
+            self._daily_cap_logged = None
+
+    def _accumulate_daily_pnl(self, amount: float) -> None:
+        self._maybe_reset_daily()
+        self.daily_profit += float(amount)
+
+    def _daily_cap_reason(self) -> Optional[str]:
+        """Return why new entries should stop today (`"daily_target_reached"`,
+        `"daily_max_loss_reached"`), or `None` if neither cap has been hit.
+        Gates new entries only -- existing open positions are unaffected."""
+        self._maybe_reset_daily()
+
+        target = float(getattr(Config, "DAILY_TARGET_PROFIT", 0) or 0)
+        if target > 0 and self.daily_profit >= target:
+            return "daily_target_reached"
+
+        max_risk_percent = float(getattr(Config, "DAILY_MAX_RISK_PERCENT", 0) or 0)
+        if max_risk_percent > 0:
+            max_loss = self._resolve_sizing_balance() * (max_risk_percent / 100.0)
+            if max_loss > 0 and self.daily_profit <= -max_loss:
+                return "daily_max_loss_reached"
+
+        return None
 
     def execute_exit(self, action: Any):
         """Close a position by ticket, via a real MT5 closing order.
@@ -241,6 +283,8 @@ class TradeExecutor:
         if not position:
             print(f"Position with ticket {ticket} not found for exit.")
             return None
+
+        realized_profit = pos_profit(position)
 
         pos_type = getattr(position, "type", None)
         if pos_type is None:
@@ -295,6 +339,8 @@ class TradeExecutor:
             )
 
             if result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
+                if realized_profit is not None:
+                    self._accumulate_daily_pnl(realized_profit)
                 return result
 
             if getattr(result, "comment", "") != "Unsupported filling mode":
@@ -325,6 +371,7 @@ class TradeExecutor:
             ticket = pos_ticket(pos)
             if ticket is None:
                 continue
+            realized_profit = pos_profit(pos)
             try:
                 ok = self.broker.close_position(ticket=ticket)
             except Exception as exc:
@@ -334,6 +381,8 @@ class TradeExecutor:
                 failed.append({"ticket": ticket, "error": "close_position returned False"})
             else:
                 closed.append(ticket)
+                if realized_profit is not None:
+                    self._accumulate_daily_pnl(realized_profit)
         return {"closed": closed, "failed": failed}
 
     def _safe_mt5_comment(self, text: str, *, max_len: int = 31) -> str:
