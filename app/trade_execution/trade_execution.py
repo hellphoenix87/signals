@@ -74,6 +74,10 @@ class TradeExecutor:
             if direction is None:
                 continue
 
+            if not self._spread_ok(str(symbol)):
+                print(f"Skipping signal (spread too wide): {s!r}")
+                continue
+
             price = self._resolve_price(symbol=str(symbol), direction=direction, signal=s)
             if price is None:
                 print(f"Skipping signal (no price available): {s!r}")
@@ -131,6 +135,30 @@ class TradeExecutor:
 
         print(f"Skipping malformed signal (unknown direction/side={side!r}): {s!r}")
         return None
+
+    def _spread_ok(self, symbol: str) -> bool:
+        """Return whether `symbol`'s current live spread is within
+        `Config.MAX_SPREAD_POINTS` (in MT5 points, via `broker.get_point_size`).
+
+        Fails open (returns `True`) if the gate is disabled (`<=0`, the
+        default) or if a live tick/point size can't be resolved -- a
+        transient data gap shouldn't block trading any more than it
+        already does elsewhere in this class.
+        """
+        max_spread_points = float(getattr(Config, "MAX_SPREAD_POINTS", 0) or 0)
+        if max_spread_points <= 0:
+            return True
+
+        tick = self.market_data.get_symbol_tick(symbol)
+        if tick is None:
+            return True
+
+        point_size = self.broker.get_point_size(symbol)
+        if not point_size:
+            return True
+
+        spread_points = (float(tick.ask) - float(tick.bid)) / float(point_size)
+        return spread_points <= max_spread_points
 
     def _resolve_price(
         self, *, symbol: str, direction: str, signal: Dict[str, Any]
