@@ -1,6 +1,6 @@
 # ML Entry Signal Model (Config-Switchable Alternative to Hand-Coded Rules)
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -35,10 +35,11 @@ Motivation (from conversation, not a formal backtest finding yet): our current r
 - Run the same comparison this whole investigation has used throughout: target=7/stop=5, 1-pip spread, session filter on, both historical windows (`--start-pos 1` and `--start-pos 28801`) -- once for the hand-coded rules (existing baseline, already measured: pooled 42.2% vs 41.7% breakeven), once for the ML model.
 - Write up the comparison as `docs/test-results/ml-entry-model-comparison.md`, following the established report format.
 
-## Verification (manual, per MVP/POC mode)
+## Verification (manual, per MVP/POC mode) -- all confirmed
 
-- `extract_features` produces the expected keys/values on a small hand-built candle sample, and returns `None` on too-short input.
-- `scripts/train_signal_model.py` runs end-to-end against real MT5 history and produces a saved model file plus a train/test accuracy readout that isn't degenerate (e.g. not predicting "hold" 100% of the time, which would be a trivial/useless classifier given "hold" is likely the majority class).
-- `strategy_factory(config=Config)` with `USE_ML_ENTRY_MODEL=True` on a `Config` subclass override produces an `MLSignalStrategy` instance; with it unset/`False`, produces the existing `StrongSignalStrategy` unchanged.
-- `scripts/backtest_signals.py --ml-entry` runs without error against real history and produces a real (not degenerate) win/loss distribution.
-- The comparison report has an honest verdict: report whichever result is genuinely better (or if they're statistically indistinguishable), not a foregone conclusion that the ML model wins just because it's newer/more sophisticated.
+- `extract_features` confirmed on hand-built samples: returns the expected 6-key dict on sufficient data, `None` on too-short input (verified both a 5-candle and a 30-candle case).
+- `scripts/train_signal_model.py` ran end-to-end twice (4 weeks, then ~6 weeks of older/disjoint data via `--start-pos 57601`), producing saved model files and non-degenerate train/test accuracy readouts (not predicting one class 100% of the time) -- but both showed a real warning sign: test accuracy (31.8%, 32.6%) barely beat or lagged the trivial "always predict hold" baseline (35.2%, 41.3%). More data (4 -> ~6 weeks) didn't move this.
+- `strategy_factory` confirmed directly: `USE_ML_ENTRY_MODEL=True` produces `MLSignalStrategy` for both the single-timeframe base and MTF's entry layer; unset/`False` produces the existing `StrongSignalStrategy` unchanged.
+- **Found and fixed a real bug during this verification**: `run_backtest` never explicitly passed `use_multi` to `strategy_factory` -- harmless while `Config.USE_MULTI_TIMEFRAME_SIGNALS` defaulted `False`, but silently wrong now that it's `True` (PR #46). Fixed to force `use_multi=False` explicitly, since `run_backtest`'s flat-candle-list replay is fundamentally incompatible with MTF's per-timeframe dict input.
+- `scripts/backtest_signals.py --ml-entry` ran against real history for both strategies, both out-of-sample windows, producing real (non-degenerate) win/loss distributions.
+- **Comparison report has an honest verdict, following through on the classification-accuracy warning sign**: the ML model lost to the hand-coded rules in all 4 window/strategy combinations tested (single-tf: -1.8 to -6.3 points; MTF: -9.8 to -18.9 points). `Config.USE_ML_ENTRY_MODEL` stays `False` (its existing default) -- see `docs/test-results/ml-entry-model-comparison.md` for the full numbers and recommendation.
