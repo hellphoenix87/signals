@@ -1,6 +1,6 @@
 # Session Filter + Enable Multi-Timeframe Signals for Live Trading
 
-Status: todo
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -36,11 +36,11 @@ Two changes, bundled because the second depends on validating the first:
 - **`app/config/settings.py`**: flip `USE_MULTI_TIMEFRAME_SIGNALS` from `False` to `True`. Update `DEFAULT_TP_PIPS` from `50.0` to `7.0` and `DEFAULT_SL_PIPS` from `2.0` to `5.0` (already comfortably above `MIN_SL_PIPS=5.0`, no floor-clamping surprise).
 - Update the `docs/plans/done/mtf-backtest-validation.md`/project memory framing -- this plan's own final commit documents the decision reversal (`USE_MULTI_TIMEFRAME_SIGNALS` was "deliberately left `False` ... since none of it is backtested yet" -- it now is, with real caveats).
 
-## Verification (manual, per MVP/POC mode)
+## Verification (manual, per MVP/POC mode) -- all confirmed
 
-- `strategy_factory(config=Config)` (single-timeframe, default) still produces `final_signal` unaffected by the session filter outside blocked hours, and forced to `"hold"` with `session_filtered: True` inside them, confirmed via direct construction with a few sample candle timestamps spanning both blocked and allowed hours.
-- `strategy_factory(config=Config, use_multi=True)` (now the live default) behaves the same way using the MTF entry timeframe's candle time.
-- `scripts/backtest_signals.py --mtf --session-filter` reproduces the scratch-script's pooled ~42.2% finding on both windows.
-- Confirm `TradeExecutor` would now use `sl_pips=5.0`/`tp_pips=50.0` -- wait, `tp_pips=7.0`/`sl_pips=5.0` -- for any signal that doesn't carry its own `sl_pips`/`tp_pips` (neither strategy currently sets those), by constructing a `Config`-driven call and checking the resolved values directly.
+- `strategy_factory(config=Config)` (single-timeframe): confirmed via a stub strategy returning a constant "buy" -- forced to `"hold"`/`session_filtered: True` at a blocked-hour timestamp, passed through unchanged at an allowed-hour timestamp.
+- `strategy_factory(config=Config, use_multi=True)` (now the live default): confirmed the same way using the MTF entry timeframe's candle time via the dict-shaped `time_extractor`.
+- `scripts/backtest_signals.py --mtf --session-filter --target-pips 7 --stop-pips 5 --spread-pips 1` reproduced the scratch-analysis numbers exactly: window 1 (`--start-pos 1`) 60W/75L/44.4%, window 2 (`--start-pos 28801`) 48W/73L/39.7% -- pooled 42.2% on 256 decided trades, matching `docs/test-results/session-filter-analysis.md` to the win/loss count.
+- Confirmed `Config.DEFAULT_SL_PIPS == 5.0`, `Config.DEFAULT_TP_PIPS == 7.0`, `Config.USE_MULTI_TIMEFRAME_SIGNALS == True`, `Config.USE_SESSION_FILTER == True` directly via import -- these are what `TradeExecutor` resolves for any signal without its own `sl_pips`/`tp_pips` (neither strategy sets those).
 
-**Honest caveat carried forward into this plan's final commit and PR description**: the validated result (42.2% pooled vs. 41.7% breakeven) is a thin margin on a modest sample (256 decided trades across two windows) with realistic spread modeled on this demo account's own historical data, not a live-verified real-broker spread. This is "no longer clearly losing," not "confirmed profitable" -- flagged explicitly so this isn't overstated when handed to the user for the merge decision.
+**Honest caveat carried into the PR description**: the validated result (42.2% pooled vs. 41.7% breakeven) is a thin margin on a modest sample (256 decided trades across two windows) with realistic spread modeled on this demo account's own historical data, not a live-verified real-broker spread. This is "no longer clearly losing," not "confirmed profitable" -- flagged explicitly so this isn't overstated when handed to the user for the merge decision.
