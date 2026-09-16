@@ -42,6 +42,11 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
         self._last_m1_signal_id = None
         self._confirmed_signal = None
 
+    def __getattr__(self, name):
+        """Forward anything not defined here to the wrapped strategy, so
+        this decorator stays transparent regardless of wrapper order."""
+        return getattr(self.base, name)
+
     def _last_entry_candle(self, candles: Union[List[dict], dict]) -> Optional[dict]:
         """Return the latest entry-timeframe candle regardless of whether
         `candles` is a flat list (single-timeframe) or a `{timeframe: [...]}`

@@ -29,6 +29,15 @@ class SessionFilteredSignalStrategy(BaseSignalStrategy):
         self.time_extractor = time_extractor
         self.utc_offset_hours = int(utc_offset_hours)
 
+    def __getattr__(self, name):
+        """Forward anything not defined here (e.g. `on_new_tick`,
+        `get_confirmed_signal`, or a backtest script's `_waiting` probe) to
+        the wrapped strategy, so this decorator stays transparent
+        regardless of where it sits in the wrapper chain -- e.g. wrapping
+        `NTickConfirmedSignalStrategy` shouldn't hide its tick-confirmation
+        interface just because this sits outside it."""
+        return getattr(self.strategy, name)
+
     def generate_signal(self, candles, *args, **kwargs):
         result = self.strategy.generate_signal(candles, *args, **kwargs)
         if not isinstance(result, dict) or result.get("error"):
