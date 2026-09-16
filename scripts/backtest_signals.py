@@ -119,6 +119,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
     parser.add_argument("--rsi-weight", type=float, default=None, help="Override Config.ENTRY_RSI_WEIGHT for the single-timeframe vote (default: Config's own value, 2.0)")
     parser.add_argument("--session-filter", action="store_true", help="Force Config.USE_SESSION_FILTER on for this run, regardless of Config's own value")
+    parser.add_argument("--ml-entry", action="store_true", help="Use the trained ML entry model (Config.ML_MODEL_PATH) instead of the hand-coded indicator vote for the base/entry layer. Not compatible with --indicators.")
     return parser.parse_args()
 
 
@@ -563,6 +564,10 @@ def main() -> None:
         print("--indicators is a single-timeframe ablation flag, not compatible with --mtf. Aborting.")
         sys.exit(1)
 
+    if args.indicators and args.ml_entry:
+        print("--indicators and --ml-entry are mutually exclusive (both override the entry layer). Aborting.")
+        sys.exit(1)
+
     if args.mtf:
         config = Config
         label_parts = []
@@ -576,6 +581,9 @@ def main() -> None:
         if args.session_filter:
             overrides["USE_SESSION_FILTER"] = True
             label_parts.append("sessionfilter")
+        if args.ml_entry:
+            overrides["USE_ML_ENTRY_MODEL"] = True
+            label_parts.append("mlentry")
         if overrides:
             config = type("ConfigOverride", (Config,), overrides)
         run_mtf_backtest(
@@ -596,6 +604,8 @@ def main() -> None:
             overrides["ENTRY_RSI_WEIGHT"] = args.rsi_weight
         if args.session_filter:
             overrides["USE_SESSION_FILTER"] = True
+        if args.ml_entry:
+            overrides["USE_ML_ENTRY_MODEL"] = True
         if overrides:
             config = type("ConfigOverride", (Config,), overrides)
         run_backtest(

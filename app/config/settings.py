@@ -48,6 +48,12 @@ class Config:
     ENTRY_SMA_WEIGHT: float = 1.0
     ENTRY_RSI_WEIGHT: float = 2.5
 
+    # Config-switchable alternative to the hand-coded vote above -- see
+    # docs/test-results/ml-entry-model-comparison.md. Off by default:
+    # opt-in only, since it needs a trained model file to exist.
+    USE_ML_ENTRY_MODEL: bool = False
+    ML_MODEL_PATH: str = "models/entry_signal_model.joblib"
+
     USE_CLOSED_CANDLES_ONLY: bool = True
     DROP_LAST_CANDLE_ALWAYS: bool = False
 

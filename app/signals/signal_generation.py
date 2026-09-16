@@ -17,6 +17,7 @@ from app.signals.strategies.ntick_confirmed_signal_strategy import (
 from app.signals.strategies.session_filtered_signal_strategy import (
     SessionFilteredSignalStrategy,
 )
+from app.signals.strategies.ml_signal_strategy import MLSignalStrategy
 
 
 def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
@@ -96,16 +97,7 @@ def strategy_factory(
         else int(getattr(config, "N_TICK_CONFIRMATION", 0) or 0)
     )
 
-    if indicators is None:
-        if use_multi:
-            # Multi-timeframe path: bias (SMA/M15) and confirm (RSI/M5)
-            # layers below already own those indicators -- keep the entry
-            # (M1) layer MACD-only so timeframes don't duplicate signals.
-            indicators = {"macd": build_indicator("macd", config)}
-        else:
-            indicators = {
-                name: build_indicator(name, config) for name in ("macd", "sma", "rsi")
-            }
+    use_ml_entry_model = getattr(config, "USE_ML_ENTRY_MODEL", False)
 
     min_candles = (
         min_candles
@@ -114,25 +106,42 @@ def strategy_factory(
     )
     confidence_threshold = float(getattr(config, "CONFIDENCE_THRESHOLD", 0.5) or 0.5)
 
-    # Ablation (docs/test-results/single-indicator-ablation.md) found RSI
-    # carries more individual edge than MACD/SMA, which an equal-weight
-    # vote dilutes -- weight it higher by default. No-op for the MTF entry
-    # layer (MACD only, nothing to weigh against).
-    weights = {
-        "macd": float(getattr(config, "ENTRY_MACD_WEIGHT", 1.0)),
-        "sma": float(getattr(config, "ENTRY_SMA_WEIGHT", 1.0)),
-        "rsi": float(getattr(config, "ENTRY_RSI_WEIGHT", 2.0)),
-    }
+    if use_ml_entry_model:
+        # Config-switchable alternative to the hand-coded vote below --
+        # predicts from a model trained on the same indicators instead of
+        # hand-picked thresholds/weights (see docs/test-results/ml-entry-model-comparison.md).
+        base = MLSignalStrategy(config=config, logger=logger)
+    else:
+        if indicators is None:
+            if use_multi:
+                # Multi-timeframe path: bias (SMA/M15) and confirm (RSI/M5)
+                # layers below already own those indicators -- keep the entry
+                # (M1) layer MACD-only so timeframes don't duplicate signals.
+                indicators = {"macd": build_indicator("macd", config)}
+            else:
+                indicators = {
+                    name: build_indicator(name, config) for name in ("macd", "sma", "rsi")
+                }
 
-    base = strategy_cls(
-        indicators=indicators,
-        logger=logger,
-        min_candles=min_candles,
-        confidence_threshold=confidence_threshold,
-        config=config,
-        weights=weights,
-        **kwargs
-    )
+        # Ablation (docs/test-results/single-indicator-ablation.md) found RSI
+        # carries more individual edge than MACD/SMA, which an equal-weight
+        # vote dilutes -- weight it higher by default. No-op for the MTF entry
+        # layer (MACD only, nothing to weigh against).
+        weights = {
+            "macd": float(getattr(config, "ENTRY_MACD_WEIGHT", 1.0)),
+            "sma": float(getattr(config, "ENTRY_SMA_WEIGHT", 1.0)),
+            "rsi": float(getattr(config, "ENTRY_RSI_WEIGHT", 2.0)),
+        }
+
+        base = strategy_cls(
+            indicators=indicators,
+            logger=logger,
+            min_candles=min_candles,
+            confidence_threshold=confidence_threshold,
+            config=config,
+            weights=weights,
+            **kwargs
+        )
 
     strategy = base
 
