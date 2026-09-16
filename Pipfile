@@ -13,6 +13,8 @@ fastapi = "*"
 uvicorn = "*"
 websockets = "*"
 black = "*"
+scikit-learn = "*"
+joblib = "*"
 
 [dev-packages]
 metatrader5 = "*"
