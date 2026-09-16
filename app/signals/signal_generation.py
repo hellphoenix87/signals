@@ -18,6 +18,9 @@ from app.signals.strategies.session_filtered_signal_strategy import (
     SessionFilteredSignalStrategy,
 )
 from app.signals.strategies.ml_signal_strategy import MLSignalStrategy
+from app.signals.strategies.atr_momentum_filtered_signal_strategy import (
+    AtrMomentumFilteredSignalStrategy,
+)
 
 
 def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
@@ -142,6 +145,17 @@ def strategy_factory(
             weights=weights,
             **kwargs
         )
+
+        # ATR momentum gate on the M1 entry layer (applies uniformly whether
+        # MTF is on or off) -- 0/0 (the default) leaves `base` unwrapped, so
+        # this is a no-op until deliberately enabled and backtest-validated
+        # like every other feature flag in this module.
+        atr_period = int(getattr(config, "ENTRY_ATR_PERIOD", 0) or 0)
+        atr_move_mult = float(getattr(config, "ENTRY_ATR_MOVE_MULT", 0) or 0)
+        if atr_period > 0 and atr_move_mult > 0:
+            base = AtrMomentumFilteredSignalStrategy(
+                base, atr_period=atr_period, move_mult=atr_move_mult
+            )
 
     strategy = base
 
