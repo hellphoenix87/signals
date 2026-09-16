@@ -41,6 +41,11 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
         self._last_m1_signal_id = None
         self._confirmed_signal = None
 
+    def __getattr__(self, name):
+        """Forward anything not defined here to the wrapped strategy, so
+        this decorator stays transparent regardless of wrapper order."""
+        return getattr(self.base, name)
+
     def on_new_tick(self, price: float, spread_points: Optional[float] = None):
         if not self._waiting or self._pending_signal not in ("buy", "sell"):
             return

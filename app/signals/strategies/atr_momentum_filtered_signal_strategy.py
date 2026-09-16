@@ -19,6 +19,11 @@ class AtrMomentumFilteredSignalStrategy(BaseSignalStrategy):
         self.atr_period = int(atr_period)
         self.move_mult = float(move_mult)
 
+    def __getattr__(self, name):
+        """Forward anything not defined here to the wrapped strategy, so
+        this decorator stays transparent regardless of wrapper order."""
+        return getattr(self.strategy, name)
+
     def generate_signal(self, candles, *args, **kwargs):
         result = self.strategy.generate_signal(candles, *args, **kwargs)
         if not isinstance(result, dict) or result.get("error"):
