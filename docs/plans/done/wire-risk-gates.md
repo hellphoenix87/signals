@@ -1,0 +1,71 @@
+# Wire Risk Gates (ATR Momentum Filter, Spread Gate, Daily Profit/Risk Cap)
+
+Status: done
+Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
+
+## Goal
+
+Three tunables in `Config` have existed for a while with no logic behind them (or only half-wired logic). Build the real mechanism for each and wire it to the config that already exists, per user request ("close the gaps, wire what is not wired, this includes ATR as well"):
+
+1. **ATR momentum entry gate** (`ENTRY_ATR_PERIOD`, `ENTRY_ATR_MOVE_MULT`) -- config exists, no ATR indicator exists anywhere in the codebase, no gating logic exists. Currently `0`/`0` (a no-op under the "0 disables" convention already used elsewhere in this file, e.g. `MAX_SPREAD_POINTS`).
+2. **Spread gate** (`MAX_SPREAD_POINTS`) -- config exists, and `NTickConfirmedSignalStrategy` even has a `max_spread_points` constructor param, but `strategy_factory` never passes it in, so it's dead. Separately, real MT5 ticks (`mt5.symbol_info_tick`) don't actually carry a `.spread` attribute at all (only `mt5.symbol_info(symbol).spread` does) -- the existing `getattr(tick, "spread", None)` read in the orchestrator's tick path would silently return `None` on a real tick even if that path were reachable. Currently `0` (no-op, same convention).
+3. **Daily profit/risk cap** (`DAILY_TARGET_PROFIT=200`, `DAILY_MAX_RISK_PERCENT=2`) -- `TradeExecutor.daily_profit`/`last_reset` exist as fields but nothing ever increments `daily_profit` (no realized-P&L tracking on exits anywhere) and nothing ever reads the two config values to stop new entries. `/status` exposes `daily_profit` today but it is always `0`.
+
+## Design decisions (and why)
+
+- **ATR gate placement**: a new `AtrMomentumFilteredSignalStrategy` wraps the M1 entry-layer strategy (`base`, before it's optionally handed to `MultiTimeframeStrongSignalStrategy` as `entry_strategy`) -- so it applies uniformly whether MTF is on or off, at the same layer ADX already gates the bias layer. If `ENTRY_ATR_PERIOD<=0` or `ENTRY_ATR_MOVE_MULT<=0` it's not wrapped at all (byte-for-byte current behavior preserved).
+- **ATR gate stays off by default.** Every other feature in this codebase (MTF, session filter, RSI weighting, ML entry model) was flipped on only after a `scripts/backtest_signals.py` validation pass recorded in `docs/test-results/`. Wiring the mechanism now without that validation would break that pattern for a real trading-decision gate. `ENTRY_ATR_PERIOD`/`ENTRY_ATR_MOVE_MULT` stay `0`/`0` after this plan -- enabling it is a separate, later decision.
+- **Spread gate lives in `TradeExecutor`, not in the tick-forwarding chain.** The `NTickConfirmedSignalStrategy.max_spread_points` param is real but (a) only reachable while `N_TICK_CONFIRMATION>1`, which it currently isn't, and (b) is presently *unreachable at all* in production because `SessionFilteredSignalStrategy` wraps it as the outermost strategy and doesn't proxy `on_new_tick`/`get_confirmed_signal` -- `hasattr(signal_generator, "on_new_tick")` is `False` on the composed live strategy today. Fixing that wrapper-proxying/ordering is a separate, more invasive change (changes n-tick confirmation's live reachability) and is explicitly out of scope here. Instead, the spread check goes where it's unconditionally reachable regardless of which signal-generation wrappers are active: right before `TradeExecutor` places an order, using a freshly-fetched tick's real `bid`/`ask` and `broker.get_point_size(symbol)` (not the nonexistent `tick.spread`).
+- **Spread gate stays a no-op by default too** (`MAX_SPREAD_POINTS=0` unchanged) -- same reasoning, this account's confirmed real spread is near-zero (PR #49) so there's nothing to validate against yet, but the mechanism should exist and be correct.
+- **Daily cap gates new entries only, never force-closes open positions.** Force-closing everything already exists as a distinct, explicit action (`/close_all` -> `close_all_trades`). The cap answers "should we open another trade today", not "panic, flatten now".
+- **Daily cap sizes its money threshold the same way lot sizing already does** (`RISK_SIZING_BALANCE_OVERRIDE` when set, else live account balance) -- for consistency, and because `DAILY_MAX_RISK_PERCENT` as a *percent* only means something against the same balance basis the rest of the risk math uses.
+- **Realized P&L is captured as the position's floating profit read immediately before its closing order is sent** (`pos_profit()`, already used elsewhere in `exit_strategies`), not from `order_send`'s return value (which doesn't carry profit) or `mt5.history_deals_get` (more precise but adds an extra round trip and matching-by-ticket complexity not justified for a soft daily guardrail). This is a best-effort approximation, consistent with how "close enough" the rest of this gate already is.
+- **Unlike the other two, the daily cap goes live immediately at its existing config values** (`DAILY_TARGET_PROFIT=200`, `DAILY_MAX_RISK_PERCENT=2`) once wired, because those two numbers already exist as real (non-zero, non-disabled) config -- there's no "0 disables" fallback for this one. Flagged explicitly for the user in the final report: `DAILY_MAX_RISK_PERCENT=2%` against the current `RISK_SIZING_BALANCE_OVERRIDE=$1000` basis is a $20 cap, roughly two full stop-outs at the current `DEFAULT_SL_PIPS=5`/lot size -- these two numbers were set before the $1000 basis existed (PR #48) and may be worth re-tuning together, but that's a separate decision from wiring the mechanism.
+
+## Out of scope (explicit, not forgotten)
+
+- Backtesting or enabling the ATR gate -- mechanism only, per above.
+- Enabling the spread gate -- mechanism only, per above.
+- Fixing `SessionFilteredSignalStrategy`/`NTickConfirmedSignalStrategy` wrapper-order/proxying so tick-level spread checks and n-tick confirmation are reachable together -- noted as a known latent issue, not fixed here.
+- Re-tuning `DAILY_TARGET_PROFIT`/`DAILY_MAX_RISK_PERCENT` values themselves -- wiring only; flagged for a follow-up decision.
+- `TradingMode.BACKTEST`'s stub mark-to-market -- unrelated, already deliberately deferred per prior plans.
+- No tests, per MVP/POC mode. Verified by direct import/call against real MT5 connection, mirroring how `realistic-lot-sizing` verified itself.
+
+## Phase 1: ATR indicator + momentum entry gate
+
+- **`app/signals/indicators/atr.py`** (new): `calculate_atr(candles, *, period=14) -> float` -- Wilder's Average True Range in price units, same smoothing approach already used inside `adx.py`'s `_wilder_smooth`, returning `0.0` on insufficient data or error (fails safe, same contract as `calculate_adx`).
+- **`app/signals/strategies/atr_momentum_filtered_signal_strategy.py`** (new): `AtrMomentumFilteredSignalStrategy(strategy, *, atr_period, move_mult)` wraps a strategy. On `generate_signal`, calls through to the wrapped strategy; if the result's `final_signal` is `buy`/`sell`, computes ATR over the given candles and the latest closed candle's move (`abs(close[-1] - close[-2])`); if that move is `< atr * move_mult`, overrides to `hold` with `reason="atr_momentum_filtered"` (mirrors `SessionFilteredSignalStrategy`'s override-with-reason pattern). Passes through unchanged if there aren't enough candles to compute ATR.
+- **`app/signals/signal_generation.py::strategy_factory`**: after building `base` (the M1 entry-layer strategy, both single-tf and MTF-entry paths), read `ENTRY_ATR_PERIOD`/`ENTRY_ATR_MOVE_MULT` from config; if both `> 0`, wrap `base` in `AtrMomentumFilteredSignalStrategy` before it's used as `entry_strategy` (MTF path) or becomes `strategy` (single-tf path). Config stays `0`/`0` -- no behavior change yet.
+
+## Phase 2: Spread gate at order placement
+
+- **`app/trade_execution/trade_execution.py::TradeExecutor`**: add `_spread_ok(symbol) -> bool` -- fetches a live tick via `self.market_data.get_symbol_tick(symbol)`, computes `spread_points = (tick.ask - tick.bid) / self.broker.get_point_size(symbol)`, returns `True` if `MAX_SPREAD_POINTS<=0` (disabled) or the tick/point size couldn't be resolved (fail-open, consistent with how this codebase already fails open on missing MT5 data elsewhere rather than blocking trading on a transient data gap), else `spread_points <= MAX_SPREAD_POINTS`.
+- Call it in `execute_signals`, right after direction is resolved and before price/lot resolution for that signal -- skip the signal (`print` + `continue`, same style as the other skip branches already in that loop) if spread is too wide. Config stays `0` -- no behavior change yet.
+
+## Phase 3: Daily profit/risk cap
+
+- **`app/trade_execution/trade_execution.py::TradeExecutor`**:
+  - Extract `_resolve_sizing_balance() -> float` from the balance-resolution logic currently inline in `_resolve_lot` (override if set, else live `market_data.get_account_info().balance`); `_resolve_lot` calls it too, no behavior change there.
+  - `_maybe_reset_daily()`: if `datetime.now().date() != self.last_reset.date()`, reset `self.daily_profit = 0.0` and `self.last_reset = datetime.now()`.
+  - `_daily_cap_reason() -> Optional[str]`: calls `_maybe_reset_daily()`, then returns `"daily_target_reached"` if `DAILY_TARGET_PROFIT>0` and `daily_profit >= DAILY_TARGET_PROFIT`, `"daily_max_loss_reached"` if `DAILY_MAX_RISK_PERCENT>0` and `daily_profit <= -(_resolve_sizing_balance() * DAILY_MAX_RISK_PERCENT/100)`, else `None`.
+  - `execute_signals`: at the top, check `_daily_cap_reason()`; if set, print once (track via `self._daily_cap_logged` alongside the reset) and return without processing any signals (skip the whole batch, not per-signal -- the cap is symbol-agnostic, one account).
+  - `execute_exit`: after a successful close (`result.retcode in (DONE, PLACED)`), read `pos_profit(position)` (captured before the close request, same `position` object already fetched earlier in this method) and, if not `None`, add it to `self.daily_profit` via a small `_accumulate_daily_pnl(amount)` helper (also calls `_maybe_reset_daily()` first so a close right after midnight doesn't add to the previous day's stale total).
+  - `close_all_trades`: same `pos_profit(pos)` capture before `broker.close_position(...)`, accumulated on success, for the same reason (manual flattens are still today's realized P&L).
+- **`app/routes/endpoints.py::get_status`**: add `"daily_cap_reason": trade_executor._daily_cap_reason()` (or a small public `get_daily_cap_reason()` wrapper on `TradeExecutor` if reaching for a `_`-prefixed method from the route feels wrong -- match whichever style the rest of `get_status` already uses) so the cap's live state is observable without digging through logs.
+
+## Verification (manual, per MVP/POC mode) -- all confirmed
+
+- `calculate_atr`/`AtrMomentumFilteredSignalStrategy` confirmed against synthetic candles: computed ATR matched hand calculation; a tiny last-candle move (1e-5) was correctly forced to `hold` with `reason="atr_momentum_filtered"` against `atr=0.001`/`move_mult=1.0`, a large move (0.01) passed a `buy` through unchanged.
+- `strategy_factory(config=Config)` confirmed still returns `SessionFilteredSignalStrategy` as the outermost type (unchanged) with `ENTRY_ATR_PERIOD=0`/`ENTRY_ATR_MOVE_MULT=0` -- no new wrapper applied, byte-for-byte same live behavior.
+- `TradeExecutor._spread_ok` confirmed against this account's real live tick (spread was 0.0 at test time, consistent with PR #49) and, since that made the "below threshold" branch untestable live, against a stubbed tick (bid=1.10000/ask=1.10015, point=0.00001 -> 15 points): `MAX_SPREAD_POINTS=0` -> `True` (disabled), `=10` -> `False` (15 > 10), `=20` -> `True` (15 <= 20).
+- `TradeExecutor._resolve_sizing_balance`/`_daily_cap_reason`/`_accumulate_daily_pnl` confirmed against stubs: sizing balance correctly returns the `$1000` override; fresh state -> `None`; `daily_profit=250` -> `"daily_target_reached"`; `daily_profit=-25` (over the `$20` = 2%-of-$1000 max loss) -> `"daily_max_loss_reached"`; setting `last_reset` to yesterday resets `daily_profit` to `0.0` and clears the cap reason on the next check; `execute_signals` confirmed to short-circuit (prints the cap message, no `"Executing trade"` line) when capped; `_resolve_lot` re-confirmed still returns `0.2` lots against the `$1000` basis (refactor didn't change behavior); `_accumulate_daily_pnl` confirmed additive (`12.5` then `-3.0` -> `9.5`).
+- Full end-to-end smoke test: real MT5 connection, real `app.main.app` via `TestClient`, `GET /status` returned `200` with `daily_profit: 0.0`, `daily_cap_reason: None`, confirming the whole wiring holds together through the actual composition root (`app/factory.py`), not just in isolation.
+
+## Follow-up: decorator attribute proxying (fixed, same branch)
+
+The `SessionFilteredSignalStrategy` wrapper-proxying gap flagged below was fixed on this same branch rather than left open, since it was small, low-risk, and directly related. `SessionFilteredSignalStrategy`, `NTickConfirmedSignalStrategy`, and `AtrMomentumFilteredSignalStrategy` each now define `__getattr__` forwarding to the strategy they wrap, so `on_new_tick`/`get_confirmed_signal` stay reachable through the wrapper chain regardless of stacking order. Confirmed via a real `NTickConfirmedSignalStrategy` wrapped by `SessionFilteredSignalStrategy`: `hasattr(session, "on_new_tick")` and `hasattr(session, "get_confirmed_signal")` both now `True`, and driving `session.on_new_tick(...)` twice correctly confirms a signal retrievable via `session.get_confirmed_signal()`. Re-confirmed `strategy_factory(config=Config)` at current live config still returns `hasattr(strategy, "on_new_tick") == False` -- no behavior change today, since `N_TICK_CONFIRMATION=1` means nothing underneath implements it yet regardless of proxying.
+
+## Follow-ups raised for the user, not actioned here
+
+- `DAILY_TARGET_PROFIT=200`/`DAILY_MAX_RISK_PERCENT=2` are now live and gate real entries -- worth revisiting now that they mean something (`$20` max daily loss against the current `$1000` sizing basis is roughly two stop-outs).
+- ATR gate and spread gate are built correctly but deliberately left disabled (`0`/`0`) pending the same backtest-validation step every other feature flag here got before being flipped on.
