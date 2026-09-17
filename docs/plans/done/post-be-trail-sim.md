@@ -1,6 +1,6 @@
 # Post-Breakeven Trailing-Stop Rule Simulation
 
-Status: in-progress
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
