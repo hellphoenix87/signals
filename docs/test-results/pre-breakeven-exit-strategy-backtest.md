@@ -32,6 +32,19 @@ New `scripts/backtest_exit_strategy.py`. For each buy/sell signal from `strategy
 
 4. **This says nothing about post-breakeven profitability.** 90%+ of trades clear this phase, but what happens next -- the hardcoded `$0.04` trailing pullback found in the code review -- is untested here and is a much more likely candidate for where real trade outcomes are decided, given how easy breakeven itself turns out to be to reach.
 
+## Counterfactual: was cutting these trades early actually a good call?
+
+For every `soft_sl`/`timed_out` trade, `--counterfactual` continues the *exact same* real tick stream from the point of the real exit onward, as if only the broker-side wide SL (`Config.DEFAULT_SL_PIPS=5`, ≈$10) existed -- no soft SL, no breakeven-timeout -- and records whether price would have recovered to breakeven, hit the wider broker SL, or neither within an extended (3000-tick) budget.
+
+| Window | Cut-short trades | Would have recovered | Would have hit broker SL | Still unresolved | Real P&L | Counterfactual P&L | Difference |
+|---|---|---|---|---|---|---|---|
+| Window 1 | 14 | 10 (71.4%), avg +$0.16, avg 364 extra ticks | 1 (7.1%), avg -$11.20, avg 33 extra ticks | 3 (21.4%), avg -$4.00 | -$25.40 | -$21.60 | **-$3.80 (early cuts hurt)** |
+| Window 2 | 3 | 2 (66.7%), avg +$0.10, avg 1166 extra ticks | 1 (33.3%), avg -$10.20, avg 2025 extra ticks | -- | -$12.60 | -$10.00 | **-$2.60 (early cuts hurt)** |
+
+**Consistent in direction across both windows, but on a genuinely tiny sample** (14 and 3 trades respectively -- a single trade landing in a different bucket would swap the sign). With that caveat prominent: the *majority* of trades this layer cuts short (67-71%) would have recovered to breakeven on their own if left alone, just taking a while (avg 364-1166 extra ticks -- several minutes of continued exposure). A smaller fraction (7-33%) genuinely would have gone on to hit the broker's wider stop, validating that the safety net does protect against real tail losses. But because the "would have recovered" group is both larger and only loses to the real outcome by a small margin (the real cut's own loss vs. the counterfactual's near-zero result), while the "would have hit broker SL" group's benefit is concentrated in just one trade per window, the **net dollar effect across the affected trades is currently slightly negative in both windows** -- cutting early cost more in foreclosed recoveries than it saved in avoided bigger losses, in this specific sample.
+
+**What this does and doesn't mean**: this is not strong enough evidence to say "remove the soft SL/timeout" -- the sample is far too small (17 trades total across both windows) for that conclusion to be reliable, and "would have recovered to breakeven" isn't necessarily equivalent in risk terms to "resolved fast" (it means several extra minutes of continued market exposure with no protection beyond the wide broker stop, which this simple counterfactual doesn't price in). What it does mean: the working assumption that "cutting early is obviously protective" is not obviously true here either -- the data available so far points the other way, mildly, and this deserves a larger sample before drawing a real conclusion either way.
+
 ## Caveats
 
 - Lot size is fixed at a documented `0.2`, not derived per-trade via `RiskManager` -- doesn't change the tick-timing analysis (which is spread/price-driven, not size-driven) but the dollar amounts scale linearly with whatever the real lot size is at trade time.
