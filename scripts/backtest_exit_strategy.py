@@ -42,10 +42,31 @@ budget ("still_unresolved"). This isolates the value of the
 pre-breakeven soft-SL/timeout layer specifically, using the exact same
 price path both simulations saw, not a separate/resampled one.
 
+`--disable-timeout` answers a narrower follow-up: not "remove the whole
+pre-breakeven layer" (that's `--counterfactual`), but "remove just the
+90-tick breakeven-timeout, keep the soft SL." Wires
+`ExitTradeConfig(be_arming_ticks=0)` -- the real `LossExitManager`'s own
+documented way to disable it -- so `timed_out` can never occur; every
+other exit parameter (soft SL, HTF gating) stays at its real `Config`
+value.
+
+`--measure-post-be` is purely observational, not a rule test: for every
+`reached_be` trade, continues watching the same real tick stream PAST
+arming with NO exit logic applied at all, tracking the running peak
+profit and the largest pullback ever seen from *whatever the running
+peak was at that moment* (not just the final peak -- that's the number
+a trailing gap actually has to survive without getting stopped out by
+ordinary noise before a new high is made). Exists to answer "what
+should the post-breakeven trailing gap actually be sized at," grounded
+in this account's real price action instead of a guessed constant --
+see the code review finding that `ProfitExitManager`'s real trailing
+gap is a hardcoded $0.04, disconnected from `Config` entirely.
+
 Usage:
     pipenv run python scripts/backtest_exit_strategy.py [--symbol EURUSD]
         [--weeks 4] [--start-pos 1] [--lot 0.2] [--max-ticks-per-trade 500]
         [--counterfactual] [--counterfactual-max-ticks 3000]
+        [--disable-timeout] [--measure-post-be] [--post-be-max-ticks 3000]
 
 Per-trade results are written to a CSV under `backtest_results/` for
 offline analysis; the aggregate summary is printed to stdout.
@@ -58,9 +79,10 @@ import csv
 import datetime
 import io
 import logging
+import statistics
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import MetaTrader5 as mt5
 
@@ -116,6 +138,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--counterfactual", action="store_true", help="For every soft_sl/timed_out trade, continue the same real tick stream as if only the broker-side wide SL existed, to see whether the early cut was actually a good call")
     parser.add_argument("--counterfactual-max-ticks", type=int, default=3000, help="Extended tick budget for the counterfactual continuation")
     parser.add_argument("--disable-timeout", action="store_true", help="Disable only the breakeven-timeout (EXIT_BE_ARMING_TICKS<=0, the real LossExitManager's own documented way to turn it off) -- the soft SL stays active. Answers 'what if we removed just the 90-tick rule, not the whole pre-breakeven layer'. Automatically raises --max-ticks-per-trade to --counterfactual-max-ticks unless set higher explicitly, since stalled trades can now take much longer to resolve.")
+    parser.add_argument("--measure-post-be", action="store_true", help="For every reached_be trade, continue observing the same real tick stream PAST arming -- with no exit rule applied at all, just watching -- to measure real post-breakeven price excursion (peak profit reached, how long it took, the largest pullback ever seen from a running peak). Answers 'what should the post-breakeven trailing gap actually be', grounded in real data instead of a guess. Does not affect the pre-breakeven outcome/behavior at all -- purely observational.")
+    parser.add_argument("--post-be-max-ticks", type=int, default=3000, help="How many ticks past arming to observe for --measure-post-be")
     return parser.parse_args()
 
 
@@ -132,6 +156,8 @@ def simulate_pre_be_phase(
     sl_price_distance: float,
     run_counterfactual: bool,
     needs_conversion: bool,
+    measure_post_be: bool = False,
+    post_be_max_ticks: int = 0,
 ) -> dict:
     """Open a simulated position at the first real tick at/after
     `entry_time` and replay real historical ticks through the real
@@ -142,6 +168,7 @@ def simulate_pre_be_phase(
     `run_counterfactual` and the real outcome is `soft_sl`/`timed_out`, the
     counterfactual continuation (`simulate_counterfactual`) can replay the
     exact same remaining price path rather than a separately-fetched one.
+    Same idea for `measure_post_be` when the real outcome is `reached_be`.
     """
     ticks = mt5.copy_ticks_from(symbol, entry_time, fetch_ticks, mt5.COPY_TICKS_ALL)
     if ticks is None or len(ticks) == 0:
@@ -205,6 +232,19 @@ def simulate_pre_be_phase(
         )
         result.update(cf)
 
+    if measure_post_be and result["outcome"] == "reached_be":
+        pb = measure_post_be_excursion(
+            ticks=ticks,
+            arm_idx=resolved_idx,
+            side=side,
+            entry_price=entry_price,
+            lot=lot,
+            contract_size=contract_size,
+            needs_conversion=needs_conversion,
+            max_extra_ticks=post_be_max_ticks,
+        )
+        result.update(pb)
+
     return result
 
 
@@ -255,6 +295,65 @@ def simulate_counterfactual(
     }
 
 
+def measure_post_be_excursion(
+    *,
+    ticks,
+    arm_idx: int,
+    side: str,
+    entry_price: float,
+    lot: float,
+    contract_size: float,
+    needs_conversion: bool,
+    max_extra_ticks: int,
+) -> dict:
+    """After breakeven arms (at `arm_idx` within `ticks`), continue
+    observing the same real tick stream with NO exit rule applied at all --
+    purely watching what real post-breakeven price action does, to
+    calibrate what a real trailing-profit gap should be sized at, instead
+    of guessing. Tracks the running peak profit and the largest pullback
+    ever seen from *whatever the running peak was at that moment* (not just
+    the final peak) -- that's the number a trail gap actually has to survive
+    to not be stopped out by ordinary noise before a new high is made.
+
+    Returns `{"post_be_peak_profit", "post_be_ticks_to_peak",
+    "post_be_max_drawdown_from_peak", "post_be_final_profit",
+    "post_be_ticks_observed"}`.
+    """
+    end_idx = min(len(ticks), arm_idx + max_extra_ticks)
+
+    running_peak: Optional[float] = None
+    peak_profit: Optional[float] = None
+    ticks_to_peak = 0
+    max_drawdown = 0.0
+    final_profit: Optional[float] = None
+
+    for idx in range(arm_idx, end_idx):
+        t = ticks[idx]
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        final_profit = profit
+
+        if running_peak is None or profit > running_peak:
+            running_peak = profit
+            peak_profit = profit
+            ticks_to_peak = idx - arm_idx
+        else:
+            drawdown = running_peak - profit
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+    return {
+        "post_be_peak_profit": peak_profit,
+        "post_be_ticks_to_peak": ticks_to_peak,
+        "post_be_max_drawdown_from_peak": max_drawdown,
+        "post_be_final_profit": final_profit,
+        "post_be_ticks_observed": end_idx - arm_idx,
+    }
+
+
 def run(
     symbol: str,
     weeks: float,
@@ -264,6 +363,8 @@ def run(
     run_counterfactual: bool,
     counterfactual_max_ticks: int,
     disable_timeout: bool,
+    measure_post_be: bool,
+    post_be_max_ticks: int,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -278,7 +379,11 @@ def run(
     contract_size = broker.get_lot_value(symbol)
     sl_pips = float(getattr(Config, "DEFAULT_SL_PIPS", 5.0) or 5.0)
     sl_price_distance = broker.get_pip_size(symbol) * sl_pips
-    fetch_ticks = max(max_ticks, counterfactual_max_ticks) if run_counterfactual else max_ticks
+    fetch_ticks = max_ticks
+    if run_counterfactual:
+        fetch_ticks = max(fetch_ticks, counterfactual_max_ticks)
+    if measure_post_be:
+        fetch_ticks = max(fetch_ticks, max_ticks + post_be_max_ticks)
 
     account_info = mt5.account_info()
     account_currency = account_info.currency if account_info else "USD"
@@ -348,6 +453,8 @@ def run(
                     sl_price_distance=sl_price_distance,
                     run_counterfactual=run_counterfactual,
                     needs_conversion=needs_conversion,
+                    measure_post_be=measure_post_be,
+                    post_be_max_ticks=post_be_max_ticks,
                 )
                 results.append(
                     {
@@ -379,6 +486,8 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
         "outcome", "profit", "ticks_used", "entry_price",
         "cf_outcome", "cf_profit", "cf_extra_ticks",
+        "post_be_peak_profit", "post_be_ticks_to_peak", "post_be_max_drawdown_from_peak",
+        "post_be_final_profit", "post_be_ticks_observed",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -441,6 +550,26 @@ def summarize(results: list[dict], symbol: str) -> None:
     print(f"  Difference (real minus counterfactual):     ${real_total - cf_total:+.2f}  "
           f"({'early cuts helped' if real_total > cf_total else 'early cuts hurt' if real_total < cf_total else 'no difference'})")
 
+    measured = [r for r in results if r.get("post_be_peak_profit") is not None]
+    if not measured:
+        return
+
+    print(f"\n--- Post-breakeven excursion (observed only, no exit rule applied) for {len(measured)} reached_be trades ---")
+
+    def _pctiles(values: list[float], label: str) -> None:
+        values = sorted(values)
+        n = len(values)
+        med = statistics.median(values)
+        p10 = values[int(n * 0.10)]
+        p90 = values[min(int(n * 0.90), n - 1)]
+        avg = statistics.mean(values)
+        print(f"  {label:28s}: avg={avg:+.3f}  median={med:+.3f}  p10={p10:+.3f}  p90={p90:+.3f}")
+
+    _pctiles([r["post_be_peak_profit"] for r in measured], "peak profit reached ($)")
+    _pctiles([r["post_be_ticks_to_peak"] for r in measured], "ticks to reach that peak")
+    _pctiles([r["post_be_max_drawdown_from_peak"] for r in measured], "max drawdown from peak ($)")
+    _pctiles([r["post_be_final_profit"] for r in measured], "final profit at window end ($)")
+
 
 def main() -> None:
     args = parse_args()
@@ -454,6 +583,8 @@ def main() -> None:
         args.counterfactual,
         args.counterfactual_max_ticks,
         args.disable_timeout,
+        args.measure_post_be,
+        args.post_be_max_ticks,
     )
 
 
