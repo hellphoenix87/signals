@@ -25,7 +25,7 @@ All numbers below are from the real, fixed code path (session filter correctly a
 | `--ntick 3` | **49.2%** | 122 |
 | `--ntick 5` | 48.6% | 109 |
 
-Breakeven at 8:5 is 41.7%. In window 1, every n-tick configuration clears breakeven and beats the baseline, peaking at N=3.
+Breakeven at 8:5 is 38.46% (`stop/(target+stop)` = `5/13`; a since-corrected earlier version of this report stated 41.7%, the *7:5* ratio's breakeven from before the zero-spread retune -- unrelated to this backtest's conclusion, but worth getting right). In window 1, every n-tick configuration clears breakeven and beats the baseline, peaking at N=3.
 
 **Window 2** (the preceding, non-overlapping 4 weeks -- same out-of-sample check every other investigation in this repo has used):
 
@@ -34,7 +34,7 @@ Breakeven at 8:5 is 41.7%. In window 1, every n-tick configuration clears breake
 | Baseline | 39.1% | 110 |
 | `--ntick 3` | 36.7% | 98 |
 
-**Window 2 again contradicts window 1**: `--ntick 3` (36.7%) underperforms baseline (39.1%) and falls further below breakeven, where window 1 showed a clear improvement. Same conclusion as the first pass (which used a manual post-hoc correction rather than the real fix) -- this isn't an artifact of that correction being imprecise; the real, fixed code reproduces the identical qualitative result. This is exactly the failure mode this project's methodology exists to catch (see `mtf-gate-sensitivity-sweep.md`'s own "gate-tuning conclusions are tied to the specific indicator behavior they were tuned against" lesson, and every ratio/weight sweep's insistence on a second window before trusting a result).
+**Window 2 again contradicts window 1**: `--ntick 3` (36.7%) underperforms baseline (39.1%) and falls below the 38.46% breakeven, where window 1 showed a clear improvement. Baseline itself is only marginally above breakeven here (+0.6 pts) -- window 2 is a thin result for MTF generally, not just for n-tick -- but n-tick still makes it worse, not better. Same conclusion as the first pass (which used a manual post-hoc correction rather than the real fix) -- this isn't an artifact of that correction being imprecise; the real, fixed code reproduces the identical qualitative result. This is exactly the failure mode this project's methodology exists to catch (see `mtf-gate-sensitivity-sweep.md`'s own "gate-tuning conclusions are tied to the specific indicator behavior they were tuned against" lesson, and every ratio/weight sweep's insistence on a second window before trusting a result).
 
 ## Conclusion
 
