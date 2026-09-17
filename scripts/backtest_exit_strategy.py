@@ -353,6 +353,12 @@ def run(
                     {
                         "time": m1_candle.get("time"),
                         "direction": final_signal,
+                        "confidence": signal.get("confidence"),
+                        "adx": signal.get("adx"),
+                        "m15_bias": signal.get("m15_bias"),
+                        "m5_confirm": signal.get("m5_confirm"),
+                        "m1_entry": signal.get("m1_entry"),
+                        "pullback_completed": signal.get("pullback_completed"),
                         **sim,
                     }
                 )
@@ -370,7 +376,8 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
     run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = RESULTS_DIR / f"{symbol}_exit_strategy_{run_stamp}.csv"
     fieldnames = [
-        "time", "direction", "outcome", "profit", "ticks_used", "entry_price",
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "outcome", "profit", "ticks_used", "entry_price",
         "cf_outcome", "cf_profit", "cf_extra_ticks",
     ]
     with open(path, "w", newline="") as f:
