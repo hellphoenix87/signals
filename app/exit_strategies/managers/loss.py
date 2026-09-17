@@ -36,8 +36,10 @@ class LossExitManager:
     def check_exit_on_tick(self, position, tick, state: PosState):
         """Protective exit check for one position/tick.
 
-        Before break-even is armed: exits immediately if profit drops to
-        `-$5` or lower (`reason="profit_drop"`); arms break-even the moment
+        Before break-even is armed: exits immediately once the configured
+        pre-breakeven soft SL is breached (`reason="profit_drop"`) --
+        `config.max_loss_money`/`max_loss_price`/`max_loss_pips` are three
+        unit choices for the same cap (see `_pre_be_soft_sl_hit`); arms break-even the moment
         `is_break_even(position)` is true. If the arming window
         (`config.be_arming_ticks`) expires without ever reaching break-even,
         force-closes (`reason="failed_to_reach_be"`) -- unless *this exact
@@ -66,8 +68,9 @@ class LossExitManager:
         if profit is None:
             profit = 0.0
 
+        price = get_tick_value(tick, "bid") if side == "buy" else get_tick_value(tick, "ask")
+
         be_arming_ticks = int(getattr(self.config, "be_arming_ticks", 20))
-        drop_profit = -5
 
         if not hasattr(state, "be_armed"):
             state.be_armed = False
@@ -80,7 +83,9 @@ class LossExitManager:
         ):
             state.be_arming_ticks += 1
 
-            if profit <= drop_profit:
+            if self._pre_be_soft_sl_hit(
+                profit=profit, price=price, entry=entry, side=side, symbol=symbol
+            ):
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
@@ -133,3 +138,38 @@ class LossExitManager:
                         reason="be_recovered_after_unprofit",
                     )
             return None
+
+    def _pre_be_soft_sl_hit(
+        self, *, profit: float, price, entry: float, side: str, symbol: str
+    ) -> bool:
+        """Return whether the pre-breakeven soft SL has been breached, via
+        whichever of `config.max_loss_money`/`max_loss_price`/`max_loss_pips`
+        is configured (`> 0`) -- three unit choices for the same cap. If more
+        than one is set, exits on whichever fires first (the tightest
+        configured cap wins). All three at `0` (the "disabled" convention
+        used throughout this codebase) means no pre-breakeven soft SL at
+        all -- protection then relies solely on the broker-side SL and the
+        breakeven-timeout force-close.
+        """
+        max_loss_money = float(getattr(self.config, "max_loss_money", 0.0) or 0.0)
+        if max_loss_money > 0 and profit <= -max_loss_money:
+            return True
+
+        if price is None or entry is None:
+            return False
+
+        adverse_distance = (entry - price) if side == "buy" else (price - entry)
+
+        max_loss_price = float(getattr(self.config, "max_loss_price", 0.0) or 0.0)
+        if max_loss_price > 0 and adverse_distance >= max_loss_price:
+            return True
+
+        max_loss_pips = float(getattr(self.config, "max_loss_pips", 0.0) or 0.0)
+        if max_loss_pips > 0:
+            max_loss_price_from_pips = (
+                self._pips_to_price(symbol=symbol, pips=max_loss_pips) or 0.0
+            )
+            if max_loss_price_from_pips > 0 and adverse_distance >= max_loss_price_from_pips:
+                return True
+
+        return False
