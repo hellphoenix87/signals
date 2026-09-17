@@ -194,7 +194,7 @@ def strategy_factory(
         )
 
     if use_n_tick and n_ticks > 1:
-        strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks)
+        strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks, config=config)
 
     if getattr(config, "USE_SESSION_FILTER", False):
         blocked_hours = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC", [])

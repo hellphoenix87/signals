@@ -134,7 +134,15 @@ class SignalOrchestrator:
                 )
 
         if hasattr(self.signal_generator, "get_confirmed_signal"):
-            sig = self.signal_generator.get_confirmed_signal()
+            tick_epoch = getattr(tick, "time", None)
+            try:
+                candle_frame_time = datetime.fromtimestamp(tick_epoch) if tick_epoch else None
+            except Exception:
+                candle_frame_time = None
+            try:
+                sig = self.signal_generator.get_confirmed_signal(candle_frame_time)
+            except TypeError:
+                sig = self.signal_generator.get_confirmed_signal()
             if sig and (sig.get("final_signal") in ("buy", "sell")):
                 self._last_signal = sig
                 try:
