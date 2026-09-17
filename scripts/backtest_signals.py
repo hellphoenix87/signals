@@ -58,11 +58,22 @@ holding entries during 08:00-18:59 UTC regardless of the underlying
 signal. Useful to force it on/verify explicitly even if a future config
 change flips the default back off.
 
-Not supported here: n-tick confirmation (needs live tick data to ever
-confirm a signal, which a bar-only replay can't provide). Full
-exit-strategy-aware backtesting (real trade lifecycle simulation via the
-actual exit managers, not this fixed target/stop proxy) is deliberately
-deferred until the exit strategy itself is finalized.
+`--ntick N` (N>1) tests raising `Config.N_TICK_CONFIRMATION` to N: for
+each candle-close signal, wraps the strategy in the real
+`NTickConfirmedSignalStrategy` and, when it marks a new pending
+buy/sell, fetches *real* historical ticks (`mt5.copy_ticks_range`) for
+the ~one-bar window between that candle's close and the next's --
+exactly as long as the wrapper's own hard-reset-on-next-candle gives a
+pending signal to confirm live -- and feeds them through `on_new_tick`.
+If confirmed, the outcome is evaluated from the actual confirmed tick
+price (not the candle close). Unconfirmed pending signals are dropped,
+same as live. Not compatible with `--quick-check` (target/stop outcome
+only). Uses `Config`'s own default `min_pip_move=0.0` (no CLI override
+-- there's no matching `Config` field for it to test against anyway).
+
+Full exit-strategy-aware backtesting (real trade lifecycle simulation
+via the actual exit managers, not this fixed target/stop proxy) is
+deliberately deferred until the exit strategy itself is finalized.
 """
 
 import argparse
@@ -74,7 +85,7 @@ import io
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import MetaTrader5 as mt5
 
@@ -120,6 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rsi-weight", type=float, default=None, help="Override Config.ENTRY_RSI_WEIGHT for the single-timeframe vote (default: Config's own value, 2.0)")
     parser.add_argument("--session-filter", action="store_true", help="Force Config.USE_SESSION_FILTER on for this run, regardless of Config's own value")
     parser.add_argument("--ml-entry", action="store_true", help="Use the trained ML entry model (Config.ML_MODEL_PATH) instead of the hand-coded indicator vote for the base/entry layer. Not compatible with --indicators.")
+    parser.add_argument("--ntick", type=int, default=None, help="Test raising Config.N_TICK_CONFIRMATION to this value (>1), confirming each candle-close signal against real historical ticks. Not compatible with --quick-check.")
     return parser.parse_args()
 
 
@@ -171,6 +183,87 @@ def evaluate_signal(
             return "win", i - entry_index
 
     return "undecided", end - 1 - entry_index
+
+
+def evaluate_signal_from_price(
+    candles: list[dict],
+    start_index: int,
+    entry_price: float,
+    direction: str,
+    pip_size: float,
+    target_pips: float,
+    stop_pips: float,
+    forward_bars: int,
+    spread_pips: float = 0.0,
+) -> tuple[str, int]:
+    """Same target/stop win-loss-undecided simulation as `evaluate_signal`,
+    but for a signal confirmed at a real (tick-level) `entry_price` rather
+    than a candle's own close -- scans forward from `start_index` (the
+    first full bar after confirmation) instead of `entry_index + 1`."""
+    spread_distance = spread_pips * pip_size
+    target_distance = target_pips * pip_size + spread_distance
+    stop_distance = stop_pips * pip_size - spread_distance
+    if stop_distance <= 0:
+        return "loss", 0
+    end = min(start_index + forward_bars, len(candles))
+
+    for i in range(start_index, end):
+        high = float(candles[i]["high"])
+        low = float(candles[i]["low"])
+        if direction == "buy":
+            hit_stop = low <= entry_price - stop_distance
+            hit_target = high >= entry_price + target_distance
+        else:
+            hit_stop = high >= entry_price + stop_distance
+            hit_target = low <= entry_price - target_distance
+
+        if hit_stop:
+            return "loss", i - start_index
+        if hit_target:
+            return "win", i - start_index
+
+    return "undecided", max(end - start_index, 0)
+
+
+def simulate_ntick_confirmation(
+    strategy: Any, symbol: str, candles: list[dict], i: int, entry_seconds: int
+) -> Optional[dict]:
+    """After `strategy.generate_signal` just marked a new pending buy/sell
+    (`strategy._waiting`), fetch real historical ticks for the ~one-bar
+    window between candle `i`'s close and the next candle's close, and
+    feed them through `on_new_tick` -- mirroring the live orchestrator's
+    tick loop and the wrapper's own hard-reset-on-next-candle behavior (a
+    pending signal only gets this one candle's worth of real ticks to
+    confirm). Returns `{"direction", "entry_price"}` if confirmed within
+    that window, else `None` (dropped, same as live -- including a
+    confirmation vetoed by `SessionFilteredSignalStrategy.get_confirmed_signal`
+    during blocked hours, exactly as the real orchestrator's call would be).
+    """
+    close_time = candles[i]["time"] + datetime.timedelta(seconds=entry_seconds)
+    if i + 1 < len(candles):
+        window_end = candles[i + 1]["time"] + datetime.timedelta(seconds=entry_seconds)
+    else:
+        window_end = close_time + datetime.timedelta(seconds=entry_seconds)
+
+    ticks = mt5.copy_ticks_range(symbol, close_time, window_end, mt5.COPY_TICKS_ALL)
+    if ticks is None:
+        return None
+
+    for t in ticks:
+        strategy.on_new_tick(float(t["bid"]))
+        tick_time = datetime.datetime.fromtimestamp(int(t["time"]))
+        try:
+            confirmed = strategy.get_confirmed_signal(tick_time)
+        except TypeError:
+            confirmed = strategy.get_confirmed_signal()
+        if confirmed:
+            direction = (confirmed.get("final_signal") or "").lower()
+            entry_price = confirmed.get("entry_price")
+            if direction in ("buy", "sell") and entry_price is not None:
+                return {"direction": direction, "entry_price": float(entry_price)}
+            return None
+
+    return None
 
 
 def evaluate_immediate_move(
@@ -236,6 +329,7 @@ def run_backtest(
     spread_pips: float = 0.0,
     start_pos: int = 1,
     config: Any = Config,
+    ntick_n: Optional[int] = None,
 ) -> None:
     """Fetch history, replay it through the real signal generator, and print a summary.
 
@@ -245,6 +339,13 @@ def run_backtest(
     `config` defaults to the real `Config` but can be a subclass override
     (e.g. a different `ENTRY_RSI_WEIGHT`) for weight-sensitivity sweeps,
     without touching live settings.
+
+    `ntick_n`, when given, wraps the strategy in the real
+    `NTickConfirmedSignalStrategy` (via `strategy_factory`'s own
+    `use_n_tick`/`n_ticks` overrides, so the live wrapper order is
+    reproduced exactly) and confirms each pending signal against real
+    historical ticks instead of evaluating the candle-close signal
+    directly. Not compatible with `quick_check`.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -261,9 +362,16 @@ def run_backtest(
         if indicator_names
         else None
     )
-    strategy = strategy_factory(config=config, indicators=indicators, use_multi=False)
+    strategy = strategy_factory(
+        config=config,
+        indicators=indicators,
+        use_multi=False,
+        use_n_tick=bool(ntick_n),
+        n_ticks=ntick_n or 0,
+    )
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
+    entry_seconds = TF_SECONDS.get(int(getattr(config, "TIMEFRAME", mt5.TIMEFRAME_M1)), 60)
 
     min_candles = int(getattr(config, "MIN_CANDLES_FOR_INDICATORS", 1) or 1)
     results: list[dict] = []
@@ -274,6 +382,29 @@ def run_backtest(
             for i in range(min_candles, len(candles)):
                 window = candles[: i + 1]
                 signal = strategy.generate_signal(window)
+
+                if ntick_n:
+                    if not getattr(strategy, "_waiting", False):
+                        continue
+                    confirmed = simulate_ntick_confirmation(
+                        strategy, symbol, candles, i, entry_seconds
+                    )
+                    if confirmed is None:
+                        continue
+                    outcome, bars = evaluate_signal_from_price(
+                        candles, i + 1, confirmed["entry_price"], confirmed["direction"],
+                        pip_size, target_pips, stop_pips, forward_bars, spread_pips,
+                    )
+                    results.append(
+                        {
+                            "time": candles[i].get("time"),
+                            "direction": confirmed["direction"],
+                            "outcome": outcome,
+                            "bars": bars,
+                        }
+                    )
+                    continue
+
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
@@ -325,6 +456,7 @@ def run_mtf_backtest(
     label: str | None = None,
     spread_pips: float = 0.0,
     start_pos: int = 1,
+    ntick_n: Optional[int] = None,
 ) -> None:
     """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
     MACD/M1 entry) and print a summary.
@@ -338,6 +470,11 @@ def run_mtf_backtest(
     `config` defaults to the real `Config` but can be a subclass override
     (e.g. a different `MTF_SCORE_THRESHOLD`/`MTF_ADX_MIN_STRENGTH`) for
     gate-sensitivity sweeps, without touching live settings.
+
+    `ntick_n`, when given, wraps the MTF strategy in the real
+    `NTickConfirmedSignalStrategy` (reproducing the live wrapper order
+    exactly) and confirms each pending signal against real historical
+    ticks. Not compatible with `quick_check`.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -367,7 +504,12 @@ def run_mtf_backtest(
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
     entry_seconds = TF_SECONDS[tf_entry]
 
-    strategy = strategy_factory(config=config, use_multi=True)
+    strategy = strategy_factory(
+        config=config,
+        use_multi=True,
+        use_n_tick=bool(ntick_n),
+        n_ticks=ntick_n or 0,
+    )
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
 
@@ -389,6 +531,29 @@ def run_mtf_backtest(
                     tf_bias: m15_candles[:m15_ptr],
                 }
                 signal = strategy.generate_signal(candles_by_tf)
+
+                if ntick_n:
+                    if not getattr(strategy, "_waiting", False):
+                        continue
+                    confirmed = simulate_ntick_confirmation(
+                        strategy, symbol, m1_candles, i, entry_seconds
+                    )
+                    if confirmed is None:
+                        continue
+                    outcome, bars = evaluate_signal_from_price(
+                        m1_candles, i + 1, confirmed["entry_price"], confirmed["direction"],
+                        pip_size, target_pips, stop_pips, forward_bars, spread_pips,
+                    )
+                    results.append(
+                        {
+                            "time": m1_candle.get("time"),
+                            "direction": confirmed["direction"],
+                            "outcome": outcome,
+                            "bars": bars,
+                        }
+                    )
+                    continue
+
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
@@ -554,11 +719,20 @@ def main() -> None:
     n_tick_active = getattr(Config, "USE_N_TICK_CONFIRMATION", False) and int(
         getattr(Config, "N_TICK_CONFIRMATION", 0) or 0
     ) > 1
-    if n_tick_active:
+    if n_tick_active and not args.ntick:
         print(
-            "N-tick confirmation is on -- it needs live tick data to confirm "
-            "signals, which this bar-only replay can't provide. Aborting."
+            "Config.N_TICK_CONFIRMATION is on but --ntick wasn't passed -- this "
+            "would silently replay without n-tick confirmation instead of what's "
+            "actually configured. Pass --ntick <N>, or turn the flag off. Aborting."
         )
+        sys.exit(1)
+
+    if args.ntick is not None and args.ntick <= 1:
+        print("--ntick must be > 1 (that's the threshold at which the wrapper actually engages). Aborting.")
+        sys.exit(1)
+
+    if args.ntick and args.quick_check:
+        print("--ntick evaluates confirmed entries against a target/stop; not compatible with --quick-check. Aborting.")
         sys.exit(1)
 
     if args.indicators and args.mtf:
@@ -592,6 +766,7 @@ def main() -> None:
             quick_check=args.quick_check, horizon_bars=args.horizon_bars,
             config=config, label="_".join(label_parts) or None,
             spread_pips=args.spread_pips, start_pos=args.start_pos,
+            ntick_n=args.ntick,
         )
     else:
         indicator_names = (
@@ -615,6 +790,7 @@ def main() -> None:
             indicator_names=indicator_names,
             spread_pips=args.spread_pips, start_pos=args.start_pos,
             config=config,
+            ntick_n=args.ntick,
         )
 
 

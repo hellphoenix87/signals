@@ -1,4 +1,5 @@
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Union
+import MetaTrader5 as mt5
 from app.signals.strategies.base_signal_strategy import BaseSignalStrategy
 
 
@@ -40,6 +41,29 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
         self._last_signal = None
         self._last_m1_signal_id = None
         self._confirmed_signal = None
+
+    def __getattr__(self, name):
+        """Forward anything not defined here to the wrapped strategy, so
+        this decorator stays transparent regardless of wrapper order."""
+        return getattr(self.base, name)
+
+    def _last_entry_candle(self, candles: Union[List[dict], dict]) -> Optional[dict]:
+        """Return the latest entry-timeframe candle regardless of whether
+        `candles` is a flat list (single-timeframe) or a `{timeframe: [...]}`
+        dict (MTF's `candles_by_tf`, when this wraps
+        `MultiTimeframeStrongSignalStrategy`). Mirrors the timeframe-key
+        lookup `MultiTimeframeStrongSignalStrategy._get` already does, using
+        `config.TF_ENTRY` to pick the right key in the dict case."""
+        if isinstance(candles, dict):
+            tf_entry = int(getattr(self.config, "TF_ENTRY", mt5.TIMEFRAME_M1))
+            seq = candles.get(tf_entry)
+            if seq is None:
+                lower_map = {str(k).lower(): v for k, v in candles.items()}
+                seq = lower_map.get(str(tf_entry).lower()) or lower_map.get(
+                    f"m{tf_entry}"
+                )
+            return (seq or [None])[-1]
+        return candles[-1] if candles else None
 
     def on_new_tick(self, price: float, spread_points: Optional[float] = None):
         if not self._waiting or self._pending_signal not in ("buy", "sell"):
@@ -100,7 +124,7 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
             self._tick_results = []
             self._last_tick_price = self._pending_entry_price
 
-    def generate_signal(self, candles: List[dict], *args, **kwargs):
+    def generate_signal(self, candles: Union[List[dict], dict], *args, **kwargs):
         if self.logger:
             self.logger.info(
                 f"[NTick] generate_signal called. Confirmed signal buffer: {self._confirmed_signal}"
@@ -115,7 +139,7 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
         # 2. Get base signal for this candle
         signal = self.base.generate_signal(candles, *args, **kwargs)
         raw_signal = signal.get("final_signal", "hold")
-        last_candle = candles[-1] if candles else None
+        last_candle = self._last_entry_candle(candles)
         last_close = last_candle.get("close") if last_candle else None
         m1_signal_id = last_candle.get("time") if last_candle else None
 
