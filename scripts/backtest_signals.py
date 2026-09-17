@@ -235,7 +235,9 @@ def simulate_ntick_confirmation(
     tick loop and the wrapper's own hard-reset-on-next-candle behavior (a
     pending signal only gets this one candle's worth of real ticks to
     confirm). Returns `{"direction", "entry_price"}` if confirmed within
-    that window, else `None` (dropped, same as live).
+    that window, else `None` (dropped, same as live -- including a
+    confirmation vetoed by `SessionFilteredSignalStrategy.get_confirmed_signal`
+    during blocked hours, exactly as the real orchestrator's call would be).
     """
     close_time = candles[i]["time"] + datetime.timedelta(seconds=entry_seconds)
     if i + 1 < len(candles):
@@ -249,7 +251,11 @@ def simulate_ntick_confirmation(
 
     for t in ticks:
         strategy.on_new_tick(float(t["bid"]))
-        confirmed = strategy.get_confirmed_signal()
+        tick_time = datetime.datetime.fromtimestamp(int(t["time"]))
+        try:
+            confirmed = strategy.get_confirmed_signal(tick_time)
+        except TypeError:
+            confirmed = strategy.get_confirmed_signal()
         if confirmed:
             direction = (confirmed.get("final_signal") or "").lower()
             entry_price = confirmed.get("entry_price")
