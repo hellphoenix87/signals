@@ -62,11 +62,29 @@ in this account's real price action instead of a guessed constant --
 see the code review finding that `ProfitExitManager`'s real trailing
 gap is a hardcoded $0.04, disconnected from `Config` entirely.
 
+`--simulate-trail` takes the next step past `--measure-post-be`: for
+every `reached_be` trade, replays a fixed set of *actual* candidate
+trailing-gap rules (informed by `--measure-post-be`'s pooled
+percentiles) against the same tick stream in a single pass, and
+records what each rule would have actually captured -- not just the
+noise floor a rule has to survive, but real simulated P&L per rule.
+Rules are a giveback allowance from the running peak profit (flat
+dollar, or a floor-protected percentage of peak); a rule only starts
+actively enforcing once peak has grown past its own gap (trigger =
+peak - gap(peak) > 0) -- before that, the trail stays inactive rather
+than forcing an exit the moment a small peak's trigger math goes
+negative (answers open sub-question (a) from
+docs/exit-strategy-open-threads.md Thread 3: yes, there's an implicit
+minimum-profit floor before the trail engages). A reversal below
+breakeven before the trail ever engages is Thread 4's (the post-BE
+loss cap's) territory, not simulated here.
+
 Usage:
     pipenv run python scripts/backtest_exit_strategy.py [--symbol EURUSD]
         [--weeks 4] [--start-pos 1] [--lot 0.2] [--max-ticks-per-trade 500]
         [--counterfactual] [--counterfactual-max-ticks 3000]
-        [--disable-timeout] [--measure-post-be] [--post-be-max-ticks 3000]
+        [--disable-timeout] [--measure-post-be] [--simulate-trail]
+        [--post-be-max-ticks 3000]
 
 Per-trade results are written to a CSV under `backtest_results/` for
 offline analysis; the aggregate summary is printed to stdout.
@@ -99,6 +117,19 @@ from scripts.backtest_signals import fetch_history, TF_SECONDS
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "backtest_results"
 M1_BARS_PER_TRADING_WEEK = 5 * 24 * 60
+
+# Candidate post-breakeven trailing-gap rules for --simulate-trail, informed
+# by the pooled --measure-post-be percentiles (median drawdown-from-peak
+# $6.49, p25 $4.70, p75 $9.55) gathered across 7 pairs x 3 windows. Each maps
+# the running peak profit to a giveback allowance (gap); trigger = peak -
+# gap, floored at $0 (Thread 4's post-BE loss cap owns anything below that).
+TRAIL_RULES: list[tuple[str, Any]] = [
+    ("flat5", lambda peak: 5.0),
+    ("flat7", lambda peak: 7.0),
+    ("flat9", lambda peak: 9.0),
+    ("pct40_floor2", lambda peak: max(2.0, 0.4 * peak)),
+    ("pct60_floor2", lambda peak: max(2.0, 0.6 * peak)),
+]
 
 
 def profit_needs_conversion(symbol: str, account_currency: str) -> bool:
@@ -139,7 +170,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--counterfactual-max-ticks", type=int, default=3000, help="Extended tick budget for the counterfactual continuation")
     parser.add_argument("--disable-timeout", action="store_true", help="Disable only the breakeven-timeout (EXIT_BE_ARMING_TICKS<=0, the real LossExitManager's own documented way to turn it off) -- the soft SL stays active. Answers 'what if we removed just the 90-tick rule, not the whole pre-breakeven layer'. Automatically raises --max-ticks-per-trade to --counterfactual-max-ticks unless set higher explicitly, since stalled trades can now take much longer to resolve.")
     parser.add_argument("--measure-post-be", action="store_true", help="For every reached_be trade, continue observing the same real tick stream PAST arming -- with no exit rule applied at all, just watching -- to measure real post-breakeven price excursion (peak profit reached, how long it took, the largest pullback ever seen from a running peak). Answers 'what should the post-breakeven trailing gap actually be', grounded in real data instead of a guess. Does not affect the pre-breakeven outcome/behavior at all -- purely observational.")
-    parser.add_argument("--post-be-max-ticks", type=int, default=3000, help="How many ticks past arming to observe for --measure-post-be")
+    parser.add_argument("--simulate-trail", action="store_true", help="For every reached_be trade, replay a fixed set of candidate post-breakeven trailing-gap rules (TRAIL_RULES) against the same real tick stream and record each rule's actual captured profit -- unlike --measure-post-be, this applies real exit logic per rule rather than just observing. Can be combined with --measure-post-be to get both the noise-floor percentiles and the rule outcomes from one tick fetch.")
+    parser.add_argument("--post-be-max-ticks", type=int, default=3000, help="How many ticks past arming to observe for --measure-post-be / --simulate-trail")
     return parser.parse_args()
 
 
@@ -158,6 +190,7 @@ def simulate_pre_be_phase(
     needs_conversion: bool,
     measure_post_be: bool = False,
     post_be_max_ticks: int = 0,
+    simulate_trail: bool = False,
 ) -> dict:
     """Open a simulated position at the first real tick at/after
     `entry_time` and replay real historical ticks through the real
@@ -244,6 +277,19 @@ def simulate_pre_be_phase(
             max_extra_ticks=post_be_max_ticks,
         )
         result.update(pb)
+
+    if simulate_trail and result["outcome"] == "reached_be":
+        tr = simulate_trail_rules(
+            ticks=ticks,
+            arm_idx=resolved_idx,
+            side=side,
+            entry_price=entry_price,
+            lot=lot,
+            contract_size=contract_size,
+            needs_conversion=needs_conversion,
+            max_extra_ticks=post_be_max_ticks,
+        )
+        result.update(tr)
 
     return result
 
@@ -354,6 +400,77 @@ def measure_post_be_excursion(
     }
 
 
+def simulate_trail_rules(
+    *,
+    ticks,
+    arm_idx: int,
+    side: str,
+    entry_price: float,
+    lot: float,
+    contract_size: float,
+    needs_conversion: bool,
+    max_extra_ticks: int,
+) -> dict:
+    """After breakeven arms (at `arm_idx`), replay every rule in
+    `TRAIL_RULES` against the same real tick stream in a single pass,
+    tracking one shared running peak profit and, per rule, a dynamic
+    trigger = peak - gap(peak). The rule only actively enforces once
+    that trigger is positive (peak has grown past its own gap) --
+    while the computed trigger is <= $0, the trail stays inactive
+    rather than force-exiting the moment a small peak's trigger math
+    goes negative (a small-peak reversal below breakeven there is
+    Thread 4's territory, not this trail's). The first tick a rule's
+    profit drops to/below its own (positive) trigger, that rule
+    "exits" -- records the captured profit and how many ticks it took.
+    A rule that never triggers within `max_extra_ticks` is marked
+    not-triggered and its captured profit is whatever profit was
+    observed at the end of the window (matches `post_be_final_profit`'s
+    convention for the no-exit-at-all case).
+
+    Returns `{"trail_<name>_profit", "trail_<name>_ticks",
+    "trail_<name>_triggered"}` for every name in `TRAIL_RULES`.
+    """
+    end_idx = min(len(ticks), arm_idx + max_extra_ticks)
+
+    running_peak: Optional[float] = None
+    triggered = {name: False for name, _ in TRAIL_RULES}
+    captured_profit: dict[str, Optional[float]] = {name: None for name, _ in TRAIL_RULES}
+    ticks_held: dict[str, Optional[int]] = {name: None for name, _ in TRAIL_RULES}
+    profit = 0.0
+
+    for idx in range(arm_idx, end_idx):
+        t = ticks[idx]
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+
+        if running_peak is None or profit > running_peak:
+            running_peak = profit
+
+        for name, gap_fn in TRAIL_RULES:
+            if triggered[name]:
+                continue
+            trigger_level = running_peak - gap_fn(running_peak)
+            if trigger_level > 0.0 and profit <= trigger_level:
+                triggered[name] = True
+                captured_profit[name] = profit
+                ticks_held[name] = idx - arm_idx
+
+    for name, _ in TRAIL_RULES:
+        if not triggered[name]:
+            captured_profit[name] = profit
+            ticks_held[name] = end_idx - arm_idx
+
+    result = {}
+    for name, _ in TRAIL_RULES:
+        result[f"trail_{name}_profit"] = captured_profit[name]
+        result[f"trail_{name}_ticks"] = ticks_held[name]
+        result[f"trail_{name}_triggered"] = triggered[name]
+    return result
+
+
 def run(
     symbol: str,
     weeks: float,
@@ -365,6 +482,7 @@ def run(
     disable_timeout: bool,
     measure_post_be: bool,
     post_be_max_ticks: int,
+    simulate_trail: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -382,7 +500,7 @@ def run(
     fetch_ticks = max_ticks
     if run_counterfactual:
         fetch_ticks = max(fetch_ticks, counterfactual_max_ticks)
-    if measure_post_be:
+    if measure_post_be or simulate_trail:
         fetch_ticks = max(fetch_ticks, max_ticks + post_be_max_ticks)
 
     account_info = mt5.account_info()
@@ -455,6 +573,7 @@ def run(
                     needs_conversion=needs_conversion,
                     measure_post_be=measure_post_be,
                     post_be_max_ticks=post_be_max_ticks,
+                    simulate_trail=simulate_trail,
                 )
                 results.append(
                     {
@@ -488,6 +607,8 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
         "cf_outcome", "cf_profit", "cf_extra_ticks",
         "post_be_peak_profit", "post_be_ticks_to_peak", "post_be_max_drawdown_from_peak",
         "post_be_final_profit", "post_be_ticks_observed",
+    ] + [
+        f"trail_{name}_{suffix}" for name, _ in TRAIL_RULES for suffix in ("profit", "ticks", "triggered")
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -522,39 +643,31 @@ def summarize(results: list[dict], symbol: str) -> None:
         )
 
     cut_short = [r for r in results if r.get("cf_outcome")]
-    if not cut_short:
-        return
+    if cut_short:
+        print(f"\n--- Counterfactual (no soft SL / no timeout, broker-side SL only) for the {len(cut_short)} cut-short trades ---")
+        by_cf: dict[str, list[dict]] = {}
+        for r in cut_short:
+            by_cf.setdefault(r["cf_outcome"], []).append(r)
 
-    print(f"\n--- Counterfactual (no soft SL / no timeout, broker-side SL only) for the {len(cut_short)} cut-short trades ---")
-    by_cf: dict[str, list[dict]] = {}
-    for r in cut_short:
-        by_cf.setdefault(r["cf_outcome"], []).append(r)
+        real_total = sum(r["profit"] for r in cut_short if r["profit"] is not None)
+        cf_total = sum(r["cf_profit"] for r in cut_short if r.get("cf_profit") is not None)
 
-    real_total = sum(r["profit"] for r in cut_short if r["profit"] is not None)
-    cf_total = sum(r["cf_profit"] for r in cut_short if r.get("cf_profit") is not None)
+        for cf_outcome in ("would_have_recovered", "would_have_hit_broker_sl", "still_unresolved"):
+            rows = by_cf.get(cf_outcome, [])
+            if not rows:
+                continue
+            pct = len(rows) / len(cut_short) * 100.0
+            avg_cf_profit = sum(r["cf_profit"] for r in rows) / len(rows)
+            avg_extra_ticks = sum(r["cf_extra_ticks"] for r in rows) / len(rows)
+            print(
+                f"  {cf_outcome:24s}: {len(rows):3d} ({pct:5.1f}%)  "
+                f"avg_cf_profit=${avg_cf_profit:+.2f}  avg_extra_ticks={avg_extra_ticks:.1f}"
+            )
 
-    for cf_outcome in ("would_have_recovered", "would_have_hit_broker_sl", "still_unresolved"):
-        rows = by_cf.get(cf_outcome, [])
-        if not rows:
-            continue
-        pct = len(rows) / len(cut_short) * 100.0
-        avg_cf_profit = sum(r["cf_profit"] for r in rows) / len(rows)
-        avg_extra_ticks = sum(r["cf_extra_ticks"] for r in rows) / len(rows)
-        print(
-            f"  {cf_outcome:24s}: {len(rows):3d} ({pct:5.1f}%)  "
-            f"avg_cf_profit=${avg_cf_profit:+.2f}  avg_extra_ticks={avg_extra_ticks:.1f}"
-        )
-
-    print(f"  Real total P&L on these {len(cut_short)} trades:          ${real_total:+.2f}")
-    print(f"  Counterfactual total P&L (no early cut):    ${cf_total:+.2f}")
-    print(f"  Difference (real minus counterfactual):     ${real_total - cf_total:+.2f}  "
-          f"({'early cuts helped' if real_total > cf_total else 'early cuts hurt' if real_total < cf_total else 'no difference'})")
-
-    measured = [r for r in results if r.get("post_be_peak_profit") is not None]
-    if not measured:
-        return
-
-    print(f"\n--- Post-breakeven excursion (observed only, no exit rule applied) for {len(measured)} reached_be trades ---")
+        print(f"  Real total P&L on these {len(cut_short)} trades:          ${real_total:+.2f}")
+        print(f"  Counterfactual total P&L (no early cut):    ${cf_total:+.2f}")
+        print(f"  Difference (real minus counterfactual):     ${real_total - cf_total:+.2f}  "
+              f"({'early cuts helped' if real_total > cf_total else 'early cuts hurt' if real_total < cf_total else 'no difference'})")
 
     def _pctiles(values: list[float], label: str) -> None:
         values = sorted(values)
@@ -565,10 +678,33 @@ def summarize(results: list[dict], symbol: str) -> None:
         avg = statistics.mean(values)
         print(f"  {label:28s}: avg={avg:+.3f}  median={med:+.3f}  p10={p10:+.3f}  p90={p90:+.3f}")
 
-    _pctiles([r["post_be_peak_profit"] for r in measured], "peak profit reached ($)")
-    _pctiles([r["post_be_ticks_to_peak"] for r in measured], "ticks to reach that peak")
-    _pctiles([r["post_be_max_drawdown_from_peak"] for r in measured], "max drawdown from peak ($)")
-    _pctiles([r["post_be_final_profit"] for r in measured], "final profit at window end ($)")
+    measured = [r for r in results if r.get("post_be_peak_profit") is not None]
+    if measured:
+        print(f"\n--- Post-breakeven excursion (observed only, no exit rule applied) for {len(measured)} reached_be trades ---")
+        _pctiles([r["post_be_peak_profit"] for r in measured], "peak profit reached ($)")
+        _pctiles([r["post_be_ticks_to_peak"] for r in measured], "ticks to reach that peak")
+        _pctiles([r["post_be_max_drawdown_from_peak"] for r in measured], "max drawdown from peak ($)")
+        _pctiles([r["post_be_final_profit"] for r in measured], "final profit at window end ($)")
+
+    trailed = [r for r in results if r.get(f"trail_{TRAIL_RULES[0][0]}_profit") is not None]
+    if trailed:
+        print(f"\n--- Trail-rule simulation for {len(trailed)} reached_be trades ---")
+        no_exit_total = sum(r["post_be_final_profit"] for r in trailed if r.get("post_be_final_profit") is not None)
+        peak_total = sum(r["post_be_peak_profit"] for r in trailed if r.get("post_be_peak_profit") is not None)
+        if measured:
+            print(f"  {'(reference) hold forever, no exit':32s}: total=${no_exit_total:+.2f}")
+            print(f"  {'(reference) exit exactly at peak':32s}: total=${peak_total:+.2f}")
+        for name, _ in TRAIL_RULES:
+            profits = [r[f"trail_{name}_profit"] for r in trailed if r.get(f"trail_{name}_profit") is not None]
+            ticks_vals = [r[f"trail_{name}_ticks"] for r in trailed if r.get(f"trail_{name}_ticks") is not None]
+            triggered_count = sum(1 for r in trailed if r.get(f"trail_{name}_triggered") is True)
+            total = sum(profits)
+            win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+            avg_ticks = sum(ticks_vals) / len(ticks_vals) if ticks_vals else 0.0
+            print(
+                f"  {name:16s}: total=${total:+8.2f}  win_rate={win_rate:5.1f}%  "
+                f"triggered={triggered_count:4d}/{len(trailed)}  avg_ticks_held={avg_ticks:.1f}"
+            )
 
 
 def main() -> None:
@@ -585,6 +721,7 @@ def main() -> None:
         args.disable_timeout,
         args.measure_post_be,
         args.post_be_max_ticks,
+        args.simulate_trail,
     )
 
 
