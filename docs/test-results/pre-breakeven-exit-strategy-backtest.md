@@ -32,6 +32,30 @@ New `scripts/backtest_exit_strategy.py`. For each buy/sell signal from `strategy
 
 4. **This says nothing about post-breakeven profitability.** 90%+ of trades clear this phase, but what happens next -- the hardcoded `$0.04` trailing pullback found in the code review -- is untested here and is a much more likely candidate for where real trade outcomes are decided, given how easy breakeven itself turns out to be to reach.
 
+## Counterfactual: was cutting these trades early actually a good call?
+
+For every `soft_sl`/`timed_out` trade, `--counterfactual` continues the *exact same* real tick stream from the point of the real exit onward, as if only the broker-side wide SL (`Config.DEFAULT_SL_PIPS=5`, ≈$10) existed -- no soft SL, no breakeven-timeout -- and records whether price would have recovered to breakeven, hit the wider broker SL, or neither within an extended (3000-tick) budget.
+
+**First pass (EURUSD only, 2 windows)**: 17 cut-short trades total, both windows showed early cuts costing slightly more than they saved (-$3.80, -$2.60) -- but flagged explicitly as too small a sample to trust.
+
+**Scaled up: 7 majors (EURUSD, GBPUSD, USDJPY, AUDUSD, USDCHF, USDCAD, NZDUSD) x 3 independent 4-week windows each**, to get a real sample size (see `counterfactual-pre-be-backtest.md`). This surfaced a real bug, found and fixed before trusting the result:
+
+**Bug found and fixed**: `compute_profit` assumed `(price_diff * lot * contract_size)` is always in account-currency (USD) terms. True for direct-quote pairs (EURUSD/GBPUSD/AUDUSD/NZDUSD, quote currency = USD) but wrong for indirect pairs where USD is the *base* currency (USDJPY/USDCHF/USDCAD) -- there the raw formula computes profit in JPY/CHF/CAD, not USD. This wasn't just a cosmetic reporting error: `LossExitManager` compares `position["profit"]` directly against the USD-denominated `EXIT_MAX_LOSS_MONEY` threshold, so the wrong currency also changed *when the soft SL actually fired* in the simulation. Caught because USDJPY's first-pass numbers were absurd (91.2% of trades hitting the "$5" soft SL, P&L in the tens of thousands of dollars) -- both explained exactly by comparing JPY-scale numbers against a USD-scale threshold. Fixed via `profit_needs_conversion` (checks MT5's own `symbol_info.currency_profit` against the account's actual currency, not a hardcoded pair list) and dividing by the live tick price when they differ -- matching how MT5 itself continuously re-converts floating profit for indirect pairs, not a fixed snapshot rate. USDJPY/USDCHF/USDCAD were re-run after the fix; EURUSD/GBPUSD/AUDUSD/NZDUSD were unaffected (direct-quote pairs never needed conversion) and were not re-run.
+
+**Corrected pooled result (7 pairs x 3 windows, 3,386 trades, 585 cut-short)**:
+
+| Outcome | Count | % |
+|---|---|---|
+| Would have recovered | 403 | 68.9% |
+| Would have hit broker SL | 139 | 23.8% |
+| Still unresolved | 43 | 7.4% |
+
+Real P&L: **-$1,532.67** — Counterfactual P&L: **-$1,616.89** — Difference: **+$84.23 (early cuts HELPED)**
+
+**Per pair**: 5 of 7 pairs lean toward "early cuts helped" (GBPUSD +$42.00, USDJPY +$36.61, USDCHF +$14.57, USDCAD +$19.04, NZDUSD +$1.80 ~wash), 2 lean the other way (EURUSD -$28.00, AUDUSD -$1.80 ~wash). A meaningfully more consistent picture than the original 17-trade EURUSD-only sample, and the opposite direction from that sample too.
+
+**What this means**: on a real sample (585 cut-short trades, not 17), the pre-breakeven soft SL and breakeven-timeout appear to be a modest net positive -- they cut more real tail losses than they foreclose recoveries, in aggregate. Still not overwhelming (roughly 5% of the total P&L on the affected trades), and still genuinely mixed at the individual-pair level, but this reverses the original small-sample finding rather than just reinforcing it -- a useful reminder that the first, EURUSD-only counterfactual result was too thin to trust, exactly as flagged at the time.
+
 ## Caveats
 
 - Lot size is fixed at a documented `0.2`, not derived per-trade via `RiskManager` -- doesn't change the tick-timing analysis (which is spread/price-driven, not size-driven) but the dollar amounts scale linearly with whatever the real lot size is at trade time.
