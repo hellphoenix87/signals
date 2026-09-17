@@ -79,6 +79,33 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "backtest_results"
 M1_BARS_PER_TRADING_WEEK = 5 * 24 * 60
 
 
+def profit_needs_conversion(symbol: str, account_currency: str) -> bool:
+    """Return whether `(price_diff * lot * contract_size)` for `symbol`
+    comes out in a currency other than the account currency and needs
+    converting. True for "indirect" pairs where USD is the *base*
+    currency (USDJPY, USDCHF, USDCAD against a USD account) -- the raw
+    formula computes profit in the quote currency (JPY/CHF/CAD) there,
+    not USD. False for "direct" pairs where the quote currency already
+    is the account currency (EURUSD, GBPUSD, AUDUSD, NZDUSD). Uses MT5's
+    own `symbol_info.currency_profit`, not a hardcoded pair list.
+    """
+    info = mt5.symbol_info(symbol)
+    profit_currency = getattr(info, "currency_profit", account_currency) if info else account_currency
+    return profit_currency != account_currency
+
+
+def compute_profit(
+    *, side: str, entry_price: float, price: float, lot: float, contract_size: float, needs_conversion: bool
+) -> float:
+    """Position profit in account-currency terms. For indirect pairs
+    (`needs_conversion`), divides by the *current* tick price to convert
+    from the quote currency to the account currency -- matching how MT5
+    itself continuously re-converts floating profit in real time, not a
+    fixed snapshot rate."""
+    raw = (price - entry_price) * lot * contract_size if side == "buy" else (entry_price - price) * lot * contract_size
+    return raw / price if needs_conversion else raw
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", default=None, help="Symbol to backtest (default: Config.SYMBOLS[0])")
@@ -103,6 +130,7 @@ def simulate_pre_be_phase(
     fetch_ticks: int,
     sl_price_distance: float,
     run_counterfactual: bool,
+    needs_conversion: bool,
 ) -> dict:
     """Open a simulated position at the first real tick at/after
     `entry_time` and replay real historical ticks through the real
@@ -130,10 +158,10 @@ def simulate_pre_be_phase(
     resolved_idx = len(ticks)
     for idx, t in enumerate(ticks[:max_ticks]):
         price = float(t["bid"]) if side == "buy" else float(t["ask"])
-        if side == "buy":
-            profit = (price - entry_price) * lot * contract_size
-        else:
-            profit = (entry_price - price) * lot * contract_size
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
 
         position = {
             "symbol": symbol,
@@ -172,6 +200,7 @@ def simulate_pre_be_phase(
             lot=lot,
             contract_size=contract_size,
             sl_price_distance=sl_price_distance,
+            needs_conversion=needs_conversion,
         )
         result.update(cf)
 
@@ -187,6 +216,7 @@ def simulate_counterfactual(
     lot: float,
     contract_size: float,
     sl_price_distance: float,
+    needs_conversion: bool,
 ) -> dict:
     """Continue the same real tick stream from `start_idx` (the point where
     the real soft-SL/timeout cut the trade) as if only the broker-side wide
@@ -198,12 +228,11 @@ def simulate_counterfactual(
     for idx in range(start_idx, len(ticks)):
         t = ticks[idx]
         price = float(t["bid"]) if side == "buy" else float(t["ask"])
-        if side == "buy":
-            cf_profit = (price - entry_price) * lot * contract_size
-            adverse_distance = entry_price - price
-        else:
-            cf_profit = (entry_price - price) * lot * contract_size
-            adverse_distance = price - entry_price
+        cf_profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        adverse_distance = (entry_price - price) if side == "buy" else (price - entry_price)
 
         if cf_profit >= 0.0:
             return {
@@ -245,6 +274,12 @@ def run(
     sl_pips = float(getattr(Config, "DEFAULT_SL_PIPS", 5.0) or 5.0)
     sl_price_distance = broker.get_pip_size(symbol) * sl_pips
     fetch_ticks = max(max_ticks, counterfactual_max_ticks) if run_counterfactual else max_ticks
+
+    account_info = mt5.account_info()
+    account_currency = account_info.currency if account_info else "USD"
+    needs_conversion = profit_needs_conversion(symbol, account_currency)
+    if needs_conversion:
+        print(f"[{symbol}] profit currency differs from account currency ({account_currency}) -- converting via live tick price each tick.")
 
     tf_entry = getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1)
     tf_confirm = getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
@@ -306,6 +341,7 @@ def run(
                     fetch_ticks=fetch_ticks,
                     sl_price_distance=sl_price_distance,
                     run_counterfactual=run_counterfactual,
+                    needs_conversion=needs_conversion,
                 )
                 results.append(
                     {
