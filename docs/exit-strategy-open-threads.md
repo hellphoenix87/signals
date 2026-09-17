@@ -4,6 +4,16 @@
 
 **How we got here, in one paragraph**: a code review of `app/exit_strategies/managers/{profit,loss}.py` found that a lot of `Config`'s exit-related surface is dead -- config fields exist, are threaded through constructors, and are never read; the real behavior was governed by hardcoded constants instead (`-$5` pre-breakeven stop, `$0.04` post-breakeven trail). We fixed the pre-breakeven side (`EXIT_MAX_LOSS_MONEY` now real, `$5`), built the first-ever full exit-strategy-aware backtest (not just signal-quality proxies), and along the way kept finding more open questions than we closed. This doc is those open questions.
 
+**Priority at a glance** (reasoning for each is in its own section below):
+
+| Priority | Thread | Why |
+|---|---|---|
+| **P0 -- highest** | 3. Post-BE trailing redesign | Touches 90-97% of all trades (everything that survives to breakeven) -- this is the actual "is the bot profitable" question, everything else is refinement around it. Tool already built, just needs to run. |
+| **P1** | 2. Dynamic pre-BE via signal confidence | Real, validated, immediately actionable, affects the live pair today -- but bounded ceiling, since it only touches the minority of trades that don't reach breakeven instantly. |
+| **P2** | 4. Post-BE loss cap | Subordinate to Thread 3 -- can't be sensibly sized until the trail mechanism above it is redesigned. Also entirely unscoped so far. |
+| **P3 -- lowest** | 1. Session filtering per pair | Only matters once multi-pair live trading is actually adopted; `Config.SYMBOLS` is EURUSD-only today, so this has no current live impact. |
+| **(ops, not ranked)** | 5. PR #54 merge status | Not a design priority -- a housekeeping item to check before starting any of the above. |
+
 ## Current code/branch state (read this first)
 
 - **`master`** has: the wire-risk-gates work (ATR/spread gates built-but-disabled, daily P&L cap live), the n-tick confirmation investigation (rejected, session-filter-bypass bug fixed), a doc typo fix, and the pre-breakeven soft-SL wiring (`EXIT_MAX_LOSS_MONEY=5.0`, real now).
@@ -11,6 +21,8 @@
 - `docs/test-results/pre-breakeven-exit-strategy-backtest.md` has the full counterfactual writeup (corrected numbers, after the currency bug fix): pre-breakeven soft-SL/timeout is a modest net positive (+$84.23 across 585 cut-short trades, 7 pairs x 3 windows) but not unanimous per-pair.
 
 ## Thread 1: Session filtering per pair
+
+**Priority: P3 (lowest)** -- only matters once multi-pair live trading is adopted; `Config.SYMBOLS` is EURUSD-only today.
 
 **Status**: evidence gathered, nothing built or tested.
 
@@ -24,6 +36,8 @@
 **Next step, if resumed**: rerun the original session-filter-by-hour methodology (`docs/test-results/session-filter-analysis.md`'s approach) per-pair instead of EURUSD-only, to find out whether each pair needs its own blocked-hours window, or whether EURUSD's happens to transfer reasonably.
 
 ## Thread 2: Dynamic pre-breakeven loss management, keyed on entry-signal characteristics
+
+**Priority: P1** -- real, validated, immediately actionable, affects the live pair today; ceiling is bounded because it only touches the minority of trades that don't reach breakeven instantly.
 
 **Status**: correlation established and validated (not a pair-mix artifact), the actual dynamic-threshold test has **not been run yet** -- this was the agreed immediate next step when the conversation moved to documentation instead.
 
@@ -42,6 +56,8 @@
 **Next step, if resumed**: the agreed-but-not-yet-run test -- simulate what pre-breakeven thresholds would have looked like if trades were split by (e.g.) M5-confirm state, using the existing 3,407-trade dataset already on disk (no new backtest needed, just a smarter reanalysis of `backtest_results/*_exit_strategy_*.csv` files from the metadata sweep). See if a tighter threshold for "M5 doesn't confirm" trades and/or a looser one for "M5 confirms" trades would have beaten the flat $5/90-tick rule, using the same real-tick-replay approach already built.
 
 ## Thread 3: Trailing stop redesign for the post-breakeven (profit-taking) phase
+
+**Priority: P0 (highest)** -- touches 90-97% of all trades (everything that survives to breakeven). Every P&L number produced anywhere in this whole investigation stops tracking exactly at breakeven, so this is the actual "is the bot profitable" question, not a refinement of a side mechanism. The measurement tool is already built and verified -- running it is the single highest-leverage next action available.
 
 **Status**: design discussed at length, concrete numbers explicitly deferred pending real data. The data-gathering tool is **built but deliberately not run yet** (user's explicit instruction: build it, don't run it until other in-flight work is analyzed).
 
@@ -65,6 +81,8 @@
 
 ## Thread 4: Post-breakeven loss cap (the "reversed after arming" case)
 
+**Priority: P2** -- subordinate to Thread 3 (can't be sensibly sized until the trail mechanism above it is redesigned), and entirely unscoped beyond noting it exists.
+
 **Status**: identified as a distinct, separate mechanism from Thread 3. Zero discussion or testing beyond noting it exists.
 
 **Context**: `LossExitManager.check_exit_on_tick`'s post-breakeven branch has its own hardcoded safety net: `drop_profit_after_be = -5` -- if a position that already armed breakeven reverses back into loss and drops to -$5 or below, force-close (`reason="profit_drop_after_be"`). There's also a related rule in the same branch: if profit went negative after arming and then recovers into `0 < profit < $0.05`, exit immediately (`reason="be_recovered_after_unprofit"`) to lock in a marginal win rather than let it round-trip again.
@@ -74,6 +92,8 @@
 **Next step, if resumed**: this hasn't been scoped at all yet -- the first step would be deciding whether it's even worth its own investigation (how often does this actually fire? is `-$5` here principled or just copy-pasted from the pre-breakeven number?) before designing anything.
 
 ## Thread 5: PR #54 -- carrying all of this, still unmerged
+
+**Priority: operational, not ranked against 1-4** -- a housekeeping check to do before starting any of the design threads above, not a design decision itself.
 
 **Status**: open pull request, not merged, accumulating commits across this whole investigation.
 
