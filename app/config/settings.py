@@ -103,7 +103,7 @@ class Config:
     DEFAULT_LOT: float = 0.01
     MIN_LOT: float = 0.01
 
-    EXIT_MAX_LOSS_MONEY: float = 10.0
+    EXIT_MAX_LOSS_MONEY: float = 5.0
     EXIT_MAX_LOSS_PRICE: float = 0.0
     EXIT_MAX_LOSS_PIPS: float = 0.0
     EXIT_SOFT_SL_MONEY_GRACE_TICKS: int = 5
