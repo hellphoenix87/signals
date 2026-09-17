@@ -36,14 +36,25 @@ New `scripts/backtest_exit_strategy.py`. For each buy/sell signal from `strategy
 
 For every `soft_sl`/`timed_out` trade, `--counterfactual` continues the *exact same* real tick stream from the point of the real exit onward, as if only the broker-side wide SL (`Config.DEFAULT_SL_PIPS=5`, ≈$10) existed -- no soft SL, no breakeven-timeout -- and records whether price would have recovered to breakeven, hit the wider broker SL, or neither within an extended (3000-tick) budget.
 
-| Window | Cut-short trades | Would have recovered | Would have hit broker SL | Still unresolved | Real P&L | Counterfactual P&L | Difference |
-|---|---|---|---|---|---|---|---|
-| Window 1 | 14 | 10 (71.4%), avg +$0.16, avg 364 extra ticks | 1 (7.1%), avg -$11.20, avg 33 extra ticks | 3 (21.4%), avg -$4.00 | -$25.40 | -$21.60 | **-$3.80 (early cuts hurt)** |
-| Window 2 | 3 | 2 (66.7%), avg +$0.10, avg 1166 extra ticks | 1 (33.3%), avg -$10.20, avg 2025 extra ticks | -- | -$12.60 | -$10.00 | **-$2.60 (early cuts hurt)** |
+**First pass (EURUSD only, 2 windows)**: 17 cut-short trades total, both windows showed early cuts costing slightly more than they saved (-$3.80, -$2.60) -- but flagged explicitly as too small a sample to trust.
 
-**Consistent in direction across both windows, but on a genuinely tiny sample** (14 and 3 trades respectively -- a single trade landing in a different bucket would swap the sign). With that caveat prominent: the *majority* of trades this layer cuts short (67-71%) would have recovered to breakeven on their own if left alone, just taking a while (avg 364-1166 extra ticks -- several minutes of continued exposure). A smaller fraction (7-33%) genuinely would have gone on to hit the broker's wider stop, validating that the safety net does protect against real tail losses. But because the "would have recovered" group is both larger and only loses to the real outcome by a small margin (the real cut's own loss vs. the counterfactual's near-zero result), while the "would have hit broker SL" group's benefit is concentrated in just one trade per window, the **net dollar effect across the affected trades is currently slightly negative in both windows** -- cutting early cost more in foreclosed recoveries than it saved in avoided bigger losses, in this specific sample.
+**Scaled up: 7 majors (EURUSD, GBPUSD, USDJPY, AUDUSD, USDCHF, USDCAD, NZDUSD) x 3 independent 4-week windows each**, to get a real sample size (see `counterfactual-pre-be-backtest.md`). This surfaced a real bug, found and fixed before trusting the result:
 
-**What this does and doesn't mean**: this is not strong enough evidence to say "remove the soft SL/timeout" -- the sample is far too small (17 trades total across both windows) for that conclusion to be reliable, and "would have recovered to breakeven" isn't necessarily equivalent in risk terms to "resolved fast" (it means several extra minutes of continued market exposure with no protection beyond the wide broker stop, which this simple counterfactual doesn't price in). What it does mean: the working assumption that "cutting early is obviously protective" is not obviously true here either -- the data available so far points the other way, mildly, and this deserves a larger sample before drawing a real conclusion either way.
+**Bug found and fixed**: `compute_profit` assumed `(price_diff * lot * contract_size)` is always in account-currency (USD) terms. True for direct-quote pairs (EURUSD/GBPUSD/AUDUSD/NZDUSD, quote currency = USD) but wrong for indirect pairs where USD is the *base* currency (USDJPY/USDCHF/USDCAD) -- there the raw formula computes profit in JPY/CHF/CAD, not USD. This wasn't just a cosmetic reporting error: `LossExitManager` compares `position["profit"]` directly against the USD-denominated `EXIT_MAX_LOSS_MONEY` threshold, so the wrong currency also changed *when the soft SL actually fired* in the simulation. Caught because USDJPY's first-pass numbers were absurd (91.2% of trades hitting the "$5" soft SL, P&L in the tens of thousands of dollars) -- both explained exactly by comparing JPY-scale numbers against a USD-scale threshold. Fixed via `profit_needs_conversion` (checks MT5's own `symbol_info.currency_profit` against the account's actual currency, not a hardcoded pair list) and dividing by the live tick price when they differ -- matching how MT5 itself continuously re-converts floating profit for indirect pairs, not a fixed snapshot rate. USDJPY/USDCHF/USDCAD were re-run after the fix; EURUSD/GBPUSD/AUDUSD/NZDUSD were unaffected (direct-quote pairs never needed conversion) and were not re-run.
+
+**Corrected pooled result (7 pairs x 3 windows, 3,386 trades, 585 cut-short)**:
+
+| Outcome | Count | % |
+|---|---|---|
+| Would have recovered | 403 | 68.9% |
+| Would have hit broker SL | 139 | 23.8% |
+| Still unresolved | 43 | 7.4% |
+
+Real P&L: **-$1,532.67** — Counterfactual P&L: **-$1,616.89** — Difference: **+$84.23 (early cuts HELPED)**
+
+**Per pair**: 5 of 7 pairs lean toward "early cuts helped" (GBPUSD +$42.00, USDJPY +$36.61, USDCHF +$14.57, USDCAD +$19.04, NZDUSD +$1.80 ~wash), 2 lean the other way (EURUSD -$28.00, AUDUSD -$1.80 ~wash). A meaningfully more consistent picture than the original 17-trade EURUSD-only sample, and the opposite direction from that sample too.
+
+**What this means**: on a real sample (585 cut-short trades, not 17), the pre-breakeven soft SL and breakeven-timeout appear to be a modest net positive -- they cut more real tail losses than they foreclose recoveries, in aggregate. Still not overwhelming (roughly 5% of the total P&L on the affected trades), and still genuinely mixed at the individual-pair level, but this reverses the original small-sample finding rather than just reinforcing it -- a useful reminder that the first, EURUSD-only counterfactual result was too thin to trust, exactly as flagged at the time.
 
 ## Caveats
 
