@@ -70,7 +70,7 @@ from app.signals.signal_generation import strategy_factory
 from app.trade_execution.broker import Broker
 from app.trade_execution.mode import TradingMode
 from app.risk.risk_manager import create_risk_manager
-from app.exit_strategies.exit_trade import create_exit_trade
+from app.exit_strategies.exit_trade import create_exit_trade, ExitTradeConfig
 from app.exit_strategies.exit_shared import PosState
 
 from scripts.backtest_signals import fetch_history, TF_SECONDS
@@ -115,6 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-ticks-per-trade", type=int, default=500, help="Max real ticks fetched per simulated trade (be_arming_ticks=90 by default, so this is a generous ceiling)")
     parser.add_argument("--counterfactual", action="store_true", help="For every soft_sl/timed_out trade, continue the same real tick stream as if only the broker-side wide SL existed, to see whether the early cut was actually a good call")
     parser.add_argument("--counterfactual-max-ticks", type=int, default=3000, help="Extended tick budget for the counterfactual continuation")
+    parser.add_argument("--disable-timeout", action="store_true", help="Disable only the breakeven-timeout (EXIT_BE_ARMING_TICKS<=0, the real LossExitManager's own documented way to turn it off) -- the soft SL stays active. Answers 'what if we removed just the 90-tick rule, not the whole pre-breakeven layer'. Automatically raises --max-ticks-per-trade to --counterfactual-max-ticks unless set higher explicitly, since stalled trades can now take much longer to resolve.")
     return parser.parse_args()
 
 
@@ -262,10 +263,14 @@ def run(
     max_ticks: int,
     run_counterfactual: bool,
     counterfactual_max_ticks: int,
+    disable_timeout: bool,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
         sys.exit(1)
+
+    if disable_timeout:
+        max_ticks = max(max_ticks, counterfactual_max_ticks)
 
     market_data = MarketData()
     broker = Broker(TradingMode.LIVE)
@@ -306,7 +311,8 @@ def run(
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
 
     strategy = strategy_factory(config=Config, use_multi=True)
-    exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager)
+    exit_config = ExitTradeConfig(be_arming_ticks=0) if disable_timeout else None
+    exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
     results: list[dict] = []
 
@@ -440,6 +446,7 @@ def main() -> None:
         args.max_ticks_per_trade,
         args.counterfactual,
         args.counterfactual_max_ticks,
+        args.disable_timeout,
     )
 
 
