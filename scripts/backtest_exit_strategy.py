@@ -138,6 +138,15 @@ TRAIL_RULES: list[tuple[str, Any]] = [
 # not wired into ProfitExitManager/Config.
 ACTIVE_TRAIL_RULE = "pct60_floor2"
 
+# Thread 4 candidate replacements for LossExitManager's hardcoded
+# `drop_profit_after_be = -5` post-BE loss cap (app/exit_strategies/
+# managers/loss.py). -5.0 is kept in the list as the current-production
+# value, both for a direct sanity check against the real loss manager's
+# own numbers and as the baseline the others are compared to. The spread
+# is informed by the pooled worst-further-drawdown-after-cap percentiles
+# measured this session (median -$7.96, avg -$10.14, p10 -$16.44).
+CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
+
 
 def profit_needs_conversion(symbol: str, account_currency: str) -> bool:
     """Return whether `(price_diff * lot * contract_size)` for `symbol`
@@ -452,10 +461,20 @@ def simulate_trail_rules(
     profit is whatever profit was observed at the end of the window
     (matches `post_be_final_profit`'s convention for the no-exit case).
 
+    Also replays `CAP_THRESHOLDS` (Thread 4 candidate replacements for the
+    real loss manager's hardcoded -$5) against the same raw profit series,
+    independent of any trail rule or the real loss manager -- simple
+    "exit the instant profit drops to/below this flat threshold" checks,
+    to compare alternate cap sizes against the current -$5 on equal
+    footing (-5.0 is included in `CAP_THRESHOLDS` as that direct
+    sanity-check baseline).
+
     Returns `{"trail_<name>_profit", "trail_<name>_ticks",
     "trail_<name>_triggered", "trail_<name>_lm_capped"}` for every name
-    in `TRAIL_RULES`, plus `"trail_lm_profit"`/`"trail_lm_ticks"`/
-    `"trail_lm_triggered"` for the real loss manager's own outcome.
+    in `TRAIL_RULES`; `{"cap<N>_profit", "cap<N>_ticks",
+    "cap<N>_triggered"}` for every threshold in `CAP_THRESHOLDS`; plus
+    `"trail_lm_profit"`/`"trail_lm_ticks"`/`"trail_lm_triggered"` for the
+    real loss manager's own outcome.
     """
     end_idx = min(len(ticks), arm_idx + max_extra_ticks)
     pos_type = 0 if side == "buy" else 1
@@ -476,6 +495,10 @@ def simulate_trail_rules(
     gap_ticks_to_recover: Optional[int] = None
     gap_min_profit_after_cap: Optional[float] = None
 
+    cap_triggered = {c: False for c in CAP_THRESHOLDS}
+    cap_profit: dict[float, Optional[float]] = {c: None for c in CAP_THRESHOLDS}
+    cap_ticks: dict[float, Optional[int]] = {c: None for c in CAP_THRESHOLDS}
+
     profit = 0.0
     for idx in range(arm_idx, end_idx):
         t = ticks[idx]
@@ -487,6 +510,12 @@ def simulate_trail_rules(
 
         if running_peak is None or profit > running_peak:
             running_peak = profit
+
+        for c in CAP_THRESHOLDS:
+            if not cap_triggered[c] and profit <= c:
+                cap_triggered[c] = True
+                cap_profit[c] = profit
+                cap_ticks[c] = idx - arm_idx
 
         for name, gap_fn in TRAIL_RULES:
             if triggered[name]:
@@ -534,6 +563,10 @@ def simulate_trail_rules(
     if not lm_triggered:
         lm_profit = profit
         lm_ticks = end_idx - arm_idx
+    for c in CAP_THRESHOLDS:
+        if not cap_triggered[c]:
+            cap_profit[c] = profit
+            cap_ticks[c] = end_idx - arm_idx
 
     result = {
         "trail_lm_profit": lm_profit,
@@ -559,6 +592,11 @@ def simulate_trail_rules(
         result[f"trail_{name}_lm_capped"] = use_lm
         result[f"trail_{name}_lm_capped_in_gap"] = in_gap
         result[f"trail_{name}_activation_ticks"] = activation_ticks[name]
+    for c in CAP_THRESHOLDS:
+        tag = f"cap{int(abs(c))}"
+        result[f"{tag}_profit"] = cap_profit[c]
+        result[f"{tag}_ticks"] = cap_ticks[c]
+        result[f"{tag}_triggered"] = cap_triggered[c]
     return result
 
 
@@ -704,6 +742,8 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
     ] + [
         "trail_lm_profit", "trail_lm_ticks", "trail_lm_triggered", "trail_lm_reason",
         "gap_recovered", "gap_ticks_to_recover", "gap_min_profit_after_cap", "gap_final_profit",
+    ] + [
+        f"cap{int(abs(c))}_{suffix}" for c in CAP_THRESHOLDS for suffix in ("profit", "ticks", "triggered")
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -828,6 +868,23 @@ def summarize(results: list[dict], symbol: str) -> None:
                 f"  {name:16s}: total=${total:+8.2f}  win_rate={win_rate:5.1f}%  "
                 f"triggered={triggered_count:4d}/{len(trailed)}  avg_ticks_held={avg_ticks:.1f}  "
                 f"lm_capped={lm_capped_count:4d} (in_gap={in_gap_count})  ever_activated={activation_rate:.1f}%{marker}"
+            )
+
+    capped_thresholds = [r for r in results if r.get("cap5_profit") is not None]
+    if capped_thresholds:
+        print(f"\n--- Thread 4: candidate post-BE loss-cap thresholds for {len(capped_thresholds)} reached_be trades ---")
+        for c in CAP_THRESHOLDS:
+            tag = f"cap{int(abs(c))}"
+            profits = [r[f"{tag}_profit"] for r in capped_thresholds if r.get(f"{tag}_profit") is not None]
+            ticks_vals = [r[f"{tag}_ticks"] for r in capped_thresholds if r.get(f"{tag}_ticks") is not None]
+            triggered_count = sum(1 for r in capped_thresholds if r.get(f"{tag}_triggered") is True)
+            total = sum(profits)
+            win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+            avg_ticks = sum(ticks_vals) / len(ticks_vals) if ticks_vals else 0.0
+            marker = "  <-- current production value" if c == -5.0 else ""
+            print(
+                f"  -${abs(c):<5.1f}: total=${total:+8.2f}  win_rate={win_rate:5.1f}%  "
+                f"triggered={triggered_count:4d}/{len(capped_thresholds)}  avg_ticks_to_cap={avg_ticks:.1f}{marker}"
             )
 
 
