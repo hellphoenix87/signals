@@ -131,6 +131,13 @@ TRAIL_RULES: list[tuple[str, Any]] = [
     ("pct60_floor2", lambda peak: max(2.0, 0.6 * peak)),
 ]
 
+# Provisional pick among TRAIL_RULES (per-conversation decision, not yet
+# validated against the real loss-manager-combined full sweep or the actual
+# live $0.04 rule) -- kept only for report labeling. All 5 candidates still
+# run side by side in every --simulate-trail sweep for comparison; this is
+# not wired into ProfitExitManager/Config.
+ACTIVE_TRAIL_RULE = "pct60_floor2"
+
 
 def profit_needs_conversion(symbol: str, account_currency: str) -> bool:
     """Return whether `(price_diff * lot * contract_size)` for `symbol`
@@ -288,6 +295,9 @@ def simulate_pre_be_phase(
             contract_size=contract_size,
             needs_conversion=needs_conversion,
             max_extra_ticks=post_be_max_ticks,
+            loss_manager=loss_manager,
+            state=state,
+            symbol=symbol,
         )
         result.update(tr)
 
@@ -410,6 +420,9 @@ def simulate_trail_rules(
     contract_size: float,
     needs_conversion: bool,
     max_extra_ticks: int,
+    loss_manager,
+    state: PosState,
+    symbol: str,
 ) -> dict:
     """After breakeven arms (at `arm_idx`), replay every rule in
     `TRAIL_RULES` against the same real tick stream in a single pass,
@@ -418,26 +431,52 @@ def simulate_trail_rules(
     that trigger is positive (peak has grown past its own gap) --
     while the computed trigger is <= $0, the trail stays inactive
     rather than force-exiting the moment a small peak's trigger math
-    goes negative (a small-peak reversal below breakeven there is
-    Thread 4's territory, not this trail's). The first tick a rule's
-    profit drops to/below its own (positive) trigger, that rule
-    "exits" -- records the captured profit and how many ticks it took.
-    A rule that never triggers within `max_extra_ticks` is marked
-    not-triggered and its captured profit is whatever profit was
-    observed at the end of the window (matches `post_be_final_profit`'s
-    convention for the no-exit-at-all case).
+    goes negative.
+
+    That inactive window is NOT actually unprotected in production,
+    though: the real, unmodified `LossExitManager.check_exit_on_tick`
+    (Thread 4's existing post-BE loss cap -- the hardcoded `-$5`
+    force-close and the `be_recovered_after_unprofit` lock-in) keeps
+    running every tick in parallel, via the same `state` object already
+    carrying `be_armed=True` from the pre-breakeven phase. It's
+    rule-agnostic (based on raw profit history, not on any trail rule),
+    so its first-trigger point is computed once and shared across all
+    5 candidates. Each rule's *effective* outcome is whichever of (that
+    rule's own trigger, the real loss manager's trigger) comes first --
+    answering "how would this candidate actually behave with today's
+    existing safety net still running underneath it," not "how would it
+    behave in a vacuum with nothing else protecting the trade."
+
+    A rule with no trigger at all (its own, or the loss manager's)
+    within `max_extra_ticks` is marked not-triggered and its captured
+    profit is whatever profit was observed at the end of the window
+    (matches `post_be_final_profit`'s convention for the no-exit case).
 
     Returns `{"trail_<name>_profit", "trail_<name>_ticks",
-    "trail_<name>_triggered"}` for every name in `TRAIL_RULES`.
+    "trail_<name>_triggered", "trail_<name>_lm_capped"}` for every name
+    in `TRAIL_RULES`, plus `"trail_lm_profit"`/`"trail_lm_ticks"`/
+    `"trail_lm_triggered"` for the real loss manager's own outcome.
     """
     end_idx = min(len(ticks), arm_idx + max_extra_ticks)
+    pos_type = 0 if side == "buy" else 1
 
     running_peak: Optional[float] = None
     triggered = {name: False for name, _ in TRAIL_RULES}
-    captured_profit: dict[str, Optional[float]] = {name: None for name, _ in TRAIL_RULES}
-    ticks_held: dict[str, Optional[int]] = {name: None for name, _ in TRAIL_RULES}
-    profit = 0.0
+    rule_profit: dict[str, Optional[float]] = {name: None for name, _ in TRAIL_RULES}
+    rule_ticks: dict[str, Optional[int]] = {name: None for name, _ in TRAIL_RULES}
+    activation_ticks: dict[str, Optional[int]] = {name: None for name, _ in TRAIL_RULES}
 
+    lm_triggered = False
+    lm_profit: Optional[float] = None
+    lm_ticks: Optional[int] = None
+    lm_reason: Optional[str] = None
+    lm_trigger_abs_idx: Optional[int] = None
+
+    gap_recovered = False
+    gap_ticks_to_recover: Optional[int] = None
+    gap_min_profit_after_cap: Optional[float] = None
+
+    profit = 0.0
     for idx in range(arm_idx, end_idx):
         t = ticks[idx]
         price = float(t["bid"]) if side == "buy" else float(t["ask"])
@@ -453,21 +492,73 @@ def simulate_trail_rules(
             if triggered[name]:
                 continue
             trigger_level = running_peak - gap_fn(running_peak)
-            if trigger_level > 0.0 and profit <= trigger_level:
-                triggered[name] = True
-                captured_profit[name] = profit
-                ticks_held[name] = idx - arm_idx
+            if trigger_level > 0.0:
+                if activation_ticks[name] is None:
+                    activation_ticks[name] = idx - arm_idx
+                if profit <= trigger_level:
+                    triggered[name] = True
+                    rule_profit[name] = profit
+                    rule_ticks[name] = idx - arm_idx
+
+        if not lm_triggered:
+            position = {
+                "symbol": symbol,
+                "type": pos_type,
+                "ticket": idx,
+                "price_open": entry_price,
+                "volume": lot,
+                "profit": profit,
+            }
+            action = loss_manager.check_exit_on_tick(position, t, state)
+            if action:
+                lm_triggered = True
+                lm_profit = profit
+                lm_ticks = idx - arm_idx
+                lm_reason = action.reason
+                lm_trigger_abs_idx = idx
+        elif lm_trigger_abs_idx is not None and idx > lm_trigger_abs_idx:
+            # Gap-reversal counterfactual: what real price did AFTER the real
+            # -$5 cap would have force-closed the trade -- continuing to
+            # watch with no exit rule applied, same as --measure-post-be but
+            # anchored to the cap point instead of the breakeven-arming point.
+            if gap_min_profit_after_cap is None or profit < gap_min_profit_after_cap:
+                gap_min_profit_after_cap = profit
+            if not gap_recovered and profit > 0.0:
+                gap_recovered = True
+                gap_ticks_to_recover = idx - lm_trigger_abs_idx
 
     for name, _ in TRAIL_RULES:
         if not triggered[name]:
-            captured_profit[name] = profit
-            ticks_held[name] = end_idx - arm_idx
+            rule_profit[name] = profit
+            rule_ticks[name] = end_idx - arm_idx
+    if not lm_triggered:
+        lm_profit = profit
+        lm_ticks = end_idx - arm_idx
 
-    result = {}
+    result = {
+        "trail_lm_profit": lm_profit,
+        "trail_lm_ticks": lm_ticks,
+        "trail_lm_triggered": lm_triggered,
+        "trail_lm_reason": lm_reason,
+        "gap_recovered": gap_recovered if lm_triggered else None,
+        "gap_ticks_to_recover": gap_ticks_to_recover,
+        "gap_min_profit_after_cap": gap_min_profit_after_cap,
+        "gap_final_profit": profit if lm_triggered else None,
+    }
     for name, _ in TRAIL_RULES:
-        result[f"trail_{name}_profit"] = captured_profit[name]
-        result[f"trail_{name}_ticks"] = ticks_held[name]
-        result[f"trail_{name}_triggered"] = triggered[name]
+        own_ticks = rule_ticks[name] if triggered[name] else None
+        use_lm = lm_triggered and (own_ticks is None or lm_ticks < own_ticks)
+        # "in the gap" = the real loss manager fired before this rule ever
+        # started watching at all (activation_ticks[name] is None or later
+        # than lm_ticks) -- as opposed to firing after the rule was already
+        # active but before the rule's own trigger caught it.
+        in_gap = use_lm and (activation_ticks[name] is None or lm_ticks < activation_ticks[name])
+        result[f"trail_{name}_profit"] = lm_profit if use_lm else rule_profit[name]
+        result[f"trail_{name}_ticks"] = lm_ticks if use_lm else rule_ticks[name]
+        result[f"trail_{name}_triggered"] = True if use_lm else triggered[name]
+        result[f"trail_{name}_lm_capped"] = use_lm
+        result[f"trail_{name}_lm_capped_in_gap"] = in_gap
+        result[f"trail_{name}_activation_ticks"] = activation_ticks[name]
     return result
 
 
@@ -608,7 +699,11 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
         "post_be_peak_profit", "post_be_ticks_to_peak", "post_be_max_drawdown_from_peak",
         "post_be_final_profit", "post_be_ticks_observed",
     ] + [
-        f"trail_{name}_{suffix}" for name, _ in TRAIL_RULES for suffix in ("profit", "ticks", "triggered")
+        f"trail_{name}_{suffix}" for name, _ in TRAIL_RULES
+        for suffix in ("profit", "ticks", "triggered", "lm_capped", "lm_capped_in_gap", "activation_ticks")
+    ] + [
+        "trail_lm_profit", "trail_lm_ticks", "trail_lm_triggered", "trail_lm_reason",
+        "gap_recovered", "gap_ticks_to_recover", "gap_min_profit_after_cap", "gap_final_profit",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -694,16 +789,45 @@ def summarize(results: list[dict], symbol: str) -> None:
         if measured:
             print(f"  {'(reference) hold forever, no exit':32s}: total=${no_exit_total:+.2f}")
             print(f"  {'(reference) exit exactly at peak':32s}: total=${peak_total:+.2f}")
+        lm_only = [r["trail_lm_profit"] for r in trailed if r.get("trail_lm_triggered") is True]
+        if lm_only:
+            cap_hits = sum(1 for r in trailed if r.get("trail_lm_reason") == "profit_drop_after_be")
+            lockin_hits = sum(1 for r in trailed if r.get("trail_lm_reason") == "be_recovered_after_unprofit")
+            print(
+                f"  {'(reference) real -$5 post-BE cap alone':32s}: "
+                f"triggered={len(lm_only):4d}/{len(trailed)}  total_on_those=${sum(lm_only):+.2f}  "
+                f"(-$5 cap: {cap_hits}, marginal-recovery lock-in: {lockin_hits})"
+            )
+
+            capped = [r for r in trailed if r.get("trail_lm_reason") == "profit_drop_after_be"]
+            if capped:
+                recovered = sum(1 for r in capped if r.get("gap_recovered") is True)
+                no_exit_final_total = sum(r["gap_final_profit"] for r in capped if r.get("gap_final_profit") is not None)
+                real_capped_total = sum(r["trail_lm_profit"] for r in capped)
+                worst = [r["gap_min_profit_after_cap"] for r in capped if r.get("gap_min_profit_after_cap") is not None]
+                print(
+                    f"  {'  --> if the -$5 cap did NOT exist':32s}: "
+                    f"{recovered}/{len(capped)} ({recovered/len(capped)*100:.1f}%) later recovered to positive profit; "
+                    f"if left alone the whole window, total=${no_exit_final_total:+.2f} vs. real capped total=${real_capped_total:+.2f}"
+                )
+                if worst:
+                    print(f"  {'  --> worst further drawdown after the cap-point':32s}: avg=${sum(worst)/len(worst):+.2f}  min=${min(worst):+.2f}")
         for name, _ in TRAIL_RULES:
             profits = [r[f"trail_{name}_profit"] for r in trailed if r.get(f"trail_{name}_profit") is not None]
             ticks_vals = [r[f"trail_{name}_ticks"] for r in trailed if r.get(f"trail_{name}_ticks") is not None]
             triggered_count = sum(1 for r in trailed if r.get(f"trail_{name}_triggered") is True)
+            lm_capped_count = sum(1 for r in trailed if r.get(f"trail_{name}_lm_capped") is True)
+            in_gap_count = sum(1 for r in trailed if r.get(f"trail_{name}_lm_capped_in_gap") is True)
+            activations = [r[f"trail_{name}_activation_ticks"] for r in trailed if r.get(f"trail_{name}_activation_ticks") not in (None, "")]
+            activation_rate = len(activations) / len(trailed) * 100.0 if trailed else 0.0
             total = sum(profits)
             win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
             avg_ticks = sum(ticks_vals) / len(ticks_vals) if ticks_vals else 0.0
+            marker = "  <-- ACTIVE (provisional)" if name == ACTIVE_TRAIL_RULE else ""
             print(
                 f"  {name:16s}: total=${total:+8.2f}  win_rate={win_rate:5.1f}%  "
-                f"triggered={triggered_count:4d}/{len(trailed)}  avg_ticks_held={avg_ticks:.1f}"
+                f"triggered={triggered_count:4d}/{len(trailed)}  avg_ticks_held={avg_ticks:.1f}  "
+                f"lm_capped={lm_capped_count:4d} (in_gap={in_gap_count})  ever_activated={activation_rate:.1f}%{marker}"
             )
 
 
