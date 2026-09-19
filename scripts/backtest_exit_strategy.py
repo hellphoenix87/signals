@@ -171,11 +171,18 @@ CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
 # swept in isolation, before Thread 3 was wired, so it never accounted for
 # this. These candidates test tighter values against the REAL combined
 # system (real trail + real cap together, only the cap value varies).
-# 3.0 stays in the list as the current-production baseline. 0.0 is the
-# tightest possible value -- exits on the very first tick profit dips
-# below $0 at all, zero tolerance (needed a real bug fix in loss.py first:
-# `getattr(..., 5.0) or 5.0` was silently discarding a deliberate 0.0).
-FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0]
+# 0.0 is the tightest possible value -- exits on the very first tick
+# profit dips below $0 at all, zero tolerance (needed a real bug fix in
+# loss.py first: `getattr(..., 5.0) or 5.0` was silently discarding a
+# deliberate 0.0). Retuned to 1.0 (see docs/test-results/full-lifecycle-
+# backtest.md) -- but at 1.0, most cap-hit trades resolve in ~200 ticks,
+# too short a window for any recovery-predicting signal (indicator or
+# timing-based) to show up, per a follow-up correlation check. 7.0/15.0
+# added to test whether that signal reappears with more decision room --
+# 7.0 as the "cut" value under test, 15.0 as a looser reference to label
+# whether a 7.0-cut trade genuinely recovers (same technique used to
+# validate 1.0 against 3.0 originally).
+FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 7.0, 15.0]
 
 
 def to_tick_dict(t) -> dict:
