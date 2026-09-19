@@ -123,8 +123,21 @@ class Config:
     EXIT_BUFFER_PIPS: float = 0.2
     EXIT_EPS_PIPS: float = 0.0
     EXIT_BUFFER_START_TICK: int = 1
-    EXIT_TRAIL_START_PIPS: float = 2.0
-    EXIT_TRAIL_DISTANCE_PIPS: float = 1
+    # Post-breakeven trailing-profit gap (Thread 3, docs/exit-strategy-open-
+    # threads.md): once a position has armed breakeven, the exit trigger
+    # trails at best_profit_seen - gap, where
+    # gap = max(EXIT_TRAIL_GAP_FLOOR_MONEY, EXIT_TRAIL_GAP_PCT * best_profit).
+    # The trail only actively enforces once that trigger is positive (peak
+    # has grown past its own gap) -- a small peak leaves the trail inactive
+    # rather than force-exiting the moment the trigger math goes negative.
+    # Was hardcoded to a flat $0.04 pullback (ProfitExitManager), which a
+    # pooled 7-pair x 3-window backtest showed fires on ordinary tick noise
+    # (real median drawdown-from-peak $6.49) rather than ever functioning as
+    # a real trail. This percentage-of-peak shape (60% giveback, $2 floor)
+    # was the best of 5 candidates tested -- see
+    # docs/test-results/post-breakeven-trail-simulation.md.
+    EXIT_TRAIL_GAP_FLOOR_MONEY: float = 2.0
+    EXIT_TRAIL_GAP_PCT: float = 0.6
     EXIT_BUFFER_TICK_LIMIT: int = 10
     EXIT_STALE_TICK_LIMIT: int = 20
     EXIT_EXTRA_REVERSAL_GUARD_PIPS: float = 0.5

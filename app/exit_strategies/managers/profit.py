@@ -46,9 +46,24 @@ class ProfitExitManager:
     def _should_apply_htf_gating(self):
         return bool(getattr(self.config, "htf_filter_enabled", False))
 
+    def _trail_gap(self, peak: float) -> float:
+        """Post-breakeven trailing-profit giveback allowance for a given
+        peak profit: `max(config.trail_gap_floor_money, config.trail_gap_pct
+        * peak)` -- a percentage-of-peak gap with a dollar floor so a small
+        peak isn't stopped by trivial noise. See `Config.EXIT_TRAIL_GAP_PCT`
+        for the data behind this shape."""
+        floor = float(getattr(self.config, "trail_gap_floor_money", 2.0) or 2.0)
+        pct = float(getattr(self.config, "trail_gap_pct", 0.6) or 0.6)
+        return max(floor, pct * peak)
+
     def check_exit_on_tick(self, position, tick, state: PosState):
         """Arm break-even, track best-profit-seen, and exit if profit pulls
-        back more than $0.04 from that peak (`reason="trailing_breach_gt_5c"`)."""
+        back more than the trailing gap (`_trail_gap`, a percentage of peak
+        with a dollar floor) from that peak
+        (`reason="trailing_breach_pct_of_peak"`). The trail only actively
+        enforces once the gap-adjusted trigger is positive -- a peak still
+        smaller than its own gap leaves the trail inactive rather than
+        force-exiting on ordinary noise near breakeven."""
         if not getattr(self.config, "profit_exits_on_tick", True):
             return None
 
@@ -101,16 +116,16 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        breach_threshold = 0.04
+        trigger = state.best_profit - self._trail_gap(state.best_profit)
 
         if 0.00 < profit < state.best_profit:
-            if state.best_profit - profit > breach_threshold:
+            if trigger > 0.0 and profit <= trigger:
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
                     position_side=side,
                     volume=volume,
-                    reason="trailing_breach_gt_5c",
+                    reason="trailing_breach_pct_of_peak",
                 )
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
             if profit >= state.best_profit:
@@ -177,16 +192,16 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        breach_threshold = 0.04
+        trigger = state.best_profit - self._trail_gap(state.best_profit)
 
         if 0.00 < profit < state.best_profit:
-            if state.best_profit - profit > breach_threshold:
+            if trigger > 0.0 and profit <= trigger:
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
                     position_side=side,
                     volume=volume,
-                    reason="trailing_breach_gt_5c",
+                    reason="trailing_breach_pct_of_peak",
                 )
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
             if profit >= state.best_profit:
