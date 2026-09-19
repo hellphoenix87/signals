@@ -138,13 +138,15 @@ TRAIL_RULES: list[tuple[str, Any]] = [
 # not wired into ProfitExitManager/Config.
 ACTIVE_TRAIL_RULE = "pct60_floor2"
 
-# Thread 4 candidate replacements for LossExitManager's hardcoded
-# `drop_profit_after_be = -5` post-BE loss cap (app/exit_strategies/
-# managers/loss.py). -5.0 is kept in the list as the current-production
-# value, both for a direct sanity check against the real loss manager's
-# own numbers and as the baseline the others are compared to. The spread
-# is informed by the pooled worst-further-drawdown-after-cap percentiles
-# measured this session (median -$7.96, avg -$10.14, p10 -$16.44).
+# Thread 4 candidate values for LossExitManager's post-BE loss cap
+# (`Config.EXIT_POST_BE_LOSS_CAP_MONEY`, app/exit_strategies/managers/
+# loss.py) -- originally hardcoded to -5, now wired to Config and retuned
+# to -3 after this candidate spread's pooled 7-pair x 3-window result
+# (docs/test-results/post-breakeven-loss-cap.md: -$3 beat -$5 in 6/7
+# pairs). -5.0 stays in the list as the pre-retune baseline for
+# comparison. The spread is informed by the pooled worst-further-
+# drawdown-after-cap percentiles measured this session (median -$7.96,
+# avg -$10.14, p10 -$16.44).
 CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
 
 
@@ -444,7 +446,7 @@ def simulate_trail_rules(
 
     That inactive window is NOT actually unprotected in production,
     though: the real, unmodified `LossExitManager.check_exit_on_tick`
-    (Thread 4's existing post-BE loss cap -- the hardcoded `-$5`
+    (Thread 4's existing post-BE loss cap -- `Config.EXIT_POST_BE_LOSS_CAP_MONEY`
     force-close and the `be_recovered_after_unprofit` lock-in) keeps
     running every tick in parallel, via the same `state` object already
     carrying `be_armed=True` from the pre-breakeven phase. It's
@@ -461,13 +463,12 @@ def simulate_trail_rules(
     profit is whatever profit was observed at the end of the window
     (matches `post_be_final_profit`'s convention for the no-exit case).
 
-    Also replays `CAP_THRESHOLDS` (Thread 4 candidate replacements for the
-    real loss manager's hardcoded -$5) against the same raw profit series,
-    independent of any trail rule or the real loss manager -- simple
-    "exit the instant profit drops to/below this flat threshold" checks,
-    to compare alternate cap sizes against the current -$5 on equal
-    footing (-5.0 is included in `CAP_THRESHOLDS` as that direct
-    sanity-check baseline).
+    Also replays `CAP_THRESHOLDS` (Thread 4 candidate values for the real
+    loss manager's `Config.EXIT_POST_BE_LOSS_CAP_MONEY`) against the same
+    raw profit series, independent of any trail rule or the real loss
+    manager -- simple "exit the instant profit drops to/below this flat
+    threshold" checks, to compare alternate cap sizes against each other
+    on equal footing.
 
     Returns `{"trail_<name>_profit", "trail_<name>_ticks",
     "trail_<name>_triggered", "trail_<name>_lm_capped"}` for every name
@@ -547,9 +548,10 @@ def simulate_trail_rules(
                 lm_trigger_abs_idx = idx
         elif lm_trigger_abs_idx is not None and idx > lm_trigger_abs_idx:
             # Gap-reversal counterfactual: what real price did AFTER the real
-            # -$5 cap would have force-closed the trade -- continuing to
-            # watch with no exit rule applied, same as --measure-post-be but
-            # anchored to the cap point instead of the breakeven-arming point.
+            # post-BE loss cap would have force-closed the trade -- continuing
+            # to watch with no exit rule applied, same as --measure-post-be
+            # but anchored to the cap point instead of the breakeven-arming
+            # point.
             if gap_min_profit_after_cap is None or profit < gap_min_profit_after_cap:
                 gap_min_profit_after_cap = profit
             if not gap_recovered and profit > 0.0:
@@ -833,10 +835,11 @@ def summarize(results: list[dict], symbol: str) -> None:
         if lm_only:
             cap_hits = sum(1 for r in trailed if r.get("trail_lm_reason") == "profit_drop_after_be")
             lockin_hits = sum(1 for r in trailed if r.get("trail_lm_reason") == "be_recovered_after_unprofit")
+            live_cap = float(getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0)
             print(
-                f"  {'(reference) real -$5 post-BE cap alone':32s}: "
+                f"  {'(reference) real -$' + f'{live_cap:g}' + ' post-BE cap alone':32s}: "
                 f"triggered={len(lm_only):4d}/{len(trailed)}  total_on_those=${sum(lm_only):+.2f}  "
-                f"(-$5 cap: {cap_hits}, marginal-recovery lock-in: {lockin_hits})"
+                f"(-${live_cap:g} cap: {cap_hits}, marginal-recovery lock-in: {lockin_hits})"
             )
 
             capped = [r for r in trailed if r.get("trail_lm_reason") == "profit_drop_after_be"]
@@ -846,7 +849,7 @@ def summarize(results: list[dict], symbol: str) -> None:
                 real_capped_total = sum(r["trail_lm_profit"] for r in capped)
                 worst = [r["gap_min_profit_after_cap"] for r in capped if r.get("gap_min_profit_after_cap") is not None]
                 print(
-                    f"  {'  --> if the -$5 cap did NOT exist':32s}: "
+                    f"  {'  --> if the -$' + f'{live_cap:g}' + ' cap did NOT exist':32s}: "
                     f"{recovered}/{len(capped)} ({recovered/len(capped)*100:.1f}%) later recovered to positive profit; "
                     f"if left alone the whole window, total=${no_exit_final_total:+.2f} vs. real capped total=${real_capped_total:+.2f}"
                 )
@@ -881,7 +884,7 @@ def summarize(results: list[dict], symbol: str) -> None:
             total = sum(profits)
             win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
             avg_ticks = sum(ticks_vals) / len(ticks_vals) if ticks_vals else 0.0
-            marker = "  <-- current production value" if c == -5.0 else ""
+            marker = "  <-- current production value" if c == -float(getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0) else ""
             print(
                 f"  -${abs(c):<5.1f}: total=${total:+8.2f}  win_rate={win_rate:5.1f}%  "
                 f"triggered={triggered_count:4d}/{len(capped_thresholds)}  avg_ticks_to_cap={avg_ticks:.1f}{marker}"

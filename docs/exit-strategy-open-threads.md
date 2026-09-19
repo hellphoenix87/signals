@@ -10,7 +10,7 @@
 |---|---|---|
 | **P0 -- resolved (data in)** | 3. Post-BE trailing redesign | Touches 90-97% of all trades (everything that survives to breakeven). Real trail-rule simulation now run: scaling gap beats flat gap and beats holding forever, but only modestly -- see below. Not wired into `ProfitExitManager` yet. |
 | **P1** | 2. Dynamic pre-BE via signal confidence | Real, validated, immediately actionable, affects the live pair today -- but bounded ceiling, since it only touches the minority of trades that don't reach breakeven instantly. |
-| **P2** | 4. Post-BE loss cap | Subordinate to Thread 3 -- can't be sensibly sized until the trail mechanism above it is redesigned. Also entirely unscoped so far. |
+| **P2 -- resolved and wired** | 4. Post-BE loss cap | Turned out not to be subordinate to Thread 3 -- it fires 100% of the time before any Thread 3 trail rule activates, a fixed cost independent of that choice. Retuned from `-$5` to `-$3` (6/7 pairs improved) and wired to `Config.EXIT_POST_BE_LOSS_CAP_MONEY`. |
 | **P3 -- lowest** | 1. Session filtering per pair | Only matters once multi-pair live trading is actually adopted; `Config.SYMBOLS` is EURUSD-only today, so this has no current live impact. |
 | **(ops, not ranked)** | 5. PR #54 merge status | Not a design priority -- a housekeeping item to check before starting any of the above. |
 
@@ -80,15 +80,21 @@
 
 ## Thread 4: Post-breakeven loss cap (the "reversed after arming" case)
 
-**Priority: P2** -- subordinate to Thread 3 (can't be sensibly sized until the trail mechanism above it is redesigned), and entirely unscoped beyond noting it exists.
+**Priority: P2 -- resolved and wired.** Turned out not to be subordinate to Thread 3 after all: testing Thread 3's trail candidates surfaced that this cap fires in 100% of cases *before* any trail rule ever activates (confirmed at full pooled scale, 7 pairs x 3 windows), meaning its cost is a fixed cost independent of whichever Thread 3 rule gets chosen.
 
-**Status**: identified as a distinct, separate mechanism from Thread 3. Zero discussion or testing beyond noting it exists.
+**Status**: done. `Config.EXIT_POST_BE_LOSS_CAP_MONEY` (new) replaces the old hardcoded `drop_profit_after_be = -5` in `LossExitManager` -- wired through `ExitTradeConfig.post_be_loss_cap_money`, default retuned from `5.0` to `3.0`.
 
-**Context**: `LossExitManager.check_exit_on_tick`'s post-breakeven branch has its own hardcoded safety net: `drop_profit_after_be = -5` -- if a position that already armed breakeven reverses back into loss and drops to -$5 or below, force-close (`reason="profit_drop_after_be"`). There's also a related rule in the same branch: if profit went negative after arming and then recovers into `0 < profit < $0.05`, exit immediately (`reason="be_recovered_after_unprofit"`) to lock in a marginal win rather than let it round-trip again.
+**Context**: `LossExitManager.check_exit_on_tick`'s post-breakeven branch has its own safety net -- if a position that already armed breakeven reverses back into loss and drops to `-Config.EXIT_POST_BE_LOSS_CAP_MONEY` or below, force-close (`reason="profit_drop_after_be"`). There's also a related rule in the same branch: if profit went negative after arming and then recovers into `0 < profit < $0.05`, exit immediately (`reason="be_recovered_after_unprofit"`) to lock in a marginal win rather than let it round-trip again -- pooled data showed this **never fires** (0/2,754 trades), left as-is, not retuned.
 
-**Why this is explicitly a separate thread from Thread 3**: Thread 3 is about *protecting and growing* profit on a position that's doing well. This is about *what happens when a position that was doing fine turns bad again* -- a different risk scenario with its own question of what the right cap should be, whether it should be the same `$5` as the pre-breakeven soft-SL (arbitrary coincidence that it's currently the same hardcoded number) or something else, and whether the `$0.05` marginal-win lock-in threshold makes sense.
+**What was measured** (`scripts/backtest_exit_strategy.py --simulate-trail`, pooled 7 pairs x 3 windows, 2,754-2,826 `reached_be` trades depending on the specific stat):
+- The `-$5` cap fires on 41.2% of `reached_be` trades (range 30.5%-54.3% per pair), 100% of the time before any Thread 3 trail rule has activated.
+- A gap-reversal counterfactual (continuing to watch real price from the exact breach point, no exit rule) found 28.3% of `-$5`-capped trades would have recovered to positive profit if left alone -- but the pooled net effect of removing the cap entirely for that specific already-capped subset was still a loss (-$940.77 across those 1,134 trades, 6/7 pairs).
+- **The decision-relevant test**: 5 candidate flat thresholds (`-$3/-$5/-$7/-$10/-$15`) replayed as independent, population-wide rules (not a retrospective counterfactual on one fixed subset). `-$3` won pooled (-$1,331.87 total vs `-$5`'s -$1,903.89) and in 6 of 7 pairs -- only EURUSD favored a looser cap. Tighter beat looser monotonically across the tested range, suggesting `-$3` may not even be the true optimum (untested: anything tighter than `-$3`).
+- One caveat not yet resolved: recovery rate (how many capped trades would have recovered if left alone) was only measured for the real `-$5` rule, not for `-$3`/`-$7`/`-$10`/`-$15` individually -- so it's not yet known whether `-$3` wins on genuinely better precision (cutting fewer real recoveries) or mainly on avoiding tail risk. Aggregate total already nets this out either way, but the distinction matters for confidence in the choice.
 
-**Next step, if resumed**: this hasn't been scoped at all yet -- the first step would be deciding whether it's even worth its own investigation (how often does this actually fire? is `-$5` here principled or just copy-pasted from the pre-breakeven number?) before designing anything.
+**Full writeup**: `docs/test-results/post-breakeven-loss-cap.md`.
+
+**Next step, if resumed**: test thresholds tighter than `-$3` (e.g. `-$1`/`-$2`) to check whether the monotonic tighter-is-better trend continues or reverses; and/or build the missing per-threshold recovery-rate breakdown to understand *why* `-$3` wins, not just that it does.
 
 ## Thread 5: PR #54 -- carrying all of this, still unmerged
 

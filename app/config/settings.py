@@ -106,6 +106,15 @@ class Config:
     EXIT_MAX_LOSS_MONEY: float = 5.0
     EXIT_MAX_LOSS_PRICE: float = 0.0
     EXIT_MAX_LOSS_PIPS: float = 0.0
+    # Post-breakeven loss cap (Thread 4, docs/exit-strategy-open-threads.md):
+    # once a position has armed breakeven, force-close if profit reverses to
+    # -this value or below. Was hardcoded to -5 in LossExitManager,
+    # independent of EXIT_MAX_LOSS_MONEY (the pre-breakeven cap) despite
+    # sharing the same number by coincidence. Retuned to $3 after a pooled
+    # 7-pair x 3-window backtest (scripts/backtest_exit_strategy.py
+    # --simulate-trail) showed $3 beats $5 in 6 of 7 pairs -- see
+    # docs/test-results/post-breakeven-loss-cap.md.
+    EXIT_POST_BE_LOSS_CAP_MONEY: float = 3.0
     EXIT_SOFT_SL_MONEY_GRACE_TICKS: int = 5
     EXIT_ON_FIRST_TICK_NOT_FAVORABLE: bool = False
     EXIT_BE_DISTANCE_PIPS: float = 0.5

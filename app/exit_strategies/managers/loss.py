@@ -49,9 +49,9 @@ class LossExitManager:
         entirely (the arming window never "expires"), rather than force-
         closing every position on tick 1 the way an unguarded `0` would.
 
-        After arming: exits if profit drops back to `-$5` or lower
-        (`reason="profit_drop_after_be"`); if profit went negative after
-        arming and then recovers into `0 < profit < $0.05`, exits with
+        After arming: exits if profit drops back to `-config.post_be_loss_cap_money`
+        or lower (`reason="profit_drop_after_be"`); if profit went negative
+        after arming and then recovers into `0 < profit < $0.05`, exits with
         `reason="be_recovered_after_unprofit"` to lock in a marginal win
         rather than let it round-trip again.
         """
@@ -114,7 +114,10 @@ class LossExitManager:
             )
 
         if state.be_armed:
-            drop_profit_after_be = -5
+            post_be_loss_cap_money = float(
+                getattr(self.config, "post_be_loss_cap_money", 5.0) or 5.0
+            )
+            drop_profit_after_be = -post_be_loss_cap_money
             if profit < 0.0:
                 if not state.was_unprofitable_after_be:
                     state.was_unprofitable_after_be = True

@@ -1,6 +1,6 @@
 # Thread 4: Post-Breakeven Loss Cap (the "reversed after arming" gap)
 
-Status: in-progress
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -26,11 +26,17 @@ A corrected gap-reversal counterfactual (same smoke sample, 49 capped trades) fo
 - Based on Phase 1's pooled numbers, decide: is `-$5` too tight (cutting off too many real recoveries, per the counterfactual), too loose (letting too much tail risk through), or roughly right?
 - If the data supports testing alternates: extend `scripts/backtest_exit_strategy.py` with a small set of candidate cap thresholds (e.g. `-$3`, `-$7`, `-$10`), mirroring the `TRAIL_RULES` pattern -- reuse the existing gap-reversal-counterfactual machinery rather than rebuilding it, since it already isolates exactly the trades and window this needs.
 - Update `docs/exit-strategy-open-threads.md` Thread 4 with the pooled findings and recommendation (or explicit "leave at -$5, here's why" if that's the data-backed call).
-- **Wiring any change into `LossExitManager`/`Config` is out of scope for this plan** -- same measurement-only boundary Thread 3 used; `Config.EXIT_MAX_LOSS_MONEY` precedent exists for turning a hardcoded threshold into a real config value, but that's a follow-up once a number is chosen and reviewed.
+
+**Result**: `-$3` beat `-$5` pooled (+$572.02) and in 6/7 pairs, tested as an independent population-wide rule (not just a retrospective counterfactual on the current rule's already-selected subset). Full writeup: `docs/test-results/post-breakeven-loss-cap.md`.
+
+**Scope expansion, per explicit user instruction mid-session**: wiring was originally scoped out of this plan (see the struck-through line below, kept for history) -- the user reviewed the Phase 2 result and asked to wire `-$3` in directly rather than leave it at measurement-only. Done: `Config.EXIT_POST_BE_LOSS_CAP_MONEY` (new field, default `3.0`) replaces the hardcoded `-5` in `LossExitManager`, via `ExitTradeConfig.post_be_loss_cap_money` -- same pattern `EXIT_MAX_LOSS_MONEY` already established for the pre-breakeven side. Verified end-to-end with a smoke test: the real loss manager's live output now matches the independent `-$3` candidate's numbers exactly.
+
+~~Wiring any change into `LossExitManager`/`Config` is out of scope for this plan~~ -- superseded, see above.
 
 ## Out of scope (explicit, not forgotten)
 
-- Wiring any Thread 3 trail rule OR any Thread 4 cap change into production code -- both remain measurement-only until explicitly reviewed and approved for wiring.
+- Testing thresholds tighter than `-$3` (e.g. `-$1`/`-$2`) -- the tighter-is-better trend across the tested range suggests `-$3` may not be the true optimum, but this wasn't chased further.
+- Per-threshold recovery-rate breakdown for `-$3`/`-$7`/`-$10`/`-$15` (only built for the real `-$5` rule) -- would clarify *why* `-$3` wins, not just that it does.
 - Re-litigating Thread 3's rule choice (`pct60_floor2` stays the provisional "active" label from #55) -- this plan is scoped to the gap/cap question specifically.
 - Threads 1 and 2 (session filtering per pair, dynamic pre-BE via signal confidence) -- unrelated, lower priority, not touched here.
 - No tests, per MVP/POC mode.
