@@ -110,11 +110,22 @@ class Config:
     # once a position has armed breakeven, force-close if profit reverses to
     # -this value or below. Was hardcoded to -5 in LossExitManager,
     # independent of EXIT_MAX_LOSS_MONEY (the pre-breakeven cap) despite
-    # sharing the same number by coincidence. Retuned to $3 after a pooled
-    # 7-pair x 3-window backtest (scripts/backtest_exit_strategy.py
-    # --simulate-trail) showed $3 beats $5 in 6 of 7 pairs -- see
-    # docs/test-results/post-breakeven-loss-cap.md.
-    EXIT_POST_BE_LOSS_CAP_MONEY: float = 3.0
+    # sharing the same number by coincidence. First retuned to $3 (isolated
+    # sweep, before Thread 3 was wired -- docs/test-results/post-breakeven-
+    # loss-cap.md), then to $1 after the first full-lifecycle backtest (real
+    # trail + real cap together) found the real trail's average win ($1.44)
+    # is less than half of $3's average loss ($3.16) -- $1 beat every other
+    # candidate tested ($0/$1/$1.5/$2/$2.5/$3), pooled and on EURUSD alone --
+    # see docs/test-results/full-lifecycle-backtest.md.
+    #
+    # TEMPORARY, not a final answer: even at this best-tested value, the
+    # full-lifecycle backtest is still net negative overall (-$852.83
+    # pooled, -$23.80 EURUSD-only, both at $1). Exit-side tuning (this
+    # value and Thread 3's trail shape) has been swept about as far as
+    # bounded candidate sweeps can take it without turning the system
+    # profitable -- the real lever left is entry-signal quality (Threads 1/2,
+    # still open), not further retuning this number.
+    EXIT_POST_BE_LOSS_CAP_MONEY: float = 1.0
     EXIT_SOFT_SL_MONEY_GRACE_TICKS: int = 5
     EXIT_ON_FIRST_TICK_NOT_FAVORABLE: bool = False
     EXIT_BE_DISTANCE_PIPS: float = 0.5

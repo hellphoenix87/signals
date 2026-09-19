@@ -1,6 +1,6 @@
 # Full-Lifecycle Exit-Strategy Backtest
 
-Status: in-progress
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -23,9 +23,22 @@ Now that Thread 3 (trailing stop, `pct60_floor2`) and Thread 4 (post-BE loss cap
 - Write up in `docs/test-results/full-lifecycle-backtest.md`.
 - Update `docs/exit-strategy-open-threads.md`'s opening "How we got here" framing to note this gap is now closed, and/or add a summary note pointing to the new doc.
 
+**Result**: pooled across 4,276 trades, total realized P&L **-$839.91**, every pair negative. Root cause: a win/loss size mismatch (trail exits avg +$1.44, cap exits avg -$3.16 -- over 2x), not a low win rate (trade counts were close to balanced). Full writeup: `docs/test-results/full-lifecycle-backtest.md`.
+
+## Phase 3: Retune Thread 4's cap against the real trail (scope expansion, per explicit user instruction)
+
+**Originally out of scope** (see the struck-through line below, kept for history) -- Phase 2's result made clear that `-$3` was picked in an isolated sweep before Thread 3 was wired, never accounting for the real trail's actual win size. The user asked to retune it properly.
+
+- `simulate_full_lifecycle_cap_sweep`: replays `FULL_LIFECYCLE_CAP_CANDIDATES` against the same tick stream in one pass, each with its own independent `LossExitManager`/`PosState` but the SAME real trail formula, via `--sweep-post-be-cap`.
+- Fixed a real bug found along the way: `getattr(self.config, "post_be_loss_cap_money", 5.0) or 5.0` in `LossExitManager` silently discarded a deliberately-configured `0.0`, falling back to `5.0` -- fixed before testing the `$0` candidate.
+- Swept `$0/$1/$1.5/$2/$2.5/$3` pooled (3,931 trades) and EURUSD-only (509 trades, the only pair actually live in `Config.SYMBOLS`). **`-$1` won both** -- pooled -$852.83 vs `-$3`'s -$1,125.70; EURUSD-only -$23.80 vs `-$3`'s -$77.40. Not monotonic: `$0` (near-zero tolerance, ~5% win rate) is worse than `$1`, confirming a real valley rather than "tighter is always better."
+- **Wired**: `Config.EXIT_POST_BE_LOSS_CAP_MONEY = 1.0` (was `3.0`), explicitly documented as temporary -- even at this best-tested value the system remains net negative (-$852.83 pooled / -$23.80 EURUSD-only). Exit-side tuning has been pushed about as far as bounded sweeps reasonably go; further improvement needs entry-signal quality (Threads 1/2), not more retuning of this number.
+
+~~Any further retuning of Thread 3/4's wired values based on this result -- this backtest measures the system as currently wired; if the result suggests either value should change, that's a new, separate investigation, not folded into this one.~~ -- superseded, see above.
+
 ## Out of scope (explicit, not forgotten)
 
-- Any further retuning of Thread 3/4's wired values based on this result -- this backtest measures the system as currently wired; if the result suggests either value should change, that's a new, separate investigation, not folded into this one.
 - Candle-close profit exits (`profit_exits_on_candle_close`, default `False`) -- matches the live default, not exercised here.
 - Threads 1 and 2 (session filtering per pair, dynamic pre-BE via signal confidence) -- explicitly deferred by the user, not touched here.
+- Testing cap values tighter than `$0` (none exist -- `$0` is the floor by construction) or between the tested half-dollar steps (e.g. `$0.5`, `$0.75`) -- the tested range already found the valley's approximate location, finer resolution not chased.
 - No tests, per MVP/POC mode.

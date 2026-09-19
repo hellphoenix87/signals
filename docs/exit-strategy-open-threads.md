@@ -4,13 +4,15 @@
 
 **How we got here, in one paragraph**: a code review of `app/exit_strategies/managers/{profit,loss}.py` found that a lot of `Config`'s exit-related surface is dead -- config fields exist, are threaded through constructors, and are never read; the real behavior was governed by hardcoded constants instead (`-$5` pre-breakeven stop, `$0.04` post-breakeven trail). We fixed the pre-breakeven side (`EXIT_MAX_LOSS_MONEY` now real, `$5`), built the first-ever full exit-strategy-aware backtest (not just signal-quality proxies), and along the way kept finding more open questions than we closed. This doc is those open questions.
 
+**Update (later session)**: Threads 3 and 4 are both now resolved and wired -- the post-breakeven trailing stop (`pct60_floor2`) and the post-breakeven loss cap (`-$1`, retuned once against the real trail). This closed a gap flagged since the very first pre-breakeven backtest: `docs/test-results/full-lifecycle-backtest.md` is the first backtest in this project to run a trade through the real, complete exit system end-to-end and report one true realized P&L. The answer: **still net negative** (-$839.91 pooled at the time of first measurement, improved to -$852.83 pooled / -$23.80 EURUSD-only after retuning the cap), even after exit-side tuning was pushed about as far as bounded sweeps reasonably go. The remaining lever is entry-signal quality (Threads 1/2 below), not further exit retuning.
+
 **Priority at a glance** (reasoning for each is in its own section below):
 
 | Priority | Thread | Why |
 |---|---|---|
 | **P0 -- resolved and wired** | 3. Post-BE trailing redesign | Touches 90-97% of all trades (everything that survives to breakeven). `pct60_floor2` (60% of peak, $2 floor) wired into `ProfitExitManager` via `Config.EXIT_TRAIL_GAP_PCT`/`EXIT_TRAIL_GAP_FLOOR_MONEY`, replacing the hardcoded `$0.04` gap. |
 | **P1** | 2. Dynamic pre-BE via signal confidence | Real, validated, immediately actionable, affects the live pair today -- but bounded ceiling, since it only touches the minority of trades that don't reach breakeven instantly. |
-| **P2 -- resolved and wired** | 4. Post-BE loss cap | Turned out not to be subordinate to Thread 3 -- it fires 100% of the time before any Thread 3 trail rule activates, a fixed cost independent of that choice. Retuned from `-$5` to `-$3` (6/7 pairs improved) and wired to `Config.EXIT_POST_BE_LOSS_CAP_MONEY`. |
+| **P2 -- resolved and wired (temporary value)** | 4. Post-BE loss cap | Turned out not to be subordinate to Thread 3 -- it fires 100% of the time before any Thread 3 trail rule activates, a fixed cost independent of that choice. Retuned `-$5` -> `-$3` (isolated sweep) -> `-$1` (full-lifecycle sweep against the real trail, after finding the real trail's avg win $1.44 is under half `-$3`'s avg loss $3.16). Even at `-$1`, the full-lifecycle backtest is still net negative -- see the "How we got here" update below. |
 | **P3 -- lowest** | 1. Session filtering per pair | Only matters once multi-pair live trading is actually adopted; `Config.SYMBOLS` is EURUSD-only today, so this has no current live impact. |
 | **(ops, not ranked)** | 5. PR #54 merge status | Not a design priority -- a housekeeping item to check before starting any of the above. |
 
@@ -82,7 +84,7 @@
 
 **Priority: P2 -- resolved and wired.** Turned out not to be subordinate to Thread 3 after all: testing Thread 3's trail candidates surfaced that this cap fires in 100% of cases *before* any trail rule ever activates (confirmed at full pooled scale, 7 pairs x 3 windows), meaning its cost is a fixed cost independent of whichever Thread 3 rule gets chosen.
 
-**Status**: done. `Config.EXIT_POST_BE_LOSS_CAP_MONEY` (new) replaces the old hardcoded `drop_profit_after_be = -5` in `LossExitManager` -- wired through `ExitTradeConfig.post_be_loss_cap_money`, default retuned from `5.0` to `3.0`.
+**Status**: done, but the wired value is explicitly temporary. `Config.EXIT_POST_BE_LOSS_CAP_MONEY` (new) replaces the old hardcoded `drop_profit_after_be = -5` in `LossExitManager` -- wired through `ExitTradeConfig.post_be_loss_cap_money`, retuned `5.0` -> `3.0` (isolated sweep) -> **`1.0`** (retested against the real trail once Thread 3 was also wired -- see below).
 
 **Context**: `LossExitManager.check_exit_on_tick`'s post-breakeven branch has its own safety net -- if a position that already armed breakeven reverses back into loss and drops to `-Config.EXIT_POST_BE_LOSS_CAP_MONEY` or below, force-close (`reason="profit_drop_after_be"`). There's also a related rule in the same branch: if profit went negative after arming and then recovers into `0 < profit < $0.05`, exit immediately (`reason="be_recovered_after_unprofit"`) to lock in a marginal win rather than let it round-trip again -- pooled data showed this **never fires** (0/2,754 trades), left as-is, not retuned.
 
@@ -94,7 +96,9 @@
 
 **Full writeup**: `docs/test-results/post-breakeven-loss-cap.md`.
 
-**Next step, if resumed**: test thresholds tighter than `-$3` (e.g. `-$1`/`-$2`) to check whether the monotonic tighter-is-better trend continues or reverses; and/or build the missing per-threshold recovery-rate breakdown to understand *why* `-$3` wins, not just that it does.
+**Superseded by the full-lifecycle backtest** (`docs/test-results/full-lifecycle-backtest.md`): the `-$3` pick above was swept *before* Thread 3 was wired, so it never accounted for the real trail's actual win size. Once both were wired together, the first full-lifecycle backtest found the real trail's average win ($1.44) is under half of `-$3`'s average loss ($3.16) -- a genuine win/loss size mismatch, not a low win rate (win/loss trade *counts* were close to balanced). Retesting `-$0/-$1/-$1.5/-$2/-$2.5/-$3` against the real combined system (not in isolation) found **`-$1` wins**, pooled and on EURUSD alone (the only pair actually live in `Config.SYMBOLS`) -- beating `-$3` by $272.87 pooled / $53.60 on EURUSD. Not simply "tighter is always better" though: `$0` (cuts on literally the first tick of any negative noise, ~5% win rate) is worse than `$1`, so there's a real valley, not a floor-less slope.
+
+**This is still not a profitable system, even at `-$1`** -- -$852.83 pooled, -$23.80 EURUSD-only, both net negative. Exit-side tuning (this cap and Thread 3's trail shape) has been swept about as far as bounded candidate sweeps can reasonably take it. **Next step, if resumed**: this thread is closed as far as exit-side tuning goes; further improvement needs entry-signal quality (Threads 1/2, both still open), not another round of cap/trail retuning.
 
 ## Thread 5: PR #54 -- carrying all of this, still unmerged
 
