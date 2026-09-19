@@ -164,6 +164,16 @@ ACTIVE_TRAIL_RULE = "pct60_floor2"
 # avg -$10.14, p10 -$16.44).
 CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
 
+# Retune candidates for --full-lifecycle --sweep-post-be-cap: the first
+# full-lifecycle backtest (post Thread 3+4 wiring) found the real
+# trailing-stop's average captured win ($1.44) is less than half the real
+# post-BE cap's average loss ($3.16 at -3.0) -- CAP_THRESHOLDS above was
+# swept in isolation, before Thread 3 was wired, so it never accounted for
+# this. These candidates test tighter values against the REAL combined
+# system (real trail + real cap together, only the cap value varies).
+# 3.0 stays in the list as the current-production baseline.
+FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [1.0, 1.5, 2.0, 2.5, 3.0]
+
 
 def to_tick_dict(t) -> dict:
     """`mt5.copy_ticks_from` returns a numpy structured array -- each
@@ -225,6 +235,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--post-be-max-ticks", type=int, default=3000, help="How many ticks past arming to observe for --measure-post-be / --simulate-trail")
     parser.add_argument("--full-lifecycle", action="store_true", help="Replay real ticks through the actual, complete ExitTrade (both managers, real precedence) from entry to a genuine final exit -- reports one real realized P&L per trade under the system as it actually exists today. Mutually exclusive with the phase-based flags above (--counterfactual/--disable-timeout/--measure-post-be/--simulate-trail are ignored when this is set).")
     parser.add_argument("--full-lifecycle-max-ticks", type=int, default=4000, help="Max real ticks fetched per trade for --full-lifecycle -- needs to cover pre-BE arming plus the full post-BE trail/cap lifecycle, not just the pre-BE window.")
+    parser.add_argument("--sweep-post-be-cap", action="store_true", help="Only with --full-lifecycle: instead of using Config's single post-BE loss-cap value, replay FULL_LIFECYCLE_CAP_CANDIDATES against the same tick stream in one pass, each paired with the SAME real trailing-stop formula -- so cap retuning is tested against the real combined system, not in isolation.")
     return parser.parse_args()
 
 
@@ -714,6 +725,106 @@ def simulate_full_lifecycle(
     }
 
 
+def simulate_full_lifecycle_cap_sweep(
+    *,
+    exit_trades: list[tuple[str, Any]],
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Like `simulate_full_lifecycle`, but replays every `(label,
+    exit_trade)` pair in `exit_trades` against the same real tick stream in
+    a single pass -- each candidate has its own independent `PosState`, own
+    `LossExitManager` (a different `post_be_loss_cap_money`), and the SAME
+    real `ProfitExitManager` trail formula, so only the cap value varies
+    and every candidate's outcome reflects the real, complete combined
+    system rather than the cap in isolation. A candidate stops updating
+    once it resolves (its own loss or profit exit); others continue
+    independently over the same price path.
+
+    Returns `{"<label>_outcome", "<label>_profit", "<label>_ticks"}` for
+    every label in `exit_trades`.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        result = {}
+        for label, _ in exit_trades:
+            result[f"{label}_outcome"] = "no_ticks"
+            result[f"{label}_profit"] = None
+            result[f"{label}_ticks"] = 0
+        return result
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    states = {label: PosState(anchor=0.0, prev_price=0.0) for label, _ in exit_trades}
+    resolved = {label: False for label, _ in exit_trades}
+    outcome: dict[str, Optional[str]] = {label: None for label, _ in exit_trades}
+    result_profit: dict[str, Optional[float]] = {label: None for label, _ in exit_trades}
+    result_ticks: dict[str, Optional[int]] = {label: None for label, _ in exit_trades}
+    managers = {
+        label: (
+            et._loss_manager,
+            et._profit_manager,
+            bool(getattr(et._config, "profit_exits_on_tick", True)),
+        )
+        for label, et in exit_trades
+    }
+
+    profit = 0.0
+    for idx, t in enumerate(ticks[:max_ticks]):
+        if all(resolved.values()):
+            break
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        position = {
+            "symbol": symbol, "type": pos_type, "ticket": idx,
+            "price_open": entry_price, "volume": lot, "profit": profit,
+        }
+        tick_dict = to_tick_dict(t)
+
+        for label, _ in exit_trades:
+            if resolved[label]:
+                continue
+            loss_manager, profit_manager, profit_exits_on_tick = managers[label]
+            state = states[label]
+            action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                resolved[label] = True
+                outcome[label] = action.reason
+                result_profit[label] = profit
+                result_ticks[label] = idx + 1
+                continue
+            if profit_exits_on_tick:
+                action = profit_manager.check_exit_on_tick(position, tick_dict, state)
+                if action:
+                    resolved[label] = True
+                    outcome[label] = action.reason
+                    result_profit[label] = profit
+                    result_ticks[label] = idx + 1
+
+    for label, _ in exit_trades:
+        if not resolved[label]:
+            outcome[label] = "exhausted"
+            result_profit[label] = profit
+            result_ticks[label] = min(len(ticks), max_ticks)
+
+    result = {}
+    for label, _ in exit_trades:
+        result[f"{label}_outcome"] = outcome[label]
+        result[f"{label}_profit"] = result_profit[label]
+        result[f"{label}_ticks"] = result_ticks[label]
+    return result
+
+
 def run(
     symbol: str,
     weeks: float,
@@ -728,6 +839,7 @@ def run(
     simulate_trail: bool = False,
     full_lifecycle: bool = False,
     full_lifecycle_max_ticks: int = 4000,
+    sweep_post_be_cap: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -782,6 +894,13 @@ def run(
     exit_config = ExitTradeConfig(be_arming_ticks=0) if disable_timeout else None
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
+    cap_sweep_trades: list[tuple[str, Any]] = []
+    if full_lifecycle and sweep_post_be_cap:
+        for c in FULL_LIFECYCLE_CAP_CANDIDATES:
+            label = f"cap{str(c).replace('.', '_')}"
+            cfg = ExitTradeConfig(post_be_loss_cap_money=c)
+            cap_sweep_trades.append((label, create_exit_trade(broker=broker, risk_manager=risk_manager, config=cfg)))
+
     results: list[dict] = []
 
     logging.disable(logging.CRITICAL)
@@ -804,7 +923,18 @@ def run(
                 if final_signal not in ("buy", "sell"):
                     continue
 
-                if full_lifecycle:
+                if full_lifecycle and sweep_post_be_cap:
+                    sim = simulate_full_lifecycle_cap_sweep(
+                        exit_trades=cap_sweep_trades,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                    )
+                elif full_lifecycle:
                     sim = simulate_full_lifecycle(
                         exit_trade=exit_trade,
                         symbol=symbol,
@@ -848,7 +978,10 @@ def run(
     finally:
         logging.disable(logging.NOTSET)
 
-    if full_lifecycle:
+    if full_lifecycle and sweep_post_be_cap:
+        write_full_lifecycle_cap_sweep_csv(results, symbol)
+        summarize_full_lifecycle_cap_sweep(results, symbol)
+    elif full_lifecycle:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
     else:
@@ -1068,6 +1201,49 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
         )
 
 
+def _cap_sweep_labels() -> list[str]:
+    return [f"cap{str(c).replace('.', '_')}" for c in FULL_LIFECYCLE_CAP_CANDIDATES]
+
+
+def write_full_lifecycle_cap_sweep_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_full_lifecycle_cap_sweep_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+    ] + [
+        f"{label}_{suffix}" for label in _cap_sweep_labels() for suffix in ("outcome", "profit", "ticks")
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_full_lifecycle_cap_sweep(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    print(f"\n=== Full-lifecycle post-BE cap sweep (real ExitTrade, cap value varies) for {symbol}, {total} trades ===")
+    for c, label in zip(FULL_LIFECYCLE_CAP_CANDIDATES, _cap_sweep_labels()):
+        profits = [r[f"{label}_profit"] for r in results if r.get(f"{label}_profit") is not None]
+        outcomes = [r[f"{label}_outcome"] for r in results if r.get(f"{label}_outcome") is not None]
+        total_pnl = sum(profits)
+        win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+        cap_hits = sum(1 for o in outcomes if o == "profit_drop_after_be")
+        trail_hits = sum(1 for o in outcomes if o == "trailing_breach_pct_of_peak")
+        marker = "  <-- current production value" if c == float(getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0) else ""
+        print(
+            f"  -${c:<4.1f}: total=${total_pnl:+9.2f}  win_rate={win_rate:5.1f}%  "
+            f"cap_hits={cap_hits:4d}  trail_hits={trail_hits:4d}{marker}"
+        )
+
+
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
@@ -1085,6 +1261,7 @@ def main() -> None:
         args.simulate_trail,
         args.full_lifecycle,
         args.full_lifecycle_max_ticks,
+        args.sweep_post_be_cap,
     )
 
 
