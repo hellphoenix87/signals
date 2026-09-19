@@ -69,6 +69,10 @@ class ExitTradeConfig:
     max_loss_price: float = float(getattr(Config, "EXIT_MAX_LOSS_PRICE", 0.0) or 0.0)
     max_loss_pips: float = float(getattr(Config, "EXIT_MAX_LOSS_PIPS", 0.0) or 0.0)
 
+    post_be_loss_cap_money: float = float(
+        getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0
+    )
+
     min_profit_pips: float = float(getattr(Config, "EXIT_MIN_PROFIT_PIPS", 0.0) or 0.0)
 
     early_abort_enabled: bool = bool(getattr(Config, "EXIT_EARLY_ABORT_ENABLED", False))
