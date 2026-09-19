@@ -50,6 +50,11 @@ class ExitTradeConfig:
     buffer_start_tick: int = int(getattr(Config, "EXIT_BUFFER_START_TICK", 3) or 3)
     buffer_start_candle: int = int(getattr(Config, "EXIT_BUFFER_START_CANDLE", 2) or 2)
 
+    trail_gap_floor_money: float = float(
+        getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0
+    )
+    trail_gap_pct: float = float(getattr(Config, "EXIT_TRAIL_GAP_PCT", 0.6) or 0.6)
+
     eps_pips: float = float(getattr(Config, "EXIT_EPS_PIPS", 0.0) or 0.0)
 
     exit_on_first_tick_not_favorable: bool = bool(
