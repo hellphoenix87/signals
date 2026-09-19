@@ -114,9 +114,12 @@ class LossExitManager:
             )
 
         if state.be_armed:
-            post_be_loss_cap_money = float(
-                getattr(self.config, "post_be_loss_cap_money", 5.0) or 5.0
-            )
+            # `or 5.0` here would silently discard a deliberate `0.0`
+            # (cap immediately, zero tolerance) -- `0.0` is falsy but a
+            # legitimate configured value, unlike a genuinely-missing
+            # attribute (which `getattr`'s own default already handles).
+            config_value = getattr(self.config, "post_be_loss_cap_money", None)
+            post_be_loss_cap_money = float(config_value) if config_value is not None else 5.0
             drop_profit_after_be = -post_be_loss_cap_money
             if profit < 0.0:
                 if not state.was_unprofitable_after_be:

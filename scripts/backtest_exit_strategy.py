@@ -79,12 +79,27 @@ minimum-profit floor before the trail engages). A reversal below
 breakeven before the trail ever engages is Thread 4's (the post-BE
 loss cap's) territory, not simulated here.
 
+`--full-lifecycle` is the odd one out from everything above: instead of
+stopping at breakeven or reimplementing candidate rules independently,
+it replays real ticks through the actual, complete `ExitTrade` --
+`exit_trade._loss_manager.check_exit_on_tick` THEN (if no loss action)
+`exit_trade._profit_manager.check_exit_on_tick`, the same precedence
+`ExitTrade.on_tick` itself uses, gated the same way on
+`config.profit_exits_on_tick` -- from entry to a genuine final exit, one
+`PosState` carrying continuously across the whole trade with no phase
+boundary. This is the first backtest in this project to report a real,
+single, complete realized P&L per trade under the system as it actually
+exists today (mutually exclusive with `--counterfactual`/
+`--disable-timeout`/`--measure-post-be`/`--simulate-trail`, which are all
+phase-based).
+
 Usage:
     pipenv run python scripts/backtest_exit_strategy.py [--symbol EURUSD]
         [--weeks 4] [--start-pos 1] [--lot 0.2] [--max-ticks-per-trade 500]
         [--counterfactual] [--counterfactual-max-ticks 3000]
         [--disable-timeout] [--measure-post-be] [--simulate-trail]
         [--post-be-max-ticks 3000]
+        [--full-lifecycle] [--full-lifecycle-max-ticks 4000]
 
 Per-trade results are written to a CSV under `backtest_results/` for
 offline analysis; the aggregate summary is printed to stdout.
@@ -149,6 +164,37 @@ ACTIVE_TRAIL_RULE = "pct60_floor2"
 # avg -$10.14, p10 -$16.44).
 CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
 
+# Retune candidates for --full-lifecycle --sweep-post-be-cap: the first
+# full-lifecycle backtest (post Thread 3+4 wiring) found the real
+# trailing-stop's average captured win ($1.44) is less than half the real
+# post-BE cap's average loss ($3.16 at -3.0) -- CAP_THRESHOLDS above was
+# swept in isolation, before Thread 3 was wired, so it never accounted for
+# this. These candidates test tighter values against the REAL combined
+# system (real trail + real cap together, only the cap value varies).
+# 3.0 stays in the list as the current-production baseline. 0.0 is the
+# tightest possible value -- exits on the very first tick profit dips
+# below $0 at all, zero tolerance (needed a real bug fix in loss.py first:
+# `getattr(..., 5.0) or 5.0` was silently discarding a deliberate 0.0).
+FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0]
+
+
+def to_tick_dict(t) -> dict:
+    """`mt5.copy_ticks_from` returns a numpy structured array -- each
+    record only supports `t["bid"]` item access, not attribute access.
+    The real managers' own `get_tick_value` (app/exit_strategies/managers/
+    {profit,loss}.py) only handles a plain dict or an attribute-accessible
+    object (real live ticks from `symbol_info_tick` are the latter) -- so a
+    raw numpy tick record silently reads back `None` for both, unnoticed
+    everywhere `price` has an explicit None-guard (LossExitManager, where
+    it only gates the price/pips soft-SL variants -- dead code paths this
+    whole project's history, since only the money-based variant has ever
+    been configured), but a hard crash where it doesn't (ProfitExitManager,
+    which uses price unconditionally). Converting to a plain dict once
+    here is the fix, not touching the production `get_tick_value`
+    functions themselves, which are correct for how live trading actually
+    calls them."""
+    return {"bid": float(t["bid"]), "ask": float(t["ask"])}
+
 
 def profit_needs_conversion(symbol: str, account_currency: str) -> bool:
     """Return whether `(price_diff * lot * contract_size)` for `symbol`
@@ -190,6 +236,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measure-post-be", action="store_true", help="For every reached_be trade, continue observing the same real tick stream PAST arming -- with no exit rule applied at all, just watching -- to measure real post-breakeven price excursion (peak profit reached, how long it took, the largest pullback ever seen from a running peak). Answers 'what should the post-breakeven trailing gap actually be', grounded in real data instead of a guess. Does not affect the pre-breakeven outcome/behavior at all -- purely observational.")
     parser.add_argument("--simulate-trail", action="store_true", help="For every reached_be trade, replay a fixed set of candidate post-breakeven trailing-gap rules (TRAIL_RULES) against the same real tick stream and record each rule's actual captured profit -- unlike --measure-post-be, this applies real exit logic per rule rather than just observing. Can be combined with --measure-post-be to get both the noise-floor percentiles and the rule outcomes from one tick fetch.")
     parser.add_argument("--post-be-max-ticks", type=int, default=3000, help="How many ticks past arming to observe for --measure-post-be / --simulate-trail")
+    parser.add_argument("--full-lifecycle", action="store_true", help="Replay real ticks through the actual, complete ExitTrade (both managers, real precedence) from entry to a genuine final exit -- reports one real realized P&L per trade under the system as it actually exists today. Mutually exclusive with the phase-based flags above (--counterfactual/--disable-timeout/--measure-post-be/--simulate-trail are ignored when this is set).")
+    parser.add_argument("--full-lifecycle-max-ticks", type=int, default=4000, help="Max real ticks fetched per trade for --full-lifecycle -- needs to cover pre-BE arming plus the full post-BE trail/cap lifecycle, not just the pre-BE window.")
+    parser.add_argument("--sweep-post-be-cap", action="store_true", help="Only with --full-lifecycle: instead of using Config's single post-BE loss-cap value, replay FULL_LIFECYCLE_CAP_CANDIDATES against the same tick stream in one pass, each paired with the SAME real trailing-stop formula -- so cap retuning is tested against the real combined system, not in isolation.")
     return parser.parse_args()
 
 
@@ -251,7 +300,7 @@ def simulate_pre_be_phase(
             "profit": profit,
         }
 
-        action = loss_manager.check_exit_on_tick(position, t, state)
+        action = loss_manager.check_exit_on_tick(position, to_tick_dict(t), state)
         if action:
             outcome = "soft_sl" if action.reason == "profit_drop" else "timed_out"
             result = {"outcome": outcome, "profit": profit, "ticks_used": idx + 1, "entry_price": entry_price}
@@ -539,7 +588,7 @@ def simulate_trail_rules(
                 "volume": lot,
                 "profit": profit,
             }
-            action = loss_manager.check_exit_on_tick(position, t, state)
+            action = loss_manager.check_exit_on_tick(position, to_tick_dict(t), state)
             if action:
                 lm_triggered = True
                 lm_profit = profit
@@ -602,6 +651,183 @@ def simulate_trail_rules(
     return result
 
 
+def simulate_full_lifecycle(
+    *,
+    exit_trade,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Open a simulated position and replay real historical ticks through
+    the actual, complete `ExitTrade` -- `exit_trade._loss_manager` THEN (if
+    no loss action) `exit_trade._profit_manager`, the same precedence
+    `ExitTrade.on_tick` itself uses, gated on `config.profit_exits_on_tick`
+    (default `True`). One `PosState` carries continuously across the whole
+    trade -- pre-BE arming through post-BE trailing/cap -- no phase
+    boundary, unlike every other function in this script.
+
+    Returns `{"outcome": <real exit reason, or "exhausted"/"no_ticks">,
+    "profit", "ticks_used", "entry_price"}`.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    state = PosState(anchor=0.0, prev_price=0.0)
+    loss_manager = exit_trade._loss_manager
+    profit_manager = exit_trade._profit_manager
+    profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
+
+    profit = 0.0
+    outcome = None
+    idx = -1
+    for idx, t in enumerate(ticks[:max_ticks]):
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+
+        position = {
+            "symbol": symbol,
+            "type": pos_type,
+            "ticket": idx,
+            "price_open": entry_price,
+            "volume": lot,
+            "profit": profit,
+        }
+
+        tick_dict = to_tick_dict(t)
+        action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+        if action:
+            outcome = action.reason
+            break
+
+        if profit_exits_on_tick:
+            action = profit_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                outcome = action.reason
+                break
+
+    if outcome is None:
+        outcome = "exhausted"
+
+    return {
+        "outcome": outcome,
+        "profit": profit,
+        "ticks_used": idx + 1,
+        "entry_price": entry_price,
+    }
+
+
+def simulate_full_lifecycle_cap_sweep(
+    *,
+    exit_trades: list[tuple[str, Any]],
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Like `simulate_full_lifecycle`, but replays every `(label,
+    exit_trade)` pair in `exit_trades` against the same real tick stream in
+    a single pass -- each candidate has its own independent `PosState`, own
+    `LossExitManager` (a different `post_be_loss_cap_money`), and the SAME
+    real `ProfitExitManager` trail formula, so only the cap value varies
+    and every candidate's outcome reflects the real, complete combined
+    system rather than the cap in isolation. A candidate stops updating
+    once it resolves (its own loss or profit exit); others continue
+    independently over the same price path.
+
+    Returns `{"<label>_outcome", "<label>_profit", "<label>_ticks"}` for
+    every label in `exit_trades`.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        result = {}
+        for label, _ in exit_trades:
+            result[f"{label}_outcome"] = "no_ticks"
+            result[f"{label}_profit"] = None
+            result[f"{label}_ticks"] = 0
+        return result
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    states = {label: PosState(anchor=0.0, prev_price=0.0) for label, _ in exit_trades}
+    resolved = {label: False for label, _ in exit_trades}
+    outcome: dict[str, Optional[str]] = {label: None for label, _ in exit_trades}
+    result_profit: dict[str, Optional[float]] = {label: None for label, _ in exit_trades}
+    result_ticks: dict[str, Optional[int]] = {label: None for label, _ in exit_trades}
+    managers = {
+        label: (
+            et._loss_manager,
+            et._profit_manager,
+            bool(getattr(et._config, "profit_exits_on_tick", True)),
+        )
+        for label, et in exit_trades
+    }
+
+    profit = 0.0
+    for idx, t in enumerate(ticks[:max_ticks]):
+        if all(resolved.values()):
+            break
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        position = {
+            "symbol": symbol, "type": pos_type, "ticket": idx,
+            "price_open": entry_price, "volume": lot, "profit": profit,
+        }
+        tick_dict = to_tick_dict(t)
+
+        for label, _ in exit_trades:
+            if resolved[label]:
+                continue
+            loss_manager, profit_manager, profit_exits_on_tick = managers[label]
+            state = states[label]
+            action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                resolved[label] = True
+                outcome[label] = action.reason
+                result_profit[label] = profit
+                result_ticks[label] = idx + 1
+                continue
+            if profit_exits_on_tick:
+                action = profit_manager.check_exit_on_tick(position, tick_dict, state)
+                if action:
+                    resolved[label] = True
+                    outcome[label] = action.reason
+                    result_profit[label] = profit
+                    result_ticks[label] = idx + 1
+
+    for label, _ in exit_trades:
+        if not resolved[label]:
+            outcome[label] = "exhausted"
+            result_profit[label] = profit
+            result_ticks[label] = min(len(ticks), max_ticks)
+
+    result = {}
+    for label, _ in exit_trades:
+        result[f"{label}_outcome"] = outcome[label]
+        result[f"{label}_profit"] = result_profit[label]
+        result[f"{label}_ticks"] = result_ticks[label]
+    return result
+
+
 def run(
     symbol: str,
     weeks: float,
@@ -614,6 +840,9 @@ def run(
     measure_post_be: bool,
     post_be_max_ticks: int,
     simulate_trail: bool = False,
+    full_lifecycle: bool = False,
+    full_lifecycle_max_ticks: int = 4000,
+    sweep_post_be_cap: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -668,6 +897,13 @@ def run(
     exit_config = ExitTradeConfig(be_arming_ticks=0) if disable_timeout else None
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
+    cap_sweep_trades: list[tuple[str, Any]] = []
+    if full_lifecycle and sweep_post_be_cap:
+        for c in FULL_LIFECYCLE_CAP_CANDIDATES:
+            label = f"cap{str(c).replace('.', '_')}"
+            cfg = ExitTradeConfig(post_be_loss_cap_money=c)
+            cap_sweep_trades.append((label, create_exit_trade(broker=broker, risk_manager=risk_manager, config=cfg)))
+
     results: list[dict] = []
 
     logging.disable(logging.CRITICAL)
@@ -690,22 +926,45 @@ def run(
                 if final_signal not in ("buy", "sell"):
                     continue
 
-                sim = simulate_pre_be_phase(
-                    exit_trade=exit_trade,
-                    symbol=symbol,
-                    side=final_signal,
-                    entry_time=closed_by,
-                    lot=lot,
-                    contract_size=contract_size,
-                    max_ticks=max_ticks,
-                    fetch_ticks=fetch_ticks,
-                    sl_price_distance=sl_price_distance,
-                    run_counterfactual=run_counterfactual,
-                    needs_conversion=needs_conversion,
-                    measure_post_be=measure_post_be,
-                    post_be_max_ticks=post_be_max_ticks,
-                    simulate_trail=simulate_trail,
-                )
+                if full_lifecycle and sweep_post_be_cap:
+                    sim = simulate_full_lifecycle_cap_sweep(
+                        exit_trades=cap_sweep_trades,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                    )
+                elif full_lifecycle:
+                    sim = simulate_full_lifecycle(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                    )
+                else:
+                    sim = simulate_pre_be_phase(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=max_ticks,
+                        fetch_ticks=fetch_ticks,
+                        sl_price_distance=sl_price_distance,
+                        run_counterfactual=run_counterfactual,
+                        needs_conversion=needs_conversion,
+                        measure_post_be=measure_post_be,
+                        post_be_max_ticks=post_be_max_ticks,
+                        simulate_trail=simulate_trail,
+                    )
                 results.append(
                     {
                         "time": m1_candle.get("time"),
@@ -722,8 +981,15 @@ def run(
     finally:
         logging.disable(logging.NOTSET)
 
-    write_results_csv(results, symbol)
-    summarize(results, symbol)
+    if full_lifecycle and sweep_post_be_cap:
+        write_full_lifecycle_cap_sweep_csv(results, symbol)
+        summarize_full_lifecycle_cap_sweep(results, symbol)
+    elif full_lifecycle:
+        write_full_lifecycle_csv(results, symbol)
+        summarize_full_lifecycle(results, symbol)
+    else:
+        write_results_csv(results, symbol)
+        summarize(results, symbol)
 
 
 def write_results_csv(results: list[dict], symbol: str) -> None:
@@ -891,6 +1157,96 @@ def summarize(results: list[dict], symbol: str) -> None:
             )
 
 
+def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_full_lifecycle_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "outcome", "profit", "ticks_used", "entry_price",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    by_outcome: dict[str, list[dict]] = {}
+    for r in results:
+        by_outcome.setdefault(r["outcome"], []).append(r)
+
+    all_profits = [r["profit"] for r in results if r["profit"] is not None]
+    total_pnl = sum(all_profits)
+    win_rate = sum(1 for p in all_profits if p > 0) / len(all_profits) * 100.0 if all_profits else 0.0
+
+    print(f"\n=== Full-lifecycle backtest (real ExitTrade, entry to final exit): {symbol} ===")
+    print(f"Total simulated trades: {total}")
+    print(f"Total realized P&L: ${total_pnl:+.2f}  win_rate={win_rate:.1f}%")
+    print(f"\nBy real exit reason:")
+    for outcome, rows in sorted(by_outcome.items(), key=lambda kv: -len(kv[1])):
+        pct = len(rows) / total * 100.0
+        profits = [r["profit"] for r in rows if r["profit"] is not None]
+        avg_profit = sum(profits) / len(profits) if profits else 0.0
+        sub_total = sum(profits)
+        avg_ticks = sum(r["ticks_used"] for r in rows) / len(rows)
+        print(
+            f"  {outcome:28s}: {len(rows):4d} ({pct:5.1f}%)  "
+            f"avg_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}  avg_ticks={avg_ticks:.1f}"
+        )
+
+
+def _cap_sweep_labels() -> list[str]:
+    return [f"cap{str(c).replace('.', '_')}" for c in FULL_LIFECYCLE_CAP_CANDIDATES]
+
+
+def write_full_lifecycle_cap_sweep_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_full_lifecycle_cap_sweep_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+    ] + [
+        f"{label}_{suffix}" for label in _cap_sweep_labels() for suffix in ("outcome", "profit", "ticks")
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_full_lifecycle_cap_sweep(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    print(f"\n=== Full-lifecycle post-BE cap sweep (real ExitTrade, cap value varies) for {symbol}, {total} trades ===")
+    for c, label in zip(FULL_LIFECYCLE_CAP_CANDIDATES, _cap_sweep_labels()):
+        profits = [r[f"{label}_profit"] for r in results if r.get(f"{label}_profit") is not None]
+        outcomes = [r[f"{label}_outcome"] for r in results if r.get(f"{label}_outcome") is not None]
+        total_pnl = sum(profits)
+        win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+        cap_hits = sum(1 for o in outcomes if o == "profit_drop_after_be")
+        trail_hits = sum(1 for o in outcomes if o == "trailing_breach_pct_of_peak")
+        marker = "  <-- current production value" if c == float(getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0) else ""
+        print(
+            f"  -${c:<4.1f}: total=${total_pnl:+9.2f}  win_rate={win_rate:5.1f}%  "
+            f"cap_hits={cap_hits:4d}  trail_hits={trail_hits:4d}{marker}"
+        )
+
+
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
@@ -906,6 +1262,9 @@ def main() -> None:
         args.measure_post_be,
         args.post_be_max_ticks,
         args.simulate_trail,
+        args.full_lifecycle,
+        args.full_lifecycle_max_ticks,
+        args.sweep_post_be_cap,
     )
 
 
