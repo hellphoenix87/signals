@@ -1,6 +1,6 @@
 # Session Filter Per-Pair Analysis
 
-Status: in-progress
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -35,3 +35,9 @@ None -- methodology, pair list, and windows are all already established by prior
 ## QA
 
 (MVP/POC mode -- no qa agent pass.)
+
+## Result
+
+Done. `docs/test-results/session-filter-per-pair-analysis.md` has the full writeup. Verdict: EURUSD's session-filter block does not transfer -- AUDUSD and USDJPY show a reproducible *opposite* effect (both non-overlapping windows), USDCHF shows no reproducible effect, GBPUSD/NZDUSD show the same direction but far weaker. Pooling the other 6 pairs to validate Thread 4's dynamic post-BE cap signal is **not justified**. `docs/exit-strategy-open-threads.md` Threads 1 and 4 updated accordingly. No production config/behavior change -- `Config.SYMBOLS` is EURUSD-only and EURUSD's own window is confirmed correct.
+
+One unplanned code change beyond the original scope: the first data-collection pass silently ran *with* the live `Config.USE_SESSION_FILTER=True` default still on (omitting `--session-filter` doesn't turn it off, since it's already on by default), which zeroed out every signal in the exact hours this analysis needed to read. Added `--no-session-filter` to `scripts/backtest_signals.py` to force it off for this kind of unfiltered discovery pass, and reran all 14 combinations.
