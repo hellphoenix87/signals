@@ -1,6 +1,6 @@
 # Pre-Breakeven Threshold Split by M5-Confirm State
 
-Status: in-progress
+Status: done
 Mode: MVP/POC (main session plans and implements directly; no subagents, no tests, single PR at the end)
 
 ## Goal
@@ -50,3 +50,9 @@ None -- methodology (real-tick replay, multi-candidate single-pass simulation) a
 ## QA
 
 (MVP/POC mode -- no qa agent pass.)
+
+## Result
+
+Done. `docs/test-results/pre-be-threshold-by-m5-confirm.md` has the full writeup. Pooled, the result matched Thread 2's own hypothesis exactly (tighter for M5-non-confirm, looser for M5-confirm beats flat $5) -- but a per-pair reproducibility check (the same discipline used for Thread 1) found the confirm-side half doesn't survive at all (driven almost entirely by one outlier pair, NZDUSD; GBPUSD's own best threshold for that group is the opposite direction). The non-confirm-side half is more consistent (5/7 pairs improve) but still not unanimous. **Verdict: not actionable as a hard-coded split.** No `Config`/`LossExitManager` change made. `docs/exit-strategy-open-threads.md` Thread 2 updated, plus a closing note: all five of this doc's original threads are now resolved, none produced a further production win, and the next real lever for this project (MACD-only MTF entry-signal quality itself) is outside this doc's scope.
+
+One bug caught and fixed before it could corrupt the analysis: `m5_confirm` is a raw direction string ("hold"/"buy"/"sell"), not a boolean -- an early draft of the split logic treated "non-hold" as "confirms," which would have silently swapped the two groups (a "sell" value would have counted as confirming a "buy" trade). Caught via a sanity check against a sample file's known counts before trusting the real 21-file run.

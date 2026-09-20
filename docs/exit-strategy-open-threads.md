@@ -6,12 +6,14 @@
 
 **Update (later session)**: Threads 3 and 4 are both now resolved and wired -- the post-breakeven trailing stop (`pct60_floor2`) and the post-breakeven loss cap (`-$1`, retuned once against the real trail). This closed a gap flagged since the very first pre-breakeven backtest: `docs/test-results/full-lifecycle-backtest.md` is the first backtest in this project to run a trade through the real, complete exit system end-to-end and report one true realized P&L. The answer: **still net negative** (-$839.91 pooled at the time of first measurement, improved to -$852.83 pooled / -$23.80 EURUSD-only after retuning the cap), even after exit-side tuning was pushed about as far as bounded sweeps reasonably go. The remaining lever is entry-signal quality (Threads 1/2 below), not further exit retuning.
 
+**Update (later session still)**: Threads 1 and 2 are both now resolved as well -- neither produced a production change. Thread 1 found EURUSD's session-filter window doesn't transfer to other pairs (a per-symbol config mechanism was built ahead of need, though `Config.SYMBOLS` is still EURUSD-only). Thread 2's dynamic pre-BE threshold split matched its own hypothesis when pooled, but didn't survive a per-pair reproducibility check closely enough to wire. **All five original threads are now resolved.** Exit-side tuning (Threads 2/3/4) and session-filtering (Thread 1) have both been pushed about as far as this investigation's methodology can take them without a genuinely new angle -- the system is still net negative, and the entry-signal-quality lever this doc kept pointing at has now itself been tested (Thread 2) and come up short too. The next real question for this project is no longer inside `app/exit_strategies/` or the session filter; it's whether MACD-only MTF entry-signal quality itself can be improved (a different investigation than this doc covers).
+
 **Priority at a glance** (reasoning for each is in its own section below):
 
 | Priority | Thread | Why |
 |---|---|---|
 | **P0 -- resolved and wired** | 3. Post-BE trailing redesign | Touches 90-97% of all trades (everything that survives to breakeven). `pct60_floor2` (60% of peak, $2 floor) wired into `ProfitExitManager` via `Config.EXIT_TRAIL_GAP_PCT`/`EXIT_TRAIL_GAP_FLOOR_MONEY`, replacing the hardcoded `$0.04` gap. |
-| **P1** | 2. Dynamic pre-BE via signal confidence | Real, validated, immediately actionable, affects the live pair today -- but bounded ceiling, since it only touches the minority of trades that don't reach breakeven instantly. |
+| **Resolved -- not actionable** | 2. Dynamic pre-BE via signal confidence | The threshold-split test found the "M5 confirms -> looser" half doesn't survive a per-pair check (one outlier pair); the "M5 doesn't confirm -> tighter" half is more consistent (5/7 pairs) but not unanimous. Not wired. |
 | **P2 -- resolved and wired (temporary value)** | 4. Post-BE loss cap | Turned out not to be subordinate to Thread 3 -- it fires 100% of the time before any Thread 3 trail rule activates, a fixed cost independent of that choice. Retuned `-$5` -> `-$3` (isolated sweep) -> `-$1` (full-lifecycle sweep against the real trail, after finding the real trail's avg win $1.44 is under half `-$3`'s avg loss $3.16). Even at `-$1`, the full-lifecycle backtest is still net negative -- see the "How we got here" update below. |
 | **Resolved** | 1. Session filtering per pair | Answered: EURUSD's block does not transfer. AUDUSD and USDJPY show a reproducibly *opposite* session effect; USDCHF shows no reproducible effect; GBPUSD/NZDUSD show the same direction but much weaker. Pooling the other 6 pairs to validate Thread 4's dynamic-cap signal is **not justified** -- see below. |
 | **(ops, not ranked)** | 5. PR #54 merge status | Not a design priority -- a housekeeping item to check before starting any of the above. |
@@ -49,9 +51,7 @@
 
 ## Thread 2: Dynamic pre-breakeven loss management, keyed on entry-signal characteristics
 
-**Priority: P1** -- real, validated, immediately actionable, affects the live pair today; ceiling is bounded because it only touches the minority of trades that don't reach breakeven instantly.
-
-**Status**: correlation established and validated (not a pair-mix artifact), the actual dynamic-threshold test has **not been run yet** -- this was the agreed immediate next step when the conversation moved to documentation instead.
+**Priority: Resolved -- not actionable.** Was P1 (highest remaining priority after Threads 1/3/4/5 all resolved); the dynamic-threshold test is now done and the result doesn't clear the bar to wire.
 
 **Context**: the pre-breakeven soft-SL/timeout currently applies the same fixed thresholds to every trade. The idea: since we can measure entry-signal characteristics at the moment a trade opens, use them to select a per-trade risk profile (not a smooth dial -- see below).
 
@@ -65,7 +65,11 @@
 
 **What this does NOT yet tell us**: whether confidence/agreement/M5-confirm predict actual final win/loss (post-breakeven), only whether a trade *survives to breakeven at all*. Reaching breakeven isn't the same as ending up profitable.
 
-**Next step, if resumed**: the agreed-but-not-yet-run test -- simulate what pre-breakeven thresholds would have looked like if trades were split by (e.g.) M5-confirm state, using the existing 3,407-trade dataset already on disk (no new backtest needed, just a smarter reanalysis of `backtest_results/*_exit_strategy_*.csv` files from the metadata sweep). See if a tighter threshold for "M5 doesn't confirm" trades and/or a looser one for "M5 confirms" trades would have beaten the flat $5/90-tick rule, using the same real-tick-replay approach already built.
+**What was measured this session** (`scripts/backtest_exit_strategy.py --sweep-pre-be-threshold`, a new real multi-candidate simulator built for this test -- see the writeup for why the existing single-threshold data turned out not to be enough on its own; 7 pairs x 3 windows, 6,990 trades pooled):
+- Pooled, the result matches the hypothesis exactly: M5-confirms trades do best at a looser threshold ($10, +$23.96 vs the flat $5), M5-non-confirm trades do best tighter ($2, +$84.09) -- a split would beat even the best uniform flat threshold.
+- **Doesn't survive a per-pair check.** The confirm-side signal is driven almost entirely by one outlier pair (NZDUSD, +$39.40 -- bigger than the whole pooled gain); GBPUSD's own best threshold for that group is the *opposite* direction. The non-confirm-side signal is more consistent (5/7 pairs improve, 4 of those specifically favor the tightest candidate) but still not unanimous (GBPUSD favors looser there too).
+
+**Verdict**: not actionable as a hard-coded split -- see `docs/test-results/pre-be-threshold-by-m5-confirm.md` for the full per-pair table. No `Config`/`LossExitManager` change made. The non-confirm-side tightening pattern is the more promising half if this is ever revisited (a finer sweep isolated to that group, e.g. $1.5/$2/$2.5/$3), but isn't strong enough on its own to justify a conditional-threshold's added complexity today.
 
 ## Thread 3: Trailing stop redesign for the post-breakeven (profit-taking) phase
 
