@@ -294,6 +294,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override Config.EXIT_TRAIL_GAP_FLOOR_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $2.0 -- this floor DOMINATES --trail-gap-pct for any peak below floor/pct, e.g. below $20 at pct=0.10, so pair a tight --trail-gap-pct with a correspondingly small floor override, e.g. 0.0, or the floor will silently override the intended percentage).",
     )
+    parser.add_argument(
+        "--post-be-loss-cap",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_POST_BE_LOSS_CAP_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $1.0). Pair with a tight --trail-gap-pct to test 'floor the post-BE worst case at breakeven instead of a real loss' -- e.g. --post-be-loss-cap 0.0 --trail-gap-pct 0.10 --trail-gap-floor-money 0.0.",
+    )
     return parser.parse_args()
 
 
@@ -1108,6 +1114,7 @@ def run(
     entry_excursion_max_ticks: int = 4000,
     trail_gap_pct: Optional[float] = None,
     trail_gap_floor_money: Optional[float] = None,
+    post_be_loss_cap: Optional[float] = None,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -1169,6 +1176,8 @@ def run(
         exit_overrides["trail_gap_pct"] = trail_gap_pct
     if trail_gap_floor_money is not None:
         exit_overrides["trail_gap_floor_money"] = trail_gap_floor_money
+    if post_be_loss_cap is not None:
+        exit_overrides["post_be_loss_cap_money"] = post_be_loss_cap
     exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
@@ -1725,6 +1734,7 @@ def main() -> None:
         entry_excursion_max_ticks=args.entry_excursion_max_ticks,
         trail_gap_pct=args.trail_gap_pct,
         trail_gap_floor_money=args.trail_gap_floor_money,
+        post_be_loss_cap=args.post_be_loss_cap,
     )
 
 
