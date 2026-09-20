@@ -865,11 +865,43 @@ def simulate_full_lifecycle(
     if outcome is None:
         outcome = "exhausted"
 
+    # Counterfactual: for a real post-BE cap exit specifically, did price
+    # ever recover to breakeven (or better) afterward if we'd just kept
+    # watching with no exit rule applied? The ticks are already fetched
+    # (mt5.copy_ticks_from pulled the full max_ticks budget up front,
+    # independent of where the real replay actually stopped), so this is
+    # pure post-hoc observation of the same tick stream, not a new fetch.
+    cf_recovered_to_be: Optional[bool] = None
+    cf_ticks_to_recover: Optional[int] = None
+    cf_min_profit_after_exit: Optional[float] = None
+    if outcome == "profit_drop_after_be":
+        cf_min = profit
+        recovered = False
+        ticks_to_recover = None
+        for j in range(idx + 1, len(ticks)):
+            t2 = ticks[j]
+            price2 = float(t2["bid"]) if side == "buy" else float(t2["ask"])
+            profit2 = compute_profit(
+                side=side, entry_price=entry_price, price=price2, lot=lot,
+                contract_size=contract_size, needs_conversion=needs_conversion,
+            )
+            if profit2 < cf_min:
+                cf_min = profit2
+            if not recovered and profit2 >= 0.0:
+                recovered = True
+                ticks_to_recover = j - idx
+        cf_recovered_to_be = recovered
+        cf_ticks_to_recover = ticks_to_recover
+        cf_min_profit_after_exit = cf_min
+
     return {
         "outcome": outcome,
         "profit": profit,
         "ticks_used": idx + 1,
         "entry_price": entry_price,
+        "cf_recovered_to_be": cf_recovered_to_be,
+        "cf_ticks_to_recover": cf_ticks_to_recover,
+        "cf_min_profit_after_exit": cf_min_profit_after_exit,
         # Real running peak profit reached post-breakeven (None if BE never
         # armed, i.e. outcome in {"profit_drop", "failed_to_reach_be"}) --
         # lets `profit_drop_after_be` outcomes be split by how far above
@@ -1486,6 +1518,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
         "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
+        "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1521,6 +1554,21 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
         print(
             f"  {outcome:28s}: {len(rows):4d} ({pct:5.1f}%)  "
             f"avg_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}  avg_ticks={avg_ticks:.1f}"
+        )
+
+    cf_rows = [r for r in results if r.get("cf_recovered_to_be") is not None]
+    if cf_rows:
+        recovered_rows = [r for r in cf_rows if r["cf_recovered_to_be"]]
+        never_rows = [r for r in cf_rows if not r["cf_recovered_to_be"]]
+        recover_ticks = [r["cf_ticks_to_recover"] for r in recovered_rows if r.get("cf_ticks_to_recover") is not None]
+        avg_recover_ticks = sum(recover_ticks) / len(recover_ticks) if recover_ticks else 0.0
+        avg_min_after = sum(r["cf_min_profit_after_exit"] for r in cf_rows) / len(cf_rows)
+        avg_min_after_never = sum(r["cf_min_profit_after_exit"] for r in never_rows) / len(never_rows) if never_rows else 0.0
+        print(
+            f"\nOf {len(cf_rows)} profit_drop_after_be trades, if the -$1 cap hadn't fired and price were just watched afterward: "
+            f"{len(recovered_rows)} ({len(recovered_rows) / len(cf_rows) * 100.0:.1f}%) would have recovered to breakeven or better "
+            f"(avg {avg_recover_ticks:.1f} ticks to do so); {len(never_rows)} ({len(never_rows) / len(cf_rows) * 100.0:.1f}%) never did "
+            f"within the observed window. Avg worst point reached after the cap point: ${avg_min_after:.2f} overall, ${avg_min_after_never:.2f} among those that never recovered."
         )
 
     arm_ticks = [r["be_arm_ticks"] for r in results if r.get("be_arm_ticks") is not None]
