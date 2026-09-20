@@ -271,6 +271,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override Config.MTF_ENTRY_INDICATOR for this run only (default: whatever Config is actually set to) -- lets the real full-lifecycle P&L be compared entry-indicator-by-entry-indicator under the identical exit-strategy config, isolating that one variable.",
     )
+    parser.add_argument(
+        "--invert-signal",
+        action="store_true",
+        help="Trade the OPPOSITE of whatever the strategy signals (buy signal -> sell trade, sell signal -> buy trade), otherwise identical -- tests whether the entry signal has real but backwards directional information, given the full-lifecycle finding that most trades confirm the signal direction (reach breakeven) and then reverse before profit is locked in. `direction` in the CSV/summary reflects the trade actually taken, not the raw signal.",
+    )
     return parser.parse_args()
 
 
@@ -987,10 +992,14 @@ def run(
     sweep_post_be_cap: bool = False,
     sweep_pre_be_threshold: bool = False,
     config: Any = Config,
+    invert_signal: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
         sys.exit(1)
+
+    if invert_signal:
+        print(f"[{symbol}] --invert-signal is ON: trading the OPPOSITE of every generated signal.")
 
     if disable_timeout:
         max_ticks = max(max_ticks, counterfactual_max_ticks)
@@ -1076,6 +1085,8 @@ def run(
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
+                if invert_signal:
+                    final_signal = "sell" if final_signal == "buy" else "buy"
 
                 if full_lifecycle and sweep_post_be_cap:
                     sim = simulate_full_lifecycle_cap_sweep(
@@ -1477,6 +1488,7 @@ def main() -> None:
         args.sweep_post_be_cap,
         args.sweep_pre_be_threshold,
         config=config,
+        invert_signal=args.invert_signal,
     )
 
 
