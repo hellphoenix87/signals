@@ -17,32 +17,40 @@ Date: 2026-09-20
 - **Fix**: `_pullback_completed` now takes the candidate `direction` and, for `"sell"`, checks the true mirror condition (price was above SMA20 ~20-25 bars ago, has since closed back below it) instead of reusing the bullish check. Buy-direction logic is unchanged.
 - **Re-ran the same three configs** (target=8/stop=5, session filter, ADX gate — today's live `Config` defaults, same as the original ablation) against the fixed gate.
 
-## Results
+## Results (window 1 — most recent 4 weeks, `--start-pos 1`)
 
 | Entry | Old gate — signals (buy/sell) | Old gate win rate | New gate — signals (buy/sell) | New gate win rate |
 |---|---|---|---|---|
-| MACD (live) | 145 (49/96) | 46.7% | 124 (49/75) | **33.6%** |
+| MACD (live) | 145 (49/96) | 46.7% | 124 (49/75) | 33.6% |
 | RSI | 218 (0/218) | 43.0% | **0** | n/a |
-| SMA | 186 (161/25) | 38.1% | 403 (161/242) | **39.5%** |
+| SMA | 186 (161/25) | 38.1% | 403 (161/242) | 39.5% |
 
 Breakeven at target=8/stop=5 is 5/13 ≈ **38.5%**.
 
+## Second-window validation (`--start-pos 28801`, the immediately preceding, non-overlapping 4 weeks)
+
+Window 1 alone wasn't enough to trust — this investigation's own precedent (`spread-and-second-window-validation.md`, and the 7:5 ratio's original validation) required a second, non-overlapping window before treating a result as real rather than a fluke of one month's price action. Re-ran all three entries against the fixed gate on window 2:
+
+| Entry | Window 1 (recent) | Window 2 (preceding) | Pooled |
+|---|---|---|---|
+| MACD (live) | 124 sig, 33.6% | 129 sig, **43.7%** | 253 sig, **38.7%** (dead on breakeven) |
+| RSI | 0 signals | 0 signals | 0 signals |
+| SMA | 403 sig, 39.5% | 481 sig, **39.6%** | 884 sig, **39.5%** |
+
 ## Findings
 
-1. **The fix is correct and does what it says** — it's no longer a bullish-only filter masquerading as direction-aware entry timing. But "more correct" and "better backtest result" are not the same thing here, and they diverge sharply:
-2. **MACD — the currently-live entry indicator — drops from solidly-profitable (46.7%) to below breakeven (33.6%) once its sell signals are gated by a genuinely bearish pattern instead of a bullish one.** Buy count is unchanged (49, since buy logic didn't change); sell count drops from 96 to 75, and the *win rate on the surviving sells is worse*, not better — i.e., the MACD sells that used to pass through the old (wrong) bullish-shaped gate were, empirically, better trades than the MACD sells that pass the new (correct) bearish-shaped gate. This is a genuinely surprising result, not an artifact of the fix being wrong: chasing a fresh bearish crossover on M1 apparently performed worse than fading a small bullish blip did, in this specific window.
-3. **RSI now produces zero signals in the entire 4-week window.** Its buy timing already failed the (unchanged) bullish check before; its sell timing — which used to slip through only because the old check didn't actually care about direction — now correctly fails the bearish check too (RSI overbought/sell fires *after* a rally, which is the opposite of "recently turned bearish"). RSI's contrarian timing is fundamentally incompatible with an SMA-crossover-shaped entry-timing gate in either direction under this MTF setup — this isn't a tuning issue, it's a structural mismatch.
-4. **SMA becomes the standout: 403 signals, genuinely bidirectional (161 buy / 242 sell) for the first time, and the only config that clears breakeven (39.5% vs 38.5%).** Its bearish crossover timing (price crossing below its own MAs) matches the corrected bearish-pattern gate well, the same way its bullish crossover already matched the bullish gate — so fixing the asymmetry let its natural sell signals through for the first time, more than tripling its total signal count in the process.
-5. **The ranking from the (buggy) ablation report is now inverted for the two indicators that still produce signals: SMA > MACD, not MACD > SMA.** The original report's "keep MACD" conclusion no longer holds as stated.
-6. **Heavy caveats before acting on this**: single 4-week window (same one used throughout this whole investigation's early rounds, which explicitly needed a second out-of-sample window before earlier findings were trusted — that hasn't been done here yet); sample sizes are modest per direction (75-242 trades); MACD's regression and SMA's improvement could both partly reflect this specific month's price action interacting with a very specific 20-25-bar SMA lookback, not a durable property. This needs a second, non-overlapping window (same discipline as `spread-and-second-window-validation.md`) before treating "swap live to SMA" as settled.
+1. **The fix is correct and does what it says** — it's no longer a bullish-only filter masquerading as direction-aware entry timing.
+2. **RSI is now consistently, robustly unusable — zero signals in both independent windows.** Its contrarian buy/sell timing structurally can't satisfy either mirror of the SMA-crossover-shaped gate. This is the one finding here that needed no hedging even before the second window; it just confirms it.
+3. **MACD's post-fix result does NOT replicate — it swings 10 points between windows (33.6% → 43.7%), straddling breakeven in opposite directions each time.** Pooled across both (38.7%) lands almost exactly on breakeven, which isn't a reassuring average — it's masking real instability, not revealing a stable edge. Whatever's driving MACD's win rate under the corrected gate is apparently quite sensitive to which weeks you look at.
+4. **SMA replicates tightly: 39.5% in window 1, 39.6% in window 2 — a 0.1-point difference, pooled 39.5% over 884 signals.** This is exactly the kind of cross-window consistency the earlier "not validated enough" caveat was waiting on, and it came back positive. SMA clears breakeven in both windows independently, not just on average.
+5. **This reverses the read from the single-window result.** Before the second window, SMA looked like the promising-but-unconfirmed option and MACD looked like a worse-but-at-least-known quantity. With both windows in hand, it's the opposite: SMA is the one entry indicator here with a genuinely reproducible edge under the corrected gate, and MACD is the one whose single-window number (either window's, taken alone) can't be trusted as representative of anything stable.
+6. **Remaining caveats**: still only two windows (8 weeks total) on one symbol; the margin is thin in absolute terms (~39.5% vs. 38.5% breakeven, roughly +0.135 pips expected value per trade at these odds, before considering the unmeasured post-breakeven exit phase — see [[project_signals_bot_status]]'s standing "is this bot profitable" caveat); and this whole comparison still doesn't model real trade lifecycle/exits, only the same signal-quality proxy used throughout this investigation.
 
-## Decision: `USE_MULTI_TIMEFRAME_SIGNALS` should NOT stay on as currently configured
+## Decision: fix the gate, switch the MTF entry indicator from MACD to SMA
 
-`Config`'s live M1 entry indicator is still MACD (`USE_MULTI_TIMEFRAME_SIGNALS=True`, no `indicators` override in `strategy_factory`'s MTF path) and the app places real orders on the demo account when run. **This report does not change that wiring — it is flagging that the wiring is no longer backtest-supported, not fixing it live.**
+`Config`'s live M1 entry indicator is still MACD (`USE_MULTI_TIMEFRAME_SIGNALS=True`, no `indicators` override in `strategy_factory`'s MTF path) and the app places real orders on the demo account when run. **This report does not change that wiring — it recommends a specific change, backed by two-window evidence, for the user to apply.**
 
-Three options were on the table, in increasing order of change:
-- **Leave the gate bug in place, keep MACD** — known-quantity behavior (46.7% in this window), but that number only exists because of a bug that doesn't do what its own docstring claims. Rejected: don't keep a bug specifically because it happens to backtest well.
-- **Ship the gate fix, keep MACD** — more correct code, but this backtest says the live entry indicator would now run at 33.6%, clearly under the 38.5% breakeven. Rejected: this is a losing configuration by this investigation's own methodology, demo account or not.
-- **Ship the gate fix and switch the live entry indicator to SMA** — the combination that backtests best here (39.5%), but only ~1 point over breakeven, on a single 4-week window. Every other conclusion in this investigation that got trusted enough to change live `Config` (the 7:5→8:5 ratio move, the zero-spread retune, the session filter) was first confirmed on a second, non-overlapping window. This hasn't been — it doesn't clear that bar yet. Not rejected outright, but not ready either.
-
-**Recommendation: turn `USE_MULTI_TIMEFRAME_SIGNALS` off now.** The gate fix should still be shipped (it's a real correctness fix, independent of whether MTF is on), but there is currently no MTF entry-indicator configuration that is simultaneously (a) running on the corrected gate and (b) validated to the standard the rest of this investigation has used. Falling back to single-timeframe isn't perfectly clean either — its own edge was last validated at a 7:5 target/stop, before the ratio moved to 8:5 for MTF's sake — but it's a known, previously-validated-on-two-windows result, which is more than either live MTF option can currently claim. This is a recommendation, not something applied in this PR — flipping a flag that controls real order placement (even on a demo account) is the kind of change this repo's own history (PR #46) treated as needing explicit sign-off before merging, so it's left to the user's call, made with this data in hand rather than without it.
+- **Ship the gate fix** — real correctness fix, independent of everything else here.
+- **Don't keep MACD as the live entry indicator** — its post-fix performance isn't just weak, it's *unstable*: two honest 4-week reads of the same fixed gate disagree by 10 points and straddle breakeven in opposite directions. That's not a foundation to trade on regardless of which single number you'd rather believe.
+- **Switch the live entry indicator to SMA** (`strategy_factory`'s MTF path would need an `indicators={"sma": build_indicator("sma", config)}` override, mirroring what `--mtf-entry-indicator sma` already does in the backtest CLI). This is now the only entry indicator tested here with a reproducible, two-window-confirmed edge over breakeven (39.5% / 39.6%), clearing the same bar (independent second-window confirmation) that every other live-`Config`-affecting finding in this investigation (the 7:5→8:5 ratio move, the zero-spread retune, the session filter) was held to.
+- The margin is thin and this is still a signal-quality proxy, not a full trade-lifecycle backtest — this is "worth switching to and monitoring," not "proven profitable." Flagged for the user's decision, not applied in this PR, since it's a change to real order-placement behavior (demo account) — same bar this repo held PR #46 to.
