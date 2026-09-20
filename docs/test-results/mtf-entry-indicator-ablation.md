@@ -2,6 +2,8 @@
 
 Date: 2026-09-20
 
+**Superseded in part — see [mtf-pullback-gate-direction-fix.md](mtf-pullback-gate-direction-fix.md).** The RSI/SMA "degenerate, one-sided" pattern noted in finding 2 below turned out to be caused by a real bug in `MultiTimeframeStrongSignalStrategy._pullback_completed` (it only ever checked a bullish pattern, for both buy and sell candidates). After fixing it, the ranking below no longer holds: MACD drops to 33.6% (below breakeven), RSI produces zero signals, and SMA becomes the best-performing, genuinely bidirectional entry layer at 39.5%. Read that report before acting on finding 4's "keep MACD" conclusion.
+
 ## Setup
 
 - **Symbol**: EURUSD, 4 weeks of M1 history.

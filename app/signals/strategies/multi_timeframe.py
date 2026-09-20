@@ -21,8 +21,8 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
     is trusted over a higher-timeframe trend it directly contradicts.
     Otherwise, each layer contributes +/-its configured weight (0 if
     neutral) to a summed score, compared against `MTF_SCORE_THRESHOLD` to
-    decide direction. A pullback-above-SMA20 gate (unchanged from before)
-    still applies on top of that direction, since it answers a different
+    decide direction. A direction-aware pullback-vs-SMA20 gate still
+    applies on top of that direction, since it answers a different
     question -- entry timing within the chosen direction, not which
     direction.
     """
@@ -143,7 +143,7 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
                 direction = "sell"
 
         pullback_ok = (
-            self._pullback_completed(c_entry)
+            self._pullback_completed(c_entry, direction)
             if c_entry and direction in ("buy", "sell")
             else False
         )
@@ -162,13 +162,23 @@ class MultiTimeframeStrongSignalStrategy(BaseSignalStrategy):
             "details": {"m15": s_bias, "m5": s_conf, "m1": s_entry},
         }
 
-    def _pullback_completed(self, candles: list[dict]) -> bool:
-        """Return whether price was below the 20-period SMA in the recent
-        past and has since closed back above it."""
+    def _pullback_completed(self, candles: list[dict], direction: str) -> bool:
+        """Return whether price completed a pullback in `direction`'s favor
+        against the 20-period SMA: for "buy", price was below the SMA in
+        the recent past and has since closed back above it; for "sell",
+        the mirror -- price was above the SMA and has since closed back
+        below it. Previously this only ever checked the bullish shape
+        regardless of `direction`, which silently gated every sell signal
+        on an unrelated bullish pattern (see
+        docs/test-results/mtf-entry-indicator-ablation.md)."""
         closes = [c["close"] for c in candles if "close" in c]
         if len(closes) < 21:
             return False
         sma20 = sum(closes[-20:]) / 20
+        if direction == "sell":
+            was_above = any(c > sma20 for c in closes[-25:-20])
+            now_below = closes[-1] < sma20
+            return was_above and now_below
         was_below = any(c < sma20 for c in closes[-25:-20])
         now_above = closes[-1] > sma20
         return was_below and now_above
