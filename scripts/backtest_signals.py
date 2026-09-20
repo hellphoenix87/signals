@@ -18,22 +18,26 @@ stdout. The signal generator's own per-candle logging is suppressed
 during the replay so it doesn't drown out the summary.
 
 `--mtf` replays the multi-timeframe strategy (SMA/M15 bias, RSI/M5
-confirm, MACD/M1 entry) instead of the single-timeframe path, fetching
-synchronized M1/M5/M15 history and feeding each layer only the higher-
-timeframe candles already closed as of each M1 decision point. This is
-independent of `Config.USE_MULTI_TIMEFRAME_SIGNALS`, which stays off for
-live trading regardless of this flag.
+confirm, `Config.MTF_ENTRY_INDICATOR`/M1 entry, default "sma") instead
+of the single-timeframe path, fetching synchronized M1/M5/M15 history
+and feeding each layer only the higher-timeframe candles already closed
+as of each M1 decision point. `Config.USE_MULTI_TIMEFRAME_SIGNALS` is
+live (`True`) as of PR #46 -- this flag exists to let this exact MTF
+path be replayed/ablated in a backtest independent of that setting, not
+because MTF itself is off in production.
 
 `--mtf-entry-indicator {macd,sma,rsi}` (requires `--mtf`) swaps the M1
 entry-trigger layer's indicator, leaving the M15 bias (SMA) and M5
 confirm (RSI) layers untouched -- `strategy_factory` already supports
-this: passing `indicators` explicitly bypasses its hardcoded MACD-only
-default for the entry layer without touching the independently-built
-bias/confirm layers. Default (omitted) keeps the live MACD-only entry
-layer. See docs/test-results/single-indicator-ablation.md for why this
-is worth testing: MACD tested worst of the three solo, yet it's the one
-wired into the MTF entry layer by construction (leftover after SMA/RSI
-were claimed by bias/confirm), not because it tested best there.
+this: passing `indicators` explicitly bypasses `Config.MTF_ENTRY_INDICATOR`
+for the entry layer without touching the independently-built
+bias/confirm layers. Default (omitted) uses whatever `Config.MTF_ENTRY_INDICATOR`
+is set to. See docs/test-results/mtf-pullback-gate-direction-fix.md for
+why that's "sma", not the originally-hardcoded "macd": after fixing a
+bullish-only asymmetry in `MultiTimeframeStrongSignalStrategy._pullback_completed`,
+MACD's win rate as the M1 trigger swung 33.6%/43.7% across two
+independent windows (not reproducible), while SMA reproduced cleanly
+(39.5%/39.6%, both above breakeven).
 
 `--quick-check` replaces the fixed target/stop win-loss simulation with a
 much shorter, assumption-free read on entry timing: for each signal, look
@@ -133,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mtf",
         action="store_true",
-        help="Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm, MACD/M1 entry) instead of the single-timeframe path",
+        help="Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm, Config.MTF_ENTRY_INDICATOR/M1 entry) instead of the single-timeframe path",
     )
     parser.add_argument(
         "--quick-check",
@@ -150,7 +154,7 @@ def parse_args() -> argparse.Namespace:
         "--mtf-entry-indicator",
         choices=["macd", "sma", "rsi"],
         default=None,
-        help="Override the MTF M1 entry-layer indicator (default: macd, the live wiring). Requires --mtf; leaves the M15 bias/M5 confirm layers unchanged.",
+        help="Override the MTF M1 entry-layer indicator (default: whatever Config.MTF_ENTRY_INDICATOR is set to, currently sma). Requires --mtf; leaves the M15 bias/M5 confirm layers unchanged.",
     )
     parser.add_argument("--mtf-score-threshold", type=float, default=None, help="Override Config.MTF_SCORE_THRESHOLD for --mtf runs")
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
@@ -488,7 +492,7 @@ def run_mtf_backtest(
     entry_indicator_name: Optional[str] = None,
 ) -> None:
     """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
-    MACD/M1 entry) and print a summary.
+    `Config.MTF_ENTRY_INDICATOR`/M1 entry) and print a summary.
 
     Fetches M1/M5/M15 history up front, then for each M1 candle passes each
     higher-timeframe layer only the candles already closed by that M1
@@ -506,9 +510,10 @@ def run_mtf_backtest(
     ticks. Not compatible with `quick_check`.
 
     `entry_indicator_name`, when given, overrides the M1 entry layer's
-    indicator (default: macd) by passing an explicit `indicators` dict to
-    `strategy_factory` -- the bias (SMA/M15) and confirm (RSI/M5) layers
-    are built independently of that dict, so they're unaffected.
+    indicator (default: `Config.MTF_ENTRY_INDICATOR`) by passing an
+    explicit `indicators` dict to `strategy_factory` -- the bias (SMA/M15)
+    and confirm (RSI/M5) layers are built independently of that dict, so
+    they're unaffected.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")

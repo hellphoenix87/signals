@@ -78,6 +78,17 @@ class Config:
     MTF_CONFIRM_WEIGHT: float = 0.3
     MTF_ENTRY_WEIGHT: float = 0.2
     MTF_SCORE_THRESHOLD: float = 0.6
+    # M1 entry-trigger indicator for the MTF path. Was hardcoded to "macd"
+    # (the leftover pick after SMA/RSI were claimed by the bias/confirm
+    # layers, not because it tested best there). After fixing a bullish-only
+    # asymmetry in MultiTimeframeStrongSignalStrategy._pullback_completed
+    # (it never checked the sell-direction mirror), MACD's win rate under
+    # the corrected gate swung 33.6%/43.7% across two independent 4-week
+    # windows -- not reproducible either way. SMA reproduced cleanly
+    # (39.5%/39.6%, both above the 38.5% breakeven at target=8/stop=5) and
+    # is the only entry indicator that cleared this investigation's
+    # two-window bar -- see docs/test-results/mtf-pullback-gate-direction-fix.md.
+    MTF_ENTRY_INDICATOR: str = "sma"
 
     USE_N_TICK_CONFIRMATION = True
     N_TICK_CONFIRMATION = 1
