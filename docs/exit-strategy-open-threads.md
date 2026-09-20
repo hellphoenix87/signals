@@ -13,7 +13,7 @@
 | **P0 -- resolved and wired** | 3. Post-BE trailing redesign | Touches 90-97% of all trades (everything that survives to breakeven). `pct60_floor2` (60% of peak, $2 floor) wired into `ProfitExitManager` via `Config.EXIT_TRAIL_GAP_PCT`/`EXIT_TRAIL_GAP_FLOOR_MONEY`, replacing the hardcoded `$0.04` gap. |
 | **P1** | 2. Dynamic pre-BE via signal confidence | Real, validated, immediately actionable, affects the live pair today -- but bounded ceiling, since it only touches the minority of trades that don't reach breakeven instantly. |
 | **P2 -- resolved and wired (temporary value)** | 4. Post-BE loss cap | Turned out not to be subordinate to Thread 3 -- it fires 100% of the time before any Thread 3 trail rule activates, a fixed cost independent of that choice. Retuned `-$5` -> `-$3` (isolated sweep) -> `-$1` (full-lifecycle sweep against the real trail, after finding the real trail's avg win $1.44 is under half `-$3`'s avg loss $3.16). Even at `-$1`, the full-lifecycle backtest is still net negative -- see the "How we got here" update below. |
-| **P3 -- raised from lowest** | 1. Session filtering per pair | No longer purely a multi-pair-adoption question: it's now a blocker for trusting the ticks-to-cap dynamic-cap signal (below) on EURUSD specifically, since pooling across pairs with uncharacterized session behavior isn't yet a validated thing to do. Still not touched this session -- next session's starting point. |
+| **Resolved** | 1. Session filtering per pair | Answered: EURUSD's block does not transfer. AUDUSD and USDJPY show a reproducibly *opposite* session effect; USDCHF shows no reproducible effect; GBPUSD/NZDUSD show the same direction but much weaker. Pooling the other 6 pairs to validate Thread 4's dynamic-cap signal is **not justified** -- see below. |
 | **(ops, not ranked)** | 5. PR #54 merge status | Not a design priority -- a housekeeping item to check before starting any of the above. |
 
 ## Current code/branch state (read this first)
@@ -24,20 +24,28 @@
 
 ## Thread 1: Session filtering per pair
 
-**Priority: P3 (lowest)** -- only matters once multi-pair live trading is adopted; `Config.SYMBOLS` is EURUSD-only today.
+**Priority: Resolved.** Was raised to a direct blocker for Thread 4's dynamic post-BE cap signal; now answered.
 
-**Status**: evidence gathered, nothing built or tested.
+**Status**: done -- see `docs/test-results/session-filter-per-pair-analysis.md` for the full writeup.
 
-**Context**: `SessionFilteredSignalStrategy` blocks MTF entries during 08:00-18:59 UTC. That window was derived *entirely from EURUSD* data (`docs/test-results/session-filter-analysis.md`) and has never been checked against any other pair.
+**Context**: `SessionFilteredSignalStrategy` blocks MTF entries during 08:00-18:59 UTC. That window was derived *entirely from EURUSD* data (`docs/test-results/session-filter-analysis.md`) and had never been checked against any other pair.
 
-**Evidence gathered this session**:
+**Evidence gathered in the original session**:
 - Live spread snapshot across the 7 majors this account trades: EURUSD 0.00, USDCAD 0.00, GBPUSD/USDCHF/NZDUSD 0.10, AUDUSD 0.20, USDJPY 0.30 pips. Pairs genuinely differ.
 - Pre-breakeven cut-short rate (soft-SL + timeout, same uniform config applied to all 7 pairs) ranges from 6.6% (EURUSD) to 29.2% (USDJPY) -- a 4.4x spread. USDJPY's high spread plausibly explains part of this (harder to clear breakeven -> more timeouts).
-- **Reasoned but untested hypothesis**: different pairs have different dominant trading sessions (GBPUSD/London, USDJPY/Tokyo, AUDUSD+NZDUSD/Asia-Pacific), so if the session effect is genuinely about session-driven volatility/choppiness, each pair's *own* bad hours plausibly differ from EURUSD's 08-19 UTC block -- but this has never been measured.
+- **Reasoned but untested hypothesis**: different pairs have different dominant trading sessions (GBPUSD/London, USDJPY/Tokyo, AUDUSD+NZDUSD/Asia-Pacific), so if the session effect is genuinely about session-driven volatility/choppiness, each pair's *own* bad hours plausibly differ from EURUSD's 08-19 UTC block.
 
-**Why this matters more now than when first written**: a later-session follow-up to Thread 4 found a real, 7/7-pairs-consistent signal -- trades that reverse *quickly* after breakeven (avg 822 ticks) recover far more often than trades that grind down *slowly* (avg 1,154 ticks) -- see the post-BE loss-cap section for detail. That's a genuine candidate for a dynamic post-BE cap (tight baseline, extend the leash on a fast-vs-slow read). But EURUSD itself only had 2 "real recovery" trades in that sample -- nowhere near enough to confirm the signal (or its magnitude) for the one pair actually live in `Config.SYMBOLS`, and pooling in the other 6 pairs to compensate isn't yet justified without knowing whether their session-driven volatility patterns are even comparable to EURUSD's. **This thread is now a direct blocker for building that dynamic cap with any confidence**, not just an abstract multi-pair-readiness item.
+**What was measured this session** (rerunning the original EURUSD-only methodology across all 7 pairs, both non-overlapping 4-week windows, `Config`'s live target/stop, unfiltered so every hour's raw win rate could be read -- see the writeup for a methodology bug found and fixed along the way: the first pass accidentally ran *with* the live session filter still on, which had to be forced off via a new `--no-session-filter` flag on `scripts/backtest_signals.py`):
+- EURUSD's own block reproduces (+19.5 / +5.2 pts across the two windows, same direction both times) -- confirms the methodology and the original finding, nothing new.
+- **AUDUSD and USDJPY show a reproducible *opposite* effect** (−4.5/−13.6 and −9.5/−4.8 pts respectively, both windows, both pairs) -- the 08-18 UTC block is their *better*-performing block, not worse. Applying EURUSD's window to either would suppress their better signals.
+- GBPUSD/NZDUSD show the same direction as EURUSD but far weaker (+3.9/+5.1 and +5.2/+3.5 pts) -- not a close enough match to treat as interchangeable with EURUSD's.
+- USDCAD shows no effect either window (+0.6/+1.7 pts). USDCHF's two windows disagree on direction entirely (−8.0/+9.5 pts) -- noise, not signal.
 
-**Next step, if resumed**: rerun the original session-filter-by-hour methodology (`docs/test-results/session-filter-analysis.md`'s approach) per-pair instead of EURUSD-only, to find out whether each pair needs its own blocked-hours window, or whether EURUSD's happens to transfer reasonably. Once that's settled, the ticks-to-cap signal can be properly validated for EURUSD alone (or pooling can be justified) before any dynamic-cap design work starts.
+**Answer**: the hypothesis is confirmed -- session effects genuinely differ per pair, in *direction* for at least 2 of 6, not just magnitude. **Pooling the other 6 pairs to validate Thread 4's dynamic-cap signal is not justified.**
+
+**Follow-up, same session**: built the per-symbol config mechanism ahead of need -- `Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL` (replacing the old flat `SESSION_FILTER_BLOCKED_HOURS_UTC`) keyed per symbol, `strategy_factory`/`app/factory.py`/`scripts/backtest_signals.py` all wired to look up each symbol's own window rather than one shared list. A symbol with no entry gets **no filtering at all**, not EURUSD's window -- the safe default per this thread's own finding. `Config.SYMBOLS` is still EURUSD-only, so behavior is unchanged today; this just means a second pair could be added later without silently inheriting a wrong window, and only needs its own validated window derived (this plan's own per-pair methodology) before it would actually filter anything.
+
+**Bug found while verifying this, fixed same session**: `get_broker_utc_offset_hours()` (used by the session filter to convert candle time to true UTC) read the last live tick with no freshness check -- with the market closed it returned nonsense (observed -29 instead of ~5). Pre-existing, affected every symbol's filter equally (including EURUSD's already-live one), not introduced by this work. Fixed: a computed offset outside a generous plausible range (±15h) is now treated as a stale-tick artifact and falls back to the last value that did look plausible (or `default` if none yet this process), rather than being trusted outright.
 
 ## Thread 2: Dynamic pre-breakeven loss management, keyed on entry-signal characteristics
 
@@ -104,7 +112,9 @@
 
 **One more thing found chasing that, though -- a real signal, currently unusable**: at `-$1`, most cap-hit trades resolve in ~200-210 ticks regardless of whether they'd have recovered or not -- too short a window for anything to differentiate on (the earlier ticks-to-cap signal from the `-$5` era had washed out entirely). Retested with real room (`$7`, cross-referenced against `$15` to label real recovery vs. genuinely bad, same technique used to validate `-$1` against `-$3`): the ticks-to-cap signal reappears clearly -- real wins average 822 ticks to the cap, genuinely-bad trades average 1,154 -- and holds in **7 of 7 pairs** individually, not just pooled. Entry-time confidence and m1_entry also show a real (if noisier) gap in the same direction as this project's recurring theme: less "textbook-clean" entries recover better, not worse.
 
-**Why this isn't actionable yet**: `$7` flat is worse than `$1` as a production cap (-$2,737 vs -$1,439.81 pooled) -- the opportunity here is a *dynamic* rule (tight `$1` baseline, extend the leash based on a fast-vs-slow read), not a looser flat number. And EURUSD itself only had 2 "real recovery" trades in this sample -- nowhere near enough to confirm the signal for the one pair actually live, and pooling in the other 6 pairs to compensate isn't justified until Thread 1 (session filtering per pair) establishes whether their session-driven volatility is even comparable to EURUSD's. **Next step, if resumed**: do Thread 1 first, then this becomes buildable.
+**Why this isn't actionable yet**: `$7` flat is worse than `$1` as a production cap (-$2,737 vs -$1,439.81 pooled) -- the opportunity here is a *dynamic* rule (tight `$1` baseline, extend the leash based on a fast-vs-slow read), not a looser flat number. And EURUSD itself only had 2 "real recovery" trades in this sample -- nowhere near enough to confirm the signal for the one pair actually live.
+
+**Thread 1 is now resolved and the answer is not the hoped-for one**: pooling the other 6 pairs to compensate for EURUSD's small sample is **not justified** -- `docs/test-results/session-filter-per-pair-analysis.md` found their session-driven behavior genuinely differs from EURUSD's (2 of 6 pairs show a reproducibly *opposite* session effect). **Next step, if resumed**: this dynamic cap stays blocked until more EURUSD-only post-BE history accumulates naturally (e.g. from continued live/demo trading) -- there is no shortcut through the other 6 pairs' data.
 
 ## Thread 5: PR #54 -- carrying all of this, still unmerged
 

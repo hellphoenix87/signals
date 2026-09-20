@@ -88,7 +88,14 @@ class Config:
     # windows -- see docs/test-results/session-filter-analysis.md. No
     # effect found for single-timeframe, so this is harmless there.
     USE_SESSION_FILTER: bool = True
-    SESSION_FILTER_BLOCKED_HOURS_UTC = list(range(8, 19))
+    # Per-symbol blocked-hours windows. EURUSD's 08-18 UTC block does NOT
+    # transfer to other pairs -- docs/test-results/session-filter-per-pair-analysis.md
+    # found a reproducibly *opposite* effect for AUDUSD/USDJPY, no effect
+    # for USDCAD, and noise for USDCHF. A symbol with no entry here gets
+    # no session filtering at all: inheriting EURUSD's window would be
+    # actively wrong for at least 2 of the 6 other pairs checked, so "no
+    # filter" is the only defensible default for an un-derived pair.
+    SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL: dict[str, list[int]] = {"EURUSD": list(range(8, 19))}
     # None = auto-detect live via a real MT5 tick vs. true UTC (see
     # signal_generation.get_broker_utc_offset_hours) -- depends on both
     # the local machine's timezone and the broker server's, so hardcoding

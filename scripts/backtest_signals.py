@@ -53,10 +53,19 @@ now (default 1, the most recent window); use it with `--weeks`/`--count`
 to backtest an older, non-overlapping period for out-of-sample checks.
 
 `--session-filter` forces `Config.USE_SESSION_FILTER` on for this run
-(already the live default -- see `Config.SESSION_FILTER_BLOCKED_HOURS_UTC`),
-holding entries during 08:00-18:59 UTC regardless of the underlying
-signal. Useful to force it on/verify explicitly even if a future config
-change flips the default back off.
+(already the live default -- see
+`Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL`, keyed per symbol;
+a symbol with no entry there gets no filtering at all, regardless of
+this flag -- see docs/test-results/session-filter-per-pair-analysis.md
+for why EURUSD's window isn't a safe default for other pairs), holding
+entries during that symbol's blocked hours (EURUSD: 08:00-18:59 UTC)
+regardless of the underlying signal. Useful to force it on/verify
+explicitly even if a future config change flips the default back off.
+`--no-session-filter` forces it off instead (e.g. for an unfiltered
+hour-by-hour discovery pass -- without this, `Config`'s own
+`USE_SESSION_FILTER=True` default silently zeroes out every signal in
+the blocked hours, defeating the point of an hour-by-hour reading). Not
+compatible with `--session-filter`.
 
 `--ntick N` (N>1) tests raising `Config.N_TICK_CONFIRMATION` to N: for
 each candle-close signal, wraps the strategy in the real
@@ -130,6 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
     parser.add_argument("--rsi-weight", type=float, default=None, help="Override Config.ENTRY_RSI_WEIGHT for the single-timeframe vote (default: Config's own value, 2.0)")
     parser.add_argument("--session-filter", action="store_true", help="Force Config.USE_SESSION_FILTER on for this run, regardless of Config's own value")
+    parser.add_argument("--no-session-filter", action="store_true", help="Force Config.USE_SESSION_FILTER off for this run, regardless of Config's own value -- e.g. for an unfiltered hour-by-hour discovery pass. Not compatible with --session-filter.")
     parser.add_argument("--ml-entry", action="store_true", help="Use the trained ML entry model (Config.ML_MODEL_PATH) instead of the hand-coded indicator vote for the base/entry layer. Not compatible with --indicators.")
     parser.add_argument("--ntick", type=int, default=None, help="Test raising Config.N_TICK_CONFIRMATION to this value (>1), confirming each candle-close signal against real historical ticks. Not compatible with --quick-check.")
     return parser.parse_args()
@@ -368,6 +378,7 @@ def run_backtest(
         use_multi=False,
         use_n_tick=bool(ntick_n),
         n_ticks=ntick_n or 0,
+        symbol=symbol,
     )
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
@@ -509,6 +520,7 @@ def run_mtf_backtest(
         use_multi=True,
         use_n_tick=bool(ntick_n),
         n_ticks=ntick_n or 0,
+        symbol=symbol,
     )
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
@@ -743,6 +755,10 @@ def main() -> None:
         print("--indicators and --ml-entry are mutually exclusive (both override the entry layer). Aborting.")
         sys.exit(1)
 
+    if args.session_filter and args.no_session_filter:
+        print("--session-filter and --no-session-filter are mutually exclusive. Aborting.")
+        sys.exit(1)
+
     if args.mtf:
         config = Config
         label_parts = []
@@ -756,6 +772,9 @@ def main() -> None:
         if args.session_filter:
             overrides["USE_SESSION_FILTER"] = True
             label_parts.append("sessionfilter")
+        if args.no_session_filter:
+            overrides["USE_SESSION_FILTER"] = False
+            label_parts.append("nosessionfilter")
         if args.ml_entry:
             overrides["USE_ML_ENTRY_MODEL"] = True
             label_parts.append("mlentry")
@@ -780,6 +799,8 @@ def main() -> None:
             overrides["ENTRY_RSI_WEIGHT"] = args.rsi_weight
         if args.session_filter:
             overrides["USE_SESSION_FILTER"] = True
+        if args.no_session_filter:
+            overrides["USE_SESSION_FILTER"] = False
         if args.ml_entry:
             overrides["USE_ML_ENTRY_MODEL"] = True
         if overrides:

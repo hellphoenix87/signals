@@ -46,6 +46,11 @@ def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
     raise ValueError(f"Unknown indicator: {name!r}")
 
 
+MAX_PLAUSIBLE_UTC_OFFSET_HOURS = 15  # real-world timezones span -12..+14; broker "platform time" offsets are typically a couple hours either side of that
+
+_last_known_good_utc_offset_hours: Optional[int] = None
+
+
 def get_broker_utc_offset_hours(default: int = 5) -> int:
     """Determine the hour offset between candle timestamps (as
     `MarketData` constructs them, via `datetime.fromtimestamp` on the raw
@@ -55,17 +60,38 @@ def get_broker_utc_offset_hours(default: int = 5) -> int:
     a hardcoded value would silently drift wrong across a DST change or
     a new deployment machine. Falls back to `default` if MT5 isn't
     reachable (e.g. offline/deterministic tests).
+
+    `symbol_info_tick` returns the *last received* tick with no freshness
+    check built in -- if the market has been closed for a while (weekend,
+    holiday, or right at a bot restart before the first live tick
+    arrives), that tick can be hours or days stale, and diffing its
+    (stale) time against the real current instant would pick up that
+    staleness as if it were part of the offset (observed: -29 on a
+    Sunday, instead of the real ~5). A genuine local-vs-broker timezone
+    offset never gets anywhere near that large, so a computed value
+    outside `MAX_PLAUSIBLE_UTC_OFFSET_HOURS` is treated as a stale-tick
+    artifact, not a real offset: falls back to the last value that *did*
+    look plausible (module-level, survives across calls within one
+    process -- e.g. Friday's good value carries through the weekend
+    rather than reverting to `default` every call), or to `default` if
+    none has been seen yet this process.
     """
+    global _last_known_good_utc_offset_hours
+    fallback = _last_known_good_utc_offset_hours if _last_known_good_utc_offset_hours is not None else default
     try:
         symbol = getattr(Config, "SYMBOLS", ["EURUSD"])[0]
         tick = mt5.symbol_info_tick(symbol)
         if tick is None or not tick.time:
-            return default
+            return fallback
         candle_frame_now = datetime.datetime.fromtimestamp(tick.time)
         true_utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        return round((candle_frame_now - true_utc_now).total_seconds() / 3600)
+        offset = round((candle_frame_now - true_utc_now).total_seconds() / 3600)
+        if abs(offset) > MAX_PLAUSIBLE_UTC_OFFSET_HOURS:
+            return fallback
+        _last_known_good_utc_offset_hours = offset
+        return offset
     except Exception:
-        return default
+        return fallback
 
 
 def strategy_factory(
@@ -77,12 +103,19 @@ def strategy_factory(
     use_multi: Optional[bool] = None,
     use_n_tick: Optional[bool] = None,
     n_ticks: Optional[int] = None,
+    symbol: Optional[str] = None,
     **kwargs
 ):
     """
     Plug & Play Strategy Factory: instantiate and wire up any strategy.
     Optionally wrap with multi-timeframe or n-tick confirmation.
     Accepts one or multiple indicators.
+
+    `symbol`, when given, selects that symbol's blocked-hours window from
+    `Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL` for the session
+    filter (see below) -- a symbol with no entry there gets no filtering
+    at all, not EURUSD's window by default (see
+    docs/test-results/session-filter-per-pair-analysis.md for why).
     """
     use_multi = (
         use_multi
@@ -197,7 +230,8 @@ def strategy_factory(
         strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks, config=config)
 
     if getattr(config, "USE_SESSION_FILTER", False):
-        blocked_hours = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC", [])
+        blocked_hours_by_symbol = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {})
+        blocked_hours = blocked_hours_by_symbol.get(symbol, []) if symbol else []
         utc_offset = getattr(config, "SESSION_FILTER_UTC_OFFSET_HOURS", None)
         if utc_offset is None:
             utc_offset = get_broker_utc_offset_hours()
