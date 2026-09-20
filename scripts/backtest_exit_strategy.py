@@ -859,6 +859,12 @@ def simulate_full_lifecycle(
         "profit": profit,
         "ticks_used": idx + 1,
         "entry_price": entry_price,
+        # Real running peak profit reached post-breakeven (None if BE never
+        # armed, i.e. outcome in {"profit_drop", "failed_to_reach_be"}) --
+        # lets `profit_drop_after_be` outcomes be split by how far above
+        # breakeven the trade actually got before reversing into the loss
+        # cap, rather than just knowing that it did.
+        "post_be_peak_profit": getattr(state, "best_profit", None),
     }
 
 
@@ -1462,7 +1468,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "outcome", "profit", "ticks_used", "entry_price",
+        "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1499,6 +1505,29 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
             f"  {outcome:28s}: {len(rows):4d} ({pct:5.1f}%)  "
             f"avg_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}  avg_ticks={avg_ticks:.1f}"
         )
+
+    reached_be_rows = [r for r in results if r.get("post_be_peak_profit") is not None]
+    if reached_be_rows:
+        # Trail trigger = peak - max(floor, pct*peak); since that max() is
+        # always >= floor, trigger > 0 (trail structurally able to fire)
+        # iff peak > floor -- NOT wherever the floor/pct branches cross
+        # (that crossover, floor/pct, is a different, unrelated number).
+        floor = float(getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0)
+        print(f"\nOf {len(reached_be_rows)} trades that reached breakeven, split by real post-BE peak profit reached before final outcome (trail floor=${floor:.2f}):")
+        buckets = [
+            (f"peak <= $1 (barely above BE)", lambda p: p <= 1.0),
+            (f"$1 < peak <= ${floor:.2f} (trail structurally inactive: trigger <= 0)", lambda p: 1.0 < p <= floor),
+            (f"peak > ${floor:.2f} (trail structurally active: trigger > 0)", lambda p: p > floor),
+        ]
+        for label, pred in buckets:
+            bucket_rows = [r for r in reached_be_rows if pred(r["post_be_peak_profit"])]
+            if not bucket_rows:
+                continue
+            by_outcome_in_bucket: dict[str, int] = {}
+            for r in bucket_rows:
+                by_outcome_in_bucket[r["outcome"]] = by_outcome_in_bucket.get(r["outcome"], 0) + 1
+            outcome_str = ", ".join(f"{o}={c}" for o, c in sorted(by_outcome_in_bucket.items(), key=lambda kv: -kv[1]))
+            print(f"  {label}: {len(bucket_rows)} ({outcome_str})")
 
 
 def write_entry_excursion_csv(results: list[dict], symbol: str) -> None:
