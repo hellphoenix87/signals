@@ -93,6 +93,15 @@ exists today (mutually exclusive with `--counterfactual`/
 `--disable-timeout`/`--measure-post-be`/`--simulate-trail`, which are all
 phase-based).
 
+`--sweep-pre-be-threshold` answers Thread 2 (docs/exit-strategy-open-
+threads.md): instead of the single Config-configured pre-breakeven
+soft-SL threshold, replays every candidate in PRE_BE_THRESHOLD_CANDIDATES
+(each a real LossExitManager built with a different max_loss_money,
+everything else at Config's real values) against the same tick stream in
+one pass -- so a threshold conditional on M5-confirm state can be tested
+against the real system, not guessed from single-threshold data. Pre-BE
+phase only; mutually exclusive with --full-lifecycle.
+
 Usage:
     pipenv run python scripts/backtest_exit_strategy.py [--symbol EURUSD]
         [--weeks 4] [--start-pos 1] [--lot 0.2] [--max-ticks-per-trade 500]
@@ -100,6 +109,7 @@ Usage:
         [--disable-timeout] [--measure-post-be] [--simulate-trail]
         [--post-be-max-ticks 3000]
         [--full-lifecycle] [--full-lifecycle-max-ticks 4000]
+        [--sweep-pre-be-threshold]
 
 Per-trade results are written to a CSV under `backtest_results/` for
 offline analysis; the aggregate summary is printed to stdout.
@@ -184,6 +194,14 @@ CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
 # validate 1.0 against 3.0 originally).
 FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 7.0, 15.0]
 
+# Thread 2 (docs/exit-strategy-open-threads.md): candidate values for the
+# PRE-breakeven soft-SL money threshold (`Config.EXIT_MAX_LOSS_MONEY`,
+# LossExitManager._pre_be_soft_sl_hit), tested for --sweep-pre-be-threshold
+# to see whether a threshold conditional on M5-confirm state (whether
+# RSI/M5 actually agrees with the trade direction) beats today's flat $5
+# rule. 5.0 is today's live value, kept for direct comparison.
+PRE_BE_THRESHOLD_CANDIDATES: list[float] = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
+
 
 def to_tick_dict(t) -> dict:
     """`mt5.copy_ticks_from` returns a numpy structured array -- each
@@ -246,6 +264,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-lifecycle", action="store_true", help="Replay real ticks through the actual, complete ExitTrade (both managers, real precedence) from entry to a genuine final exit -- reports one real realized P&L per trade under the system as it actually exists today. Mutually exclusive with the phase-based flags above (--counterfactual/--disable-timeout/--measure-post-be/--simulate-trail are ignored when this is set).")
     parser.add_argument("--full-lifecycle-max-ticks", type=int, default=4000, help="Max real ticks fetched per trade for --full-lifecycle -- needs to cover pre-BE arming plus the full post-BE trail/cap lifecycle, not just the pre-BE window.")
     parser.add_argument("--sweep-post-be-cap", action="store_true", help="Only with --full-lifecycle: instead of using Config's single post-BE loss-cap value, replay FULL_LIFECYCLE_CAP_CANDIDATES against the same tick stream in one pass, each paired with the SAME real trailing-stop formula -- so cap retuning is tested against the real combined system, not in isolation.")
+    parser.add_argument("--sweep-pre-be-threshold", action="store_true", help="Instead of using Config's single pre-breakeven soft-SL threshold, replay PRE_BE_THRESHOLD_CANDIDATES (each a real LossExitManager with a different max_loss_money, everything else at Config's real values) against the same tick stream in one pass -- Thread 2's test of whether a threshold conditional on M5-confirm state beats the flat $5 rule. Pre-BE phase only (mutually exclusive with --full-lifecycle); metadata capture (confidence/adx/m15_bias/m5_confirm/m1_entry) still included so results can be split by M5-confirm afterward.")
     return parser.parse_args()
 
 
@@ -835,6 +854,116 @@ def simulate_full_lifecycle_cap_sweep(
     return result
 
 
+def _pre_be_threshold_label(c: float) -> str:
+    return f"pre{str(c).replace('.', '_')}"
+
+
+def simulate_pre_be_threshold_sweep(
+    *,
+    exit_trades: list[tuple[str, Any]],
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Thread 2 (docs/exit-strategy-open-threads.md): replays every
+    `(label, exit_trade)` pair in `exit_trades` -- each a full `ExitTrade`
+    built with a different `max_loss_money`, everything else at Config's
+    real values -- against the same real tick stream in a single pass,
+    using only the real `LossExitManager`'s pre-breakeven branch (soft-SL
+    money threshold + the arming-ticks timeout). Deliberately reuses the
+    real manager rather than reimplementing that state machine: the
+    arming-ticks timeout check happens on the tick *after* the last
+    soft-SL-checked one, not the same tick, a timing subtlety not worth
+    risking a subtly-wrong reimplementation of for money-moving logic.
+
+    Stops each candidate the moment it resolves: an exit action
+    (`profit_drop` -> "soft_sl", `failed_to_reach_be` -> "timed_out"), or
+    `state.be_armed` becoming true with no action ("reached_be") --
+    mirrors `simulate_pre_be_phase`'s own stopping rule. Post-breakeven
+    behavior is out of scope here, same as every other pre-BE-only
+    simulation in this script.
+
+    Whether/when breakeven arms is identical for every candidate
+    (`is_break_even` only looks at profit >= 0.0, independent of any
+    threshold) -- only each candidate's own soft-SL breach point can
+    differ, so every candidate shares the same underlying price path and
+    breakeven timing, just resolving earlier or later depending on its
+    own threshold.
+
+    Returns `{"<label>_outcome", "<label>_profit", "<label>_ticks"}` for
+    every label in `exit_trades`.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        result = {}
+        for label, _ in exit_trades:
+            result[f"{label}_outcome"] = "no_ticks"
+            result[f"{label}_profit"] = None
+            result[f"{label}_ticks"] = 0
+        return result
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    states = {label: PosState(anchor=0.0, prev_price=0.0) for label, _ in exit_trades}
+    resolved = {label: False for label, _ in exit_trades}
+    outcome: dict[str, Optional[str]] = {label: None for label, _ in exit_trades}
+    result_profit: dict[str, Optional[float]] = {label: None for label, _ in exit_trades}
+    result_ticks: dict[str, Optional[int]] = {label: None for label, _ in exit_trades}
+    loss_managers = {label: et._loss_manager for label, et in exit_trades}
+
+    profit = 0.0
+    for idx, t in enumerate(ticks[:max_ticks]):
+        if all(resolved.values()):
+            break
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        position = {
+            "symbol": symbol, "type": pos_type, "ticket": idx,
+            "price_open": entry_price, "volume": lot, "profit": profit,
+        }
+        tick_dict = to_tick_dict(t)
+
+        for label, _ in exit_trades:
+            if resolved[label]:
+                continue
+            loss_manager = loss_managers[label]
+            state = states[label]
+            action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                resolved[label] = True
+                outcome[label] = "soft_sl" if action.reason == "profit_drop" else "timed_out"
+                result_profit[label] = profit
+                result_ticks[label] = idx + 1
+                continue
+            if getattr(state, "be_armed", False):
+                resolved[label] = True
+                outcome[label] = "reached_be"
+                result_profit[label] = profit
+                result_ticks[label] = idx + 1
+
+    for label, _ in exit_trades:
+        if not resolved[label]:
+            outcome[label] = "exhausted"
+            result_profit[label] = profit
+            result_ticks[label] = min(len(ticks), max_ticks)
+
+    result = {}
+    for label, _ in exit_trades:
+        result[f"{label}_outcome"] = outcome[label]
+        result[f"{label}_profit"] = result_profit[label]
+        result[f"{label}_ticks"] = result_ticks[label]
+    return result
+
+
 def run(
     symbol: str,
     weeks: float,
@@ -850,6 +979,7 @@ def run(
     full_lifecycle: bool = False,
     full_lifecycle_max_ticks: int = 4000,
     sweep_post_be_cap: bool = False,
+    sweep_pre_be_threshold: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -911,6 +1041,13 @@ def run(
             cfg = ExitTradeConfig(post_be_loss_cap_money=c)
             cap_sweep_trades.append((label, create_exit_trade(broker=broker, risk_manager=risk_manager, config=cfg)))
 
+    pre_be_sweep_trades: list[tuple[str, Any]] = []
+    if sweep_pre_be_threshold:
+        for c in PRE_BE_THRESHOLD_CANDIDATES:
+            label = _pre_be_threshold_label(c)
+            cfg = ExitTradeConfig(max_loss_money=c)
+            pre_be_sweep_trades.append((label, create_exit_trade(broker=broker, risk_manager=risk_manager, config=cfg)))
+
     results: list[dict] = []
 
     logging.disable(logging.CRITICAL)
@@ -942,6 +1079,17 @@ def run(
                         lot=lot,
                         contract_size=contract_size,
                         max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                    )
+                elif sweep_pre_be_threshold:
+                    sim = simulate_pre_be_threshold_sweep(
+                        exit_trades=pre_be_sweep_trades,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=max_ticks,
                         needs_conversion=needs_conversion,
                     )
                 elif full_lifecycle:
@@ -991,6 +1139,9 @@ def run(
     if full_lifecycle and sweep_post_be_cap:
         write_full_lifecycle_cap_sweep_csv(results, symbol)
         summarize_full_lifecycle_cap_sweep(results, symbol)
+    elif sweep_pre_be_threshold:
+        write_pre_be_threshold_sweep_csv(results, symbol)
+        summarize_pre_be_threshold_sweep(results, symbol)
     elif full_lifecycle:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
@@ -1254,6 +1405,48 @@ def summarize_full_lifecycle_cap_sweep(results: list[dict], symbol: str) -> None
         )
 
 
+def _pre_be_sweep_labels() -> list[str]:
+    return [_pre_be_threshold_label(c) for c in PRE_BE_THRESHOLD_CANDIDATES]
+
+
+def write_pre_be_threshold_sweep_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_pre_be_threshold_sweep_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+    ] + [
+        f"{label}_{suffix}" for label in _pre_be_sweep_labels() for suffix in ("outcome", "profit", "ticks")
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_pre_be_threshold_sweep(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    print(f"\n=== Pre-BE soft-SL threshold sweep (real LossExitManager, threshold varies) for {symbol}, {total} trades ===")
+    for c, label in zip(PRE_BE_THRESHOLD_CANDIDATES, _pre_be_sweep_labels()):
+        profits = [r[f"{label}_profit"] for r in results if r.get(f"{label}_profit") is not None]
+        outcomes = [r[f"{label}_outcome"] for r in results if r.get(f"{label}_outcome") is not None]
+        total_pnl = sum(profits)
+        win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+        reached_be = sum(1 for o in outcomes if o == "reached_be")
+        marker = "  <-- current production value" if c == float(getattr(Config, "EXIT_MAX_LOSS_MONEY", 5.0) or 5.0) else ""
+        print(
+            f"  -${c:<4.1f}: total=${total_pnl:+9.2f}  win_rate={win_rate:5.1f}%  "
+            f"reached_be={reached_be:4d}/{total}{marker}"
+        )
+
+
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
@@ -1272,6 +1465,7 @@ def main() -> None:
         args.full_lifecycle,
         args.full_lifecycle_max_ticks,
         args.sweep_post_be_cap,
+        args.sweep_pre_be_threshold,
     )
 
 
