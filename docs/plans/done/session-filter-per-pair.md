@@ -10,9 +10,11 @@ Thread 1 of `docs/exit-strategy-open-threads.md` (raised from P3 to a direct blo
 ## Out of scope
 
 - Building the actual dynamic post-BE cap (Thread 4's follow-on) -- this plan only unblocks it.
-- Wiring per-pair blocked-hours config into `SessionFilteredSignalStrategy`/`Config` -- `Config.SYMBOLS` is EURUSD-only in production today, so there is nothing live to wire a multi-pair window into yet. This plan's output is a decision + writeup, and a config change only if EURUSD's own window turns out wrong for EURUSD itself.
 - Re-deriving the ratio/spread assumptions themselves (uses `Config`'s current live defaults, same as every other pair sweep in this investigation).
 - No tests, per MVP/POC mode.
+- Deriving each pair's own validated blocked-hours window (Phase 3 below only builds the per-symbol *mechanism*; only EURUSD has a validated window today, from the original `session-filter-analysis.md`). A future session can derive real windows for other pairs once/if they go live, using the same per-pair methodology this plan already ran.
+
+**Revision note**: Phase 3 was added after the plan's original "resolved and wired" state, at the user's explicit request, reversing the original out-of-scope call ("nothing live to wire a multi-pair window into yet") -- building the per-symbol config mechanism now, ahead of `Config.SYMBOLS` actually expanding, so it's in place and tested via backtest before it's ever needed live.
 
 ## Phases
 
@@ -28,6 +30,17 @@ Thread 1 of `docs/exit-strategy-open-threads.md` (raised from P3 to a direct blo
 - Change: `docs/exit-strategy-open-threads.md` Thread 1 section -- status updated to done/resolved, verdict recorded, and Thread 4's "next step, if resumed" note updated to reflect whether pooling is now justified or still blocked.
 - Acceptance criteria: the writeup states a clear per-pair verdict (transfers / doesn't transfer / inconclusive) and an explicit pooling recommendation for Thread 4, not just raw tables.
 
+### Phase 3: Per-symbol session-filter config mechanism
+
+- Change: `app/config/settings.py` -- replace the flat `SESSION_FILTER_BLOCKED_HOURS_UTC = list(range(8, 19))` with `SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL: dict[str, list[int]] = {"EURUSD": list(range(8, 19))}`. A symbol with no entry gets no filtering at all -- per this plan's own finding, inheriting EURUSD's window is actively wrong for at least 2 of the 6 other pairs checked, so "no filter" is the only defensible default for an un-derived pair, not "reuse EURUSD's."
+- Change: `app/signals/signal_generation.py::strategy_factory` -- add an optional `symbol: str | None = None` parameter; when `USE_SESSION_FILTER` is on, look up `blocked_hours = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {}).get(symbol, [])` instead of the old flat list. `SessionFilteredSignalStrategy` itself is untouched -- it already just takes whatever blocked-hours list it's handed.
+- Change: `app/factory.py` -- pass `symbol=symbol` into the per-symbol `strategy_factory(...)` call in the `Config.SYMBOLS` loop (currently built identically for every symbol despite the loop already being per-symbol).
+- Change: `scripts/backtest_signals.py` -- pass `symbol=symbol` into both `strategy_factory` call sites (`run_backtest`, `run_mtf_backtest`) so `--session-filter`/`--no-session-filter` backtests exercise the real per-symbol lookup, not just `USE_SESSION_FILTER`'s on/off toggle.
+- Change: `scripts/analyze_session_filter_by_pair.py` -- update its `Config.SESSION_FILTER_BLOCKED_HOURS_UTC` reference to read `SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL.get("EURUSD")` instead (it's specifically checking EURUSD's block against other pairs' data, unaffected in intent).
+- Acceptance criteria: `PYTHONPATH=. pipenv run python scripts/backtest_signals.py --symbol EURUSD --mtf --weeks 1 --session-filter` still blocks 08-18 UTC exactly as before (manual smoke check, no regression); `--symbol GBPUSD --mtf --weeks 1 --session-filter` produces signals during 08-18 UTC (GBPUSD has no entry in the new dict, so the filter should no-op for it) -- confirms the per-symbol lookup is live, not just present in code.
+- **Verified** (in-process, pinned `SESSION_FILTER_UTC_OFFSET_HOURS=5` -- see the unrelated bug noted below for why pinning was needed): EURUSD with the filter on produced signals in UTC hours `{0,1,2,4,6,7,19,20,21,22}` only -- zero in the blocked 8-18 range. GBPUSD with the filter on (no per-symbol entry) produced signals across all 22 observed hours, including 8-18 -- confirms the no-entry-means-no-filtering default is live, not just configured.
+- **Unrelated bug found while verifying, not fixed here**: `get_broker_utc_offset_hours()` (`app/signals/signal_generation.py`) reads the last live tick's timestamp with no freshness check. With the market closed (this verification ran on a Sunday), it returned nonsense (-29, observed) instead of the real ~5, because the last tick was stale. This is a **pre-existing bug that predates this plan and affects every symbol's filter equally**, including EURUSD's already-live one -- not introduced or fixed by the per-symbol work here. Flagged in a code comment on the function; needs its own follow-up (e.g. reject a tick older than some threshold and fail safe to no filtering, or to the last-known-good offset).
+
 ## Open questions
 
 None -- methodology, pair list, and windows are all already established by prior sessions' work (`session-filter-analysis.md`, and the 7-pair list used throughout Threads 3/4's sweeps).
@@ -41,3 +54,5 @@ None -- methodology, pair list, and windows are all already established by prior
 Done. `docs/test-results/session-filter-per-pair-analysis.md` has the full writeup. Verdict: EURUSD's session-filter block does not transfer -- AUDUSD and USDJPY show a reproducible *opposite* effect (both non-overlapping windows), USDCHF shows no reproducible effect, GBPUSD/NZDUSD show the same direction but far weaker. Pooling the other 6 pairs to validate Thread 4's dynamic post-BE cap signal is **not justified**. `docs/exit-strategy-open-threads.md` Threads 1 and 4 updated accordingly. No production config/behavior change -- `Config.SYMBOLS` is EURUSD-only and EURUSD's own window is confirmed correct.
 
 One unplanned code change beyond the original scope: the first data-collection pass silently ran *with* the live `Config.USE_SESSION_FILTER=True` default still on (omitting `--session-filter` doesn't turn it off, since it's already on by default), which zeroed out every signal in the exact hours this analysis needed to read. Added `--no-session-filter` to `scripts/backtest_signals.py` to force it off for this kind of unfiltered discovery pass, and reran all 14 combinations.
+
+**Phase 3 (added after the above, per explicit user request)**: done. Per-symbol session-filter config mechanism built and verified (see Phase 3's Verified note above). `Config.SYMBOLS` is still EURUSD-only, so no live behavior change -- the mechanism is in place for when a second pair is added, rather than defaulting it to (wrongly) inherit EURUSD's window. Surfaced one pre-existing, unrelated bug in `get_broker_utc_offset_hours()` (stale-tick flakiness) along the way -- documented, not fixed, out of scope for this plan.

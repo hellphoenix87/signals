@@ -53,14 +53,19 @@ now (default 1, the most recent window); use it with `--weeks`/`--count`
 to backtest an older, non-overlapping period for out-of-sample checks.
 
 `--session-filter` forces `Config.USE_SESSION_FILTER` on for this run
-(already the live default -- see `Config.SESSION_FILTER_BLOCKED_HOURS_UTC`),
-holding entries during 08:00-18:59 UTC regardless of the underlying
-signal. Useful to force it on/verify explicitly even if a future config
-change flips the default back off. `--no-session-filter` forces it off
-instead (e.g. for an unfiltered hour-by-hour discovery pass -- without
-this, `Config`'s own `USE_SESSION_FILTER=True` default silently zeroes
-out every signal in the blocked hours, defeating the point of an
-hour-by-hour reading). Not compatible with `--session-filter`.
+(already the live default -- see
+`Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL`, keyed per symbol;
+a symbol with no entry there gets no filtering at all, regardless of
+this flag -- see docs/test-results/session-filter-per-pair-analysis.md
+for why EURUSD's window isn't a safe default for other pairs), holding
+entries during that symbol's blocked hours (EURUSD: 08:00-18:59 UTC)
+regardless of the underlying signal. Useful to force it on/verify
+explicitly even if a future config change flips the default back off.
+`--no-session-filter` forces it off instead (e.g. for an unfiltered
+hour-by-hour discovery pass -- without this, `Config`'s own
+`USE_SESSION_FILTER=True` default silently zeroes out every signal in
+the blocked hours, defeating the point of an hour-by-hour reading). Not
+compatible with `--session-filter`.
 
 `--ntick N` (N>1) tests raising `Config.N_TICK_CONFIRMATION` to N: for
 each candle-close signal, wraps the strategy in the real
@@ -373,6 +378,7 @@ def run_backtest(
         use_multi=False,
         use_n_tick=bool(ntick_n),
         n_ticks=ntick_n or 0,
+        symbol=symbol,
     )
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)
@@ -514,6 +520,7 @@ def run_mtf_backtest(
         use_multi=True,
         use_n_tick=bool(ntick_n),
         n_ticks=ntick_n or 0,
+        symbol=symbol,
     )
     broker = Broker(TradingMode.BACKTEST)
     pip_size = broker.get_pip_size(symbol)

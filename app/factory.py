@@ -36,7 +36,7 @@ for symbol in getattr(Config, "SYMBOLS", ["EURUSD"]):
     )
     tick = create_tick_collector(symbol=symbol, interval=0.1)
     exit_trade = create_exit_trade(broker=br, risk_manager=rm)
-    signal_generator = strategy_factory(config=Config)
+    signal_generator = strategy_factory(config=Config, symbol=symbol)
     orchestrator = create_orchestrator(
         collector=collector,
         signal_generator=signal_generator,

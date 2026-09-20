@@ -41,7 +41,11 @@
 - GBPUSD/NZDUSD show the same direction as EURUSD but far weaker (+3.9/+5.1 and +5.2/+3.5 pts) -- not a close enough match to treat as interchangeable with EURUSD's.
 - USDCAD shows no effect either window (+0.6/+1.7 pts). USDCHF's two windows disagree on direction entirely (−8.0/+9.5 pts) -- noise, not signal.
 
-**Answer**: the hypothesis is confirmed -- session effects genuinely differ per pair, in *direction* for at least 2 of 6, not just magnitude. **Pooling the other 6 pairs to validate Thread 4's dynamic-cap signal is not justified.** No production change follows (`Config.SYMBOLS` is EURUSD-only, and EURUSD's own window is confirmed correct for EURUSD) -- but if a second pair is ever added live, it would need its own independently-derived window rather than inheriting EURUSD's.
+**Answer**: the hypothesis is confirmed -- session effects genuinely differ per pair, in *direction* for at least 2 of 6, not just magnitude. **Pooling the other 6 pairs to validate Thread 4's dynamic-cap signal is not justified.**
+
+**Follow-up, same session**: built the per-symbol config mechanism ahead of need -- `Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL` (replacing the old flat `SESSION_FILTER_BLOCKED_HOURS_UTC`) keyed per symbol, `strategy_factory`/`app/factory.py`/`scripts/backtest_signals.py` all wired to look up each symbol's own window rather than one shared list. A symbol with no entry gets **no filtering at all**, not EURUSD's window -- the safe default per this thread's own finding. `Config.SYMBOLS` is still EURUSD-only, so behavior is unchanged today; this just means a second pair could be added later without silently inheriting a wrong window, and only needs its own validated window derived (this plan's own per-pair methodology) before it would actually filter anything.
+
+**Bug found while verifying this, not fixed**: `get_broker_utc_offset_hours()` (used by the session filter to convert candle time to true UTC) reads the last live tick with no freshness check -- with the market closed it returns nonsense (observed -29 instead of ~5). Pre-existing, affects every symbol's filter equally (including EURUSD's already-live one), not introduced by this work. Flagged in a code comment; needs its own follow-up.
 
 ## Thread 2: Dynamic pre-breakeven loss management, keyed on entry-signal characteristics
 

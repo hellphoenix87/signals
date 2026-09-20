@@ -1,7 +1,7 @@
 """One-off analysis for Thread 1 of `docs/exit-strategy-open-threads.md`:
 does EURUSD's session-filter blocked-hours window (08:00-18:59 UTC,
-`Config.SESSION_FILTER_BLOCKED_HOURS_UTC`) transfer to the other 6 majors,
-or does each pair need its own?
+`Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL["EURUSD"]`) transfer to
+the other 6 majors, or does each pair need its own?
 
 Reads the per-signal CSVs produced by `scripts/backtest_signals.py --mtf`
 (no `--session-filter`, so every UTC hour's raw win rate can be read
@@ -33,7 +33,9 @@ from pathlib import Path
 from app.config.settings import Config
 from app.signals.signal_generation import get_broker_utc_offset_hours
 
-EURUSD_BLOCKED_HOURS = set(getattr(Config, "SESSION_FILTER_BLOCKED_HOURS_UTC", range(8, 19)))
+EURUSD_BLOCKED_HOURS = set(
+    getattr(Config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {}).get("EURUSD", range(8, 19))
+)
 
 
 def parse_args() -> argparse.Namespace:

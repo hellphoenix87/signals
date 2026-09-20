@@ -55,6 +55,18 @@ def get_broker_utc_offset_hours(default: int = 5) -> int:
     a hardcoded value would silently drift wrong across a DST change or
     a new deployment machine. Falls back to `default` if MT5 isn't
     reachable (e.g. offline/deterministic tests).
+
+    KNOWN ISSUE (found 2026-09-20, not yet fixed): `symbol_info_tick`
+    returns the *last received* tick with no freshness check -- if the
+    market has been closed for a while (weekend, holiday, or right at a
+    bot restart before the first live tick arrives), that tick can be
+    hours or days stale, producing a nonsense offset (observed: -29 on a
+    Sunday) instead of the real ~5. Since `strategy_factory` calls this
+    once at build time and the result is baked into `SessionFilteredSignalStrategy`
+    for that instance's lifetime, a bot started right after a market
+    reopen could block the wrong hours until restarted. Not touched by
+    the per-symbol blocked-hours work (`SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL`)
+    -- this bug predates it and affects every symbol's filter equally.
     """
     try:
         symbol = getattr(Config, "SYMBOLS", ["EURUSD"])[0]
@@ -77,12 +89,19 @@ def strategy_factory(
     use_multi: Optional[bool] = None,
     use_n_tick: Optional[bool] = None,
     n_ticks: Optional[int] = None,
+    symbol: Optional[str] = None,
     **kwargs
 ):
     """
     Plug & Play Strategy Factory: instantiate and wire up any strategy.
     Optionally wrap with multi-timeframe or n-tick confirmation.
     Accepts one or multiple indicators.
+
+    `symbol`, when given, selects that symbol's blocked-hours window from
+    `Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL` for the session
+    filter (see below) -- a symbol with no entry there gets no filtering
+    at all, not EURUSD's window by default (see
+    docs/test-results/session-filter-per-pair-analysis.md for why).
     """
     use_multi = (
         use_multi
@@ -197,7 +216,8 @@ def strategy_factory(
         strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks, config=config)
 
     if getattr(config, "USE_SESSION_FILTER", False):
-        blocked_hours = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC", [])
+        blocked_hours_by_symbol = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {})
+        blocked_hours = blocked_hours_by_symbol.get(symbol, []) if symbol else []
         utc_offset = getattr(config, "SESSION_FILTER_UTC_OFFSET_HOURS", None)
         if utc_offset is None:
             utc_offset = get_broker_utc_offset_hours()
