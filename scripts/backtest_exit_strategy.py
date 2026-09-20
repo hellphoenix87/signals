@@ -823,6 +823,7 @@ def simulate_full_lifecycle(
     profit = 0.0
     outcome = None
     idx = -1
+    be_arm_ticks: Optional[int] = None
     for idx, t in enumerate(ticks[:max_ticks]):
         price = float(t["bid"]) if side == "buy" else float(t["ask"])
         profit = compute_profit(
@@ -839,6 +840,7 @@ def simulate_full_lifecycle(
             "profit": profit,
         }
 
+        was_armed = getattr(state, "be_armed", False)
         tick_dict = to_tick_dict(t)
         action = loss_manager.check_exit_on_tick(position, tick_dict, state)
         if action:
@@ -850,6 +852,9 @@ def simulate_full_lifecycle(
             if action:
                 outcome = action.reason
                 break
+
+        if be_arm_ticks is None and not was_armed and getattr(state, "be_armed", False):
+            be_arm_ticks = idx
 
     if outcome is None:
         outcome = "exhausted"
@@ -865,6 +870,9 @@ def simulate_full_lifecycle(
         # breakeven the trade actually got before reversing into the loss
         # cap, rather than just knowing that it did.
         "post_be_peak_profit": getattr(state, "best_profit", None),
+        # Tick index (0-based) at which breakeven first armed, None if it
+        # never did -- how long it actually took, for trades that got there.
+        "be_arm_ticks": be_arm_ticks,
     }
 
 
@@ -1468,7 +1476,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit",
+        "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1505,6 +1513,13 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
             f"  {outcome:28s}: {len(rows):4d} ({pct:5.1f}%)  "
             f"avg_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}  avg_ticks={avg_ticks:.1f}"
         )
+
+    arm_ticks = [r["be_arm_ticks"] for r in results if r.get("be_arm_ticks") is not None]
+    if arm_ticks:
+        avg_arm = sum(arm_ticks) / len(arm_ticks)
+        sorted_arm = sorted(arm_ticks)
+        median_arm = sorted_arm[len(sorted_arm) // 2]
+        print(f"\nOf {len(arm_ticks)} trades that reached breakeven, avg ticks to arm: {avg_arm:.1f}  median: {median_arm}")
 
     reached_be_rows = [r for r in results if r.get("post_be_peak_profit") is not None]
     if reached_be_rows:
