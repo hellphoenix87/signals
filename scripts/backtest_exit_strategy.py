@@ -276,6 +276,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Trade the OPPOSITE of whatever the strategy signals (buy signal -> sell trade, sell signal -> buy trade), otherwise identical -- tests whether the entry signal has real but backwards directional information, given the full-lifecycle finding that most trades confirm the signal direction (reach breakeven) and then reverse before profit is locked in. `direction` in the CSV/summary reflects the trade actually taken, not the raw signal.",
     )
+    parser.add_argument(
+        "--measure-entry-excursion",
+        action="store_true",
+        help="For every signal, continuously observe the real tick stream from the moment of entry -- with NO exit rule applied at all, not even the pre-BE soft-SL -- to see how the trade actually progresses over its whole natural path. Tracks the running peak profit ever reached, how many ticks it took, the largest pullback ever seen from whatever the running peak was at that moment, and the final (possibly still-open) profit at the tick budget cutoff. Unlike --quick-check (fixed-horizon M1 bar high/low snapshots), this is a continuous real-tick trace with no artificial horizon. Mutually exclusive with --full-lifecycle/--sweep-*.",
+    )
+    parser.add_argument("--entry-excursion-max-ticks", type=int, default=4000, help="How many real ticks past entry to observe for --measure-entry-excursion")
     return parser.parse_args()
 
 
@@ -504,6 +510,85 @@ def measure_post_be_excursion(
         "post_be_max_drawdown_from_peak": max_drawdown,
         "post_be_final_profit": final_profit,
         "post_be_ticks_observed": end_idx - arm_idx,
+    }
+
+
+def measure_entry_excursion(
+    *,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Open a simulated position and continuously observe the real tick
+    stream from the moment of entry -- with NO exit rule applied at all,
+    not even the pre-BE soft-SL -- to see how the trade actually
+    progresses over its whole natural path. Mirrors
+    `measure_post_be_excursion`'s running-peak/drawdown-from-peak
+    tracking, but starts at tick 0 (entry) instead of at breakeven
+    arming, and applies no exit logic whatsoever -- pure observation of
+    what real price does after this specific entry, unfiltered by any
+    strategy decision.
+
+    Unlike `--quick-check` (which snapshots M1 candle high/low extremes
+    over a fixed few-minute horizon, run as separate independent calls
+    per horizon), this replays the actual sequential tick stream once,
+    continuously, for up to `max_ticks` -- a real trace of one trade's
+    progression, not a series of disconnected fixed-horizon photographs.
+
+    Returns `{"entry_peak_profit", "entry_ticks_to_peak",
+    "entry_max_drawdown_from_peak", "entry_final_profit",
+    "entry_ticks_observed", "entry_price"}`.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {
+            "entry_peak_profit": None,
+            "entry_ticks_to_peak": 0,
+            "entry_max_drawdown_from_peak": None,
+            "entry_final_profit": None,
+            "entry_ticks_observed": 0,
+            "entry_price": None,
+        }
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    end_idx = min(len(ticks), max_ticks)
+
+    running_peak: Optional[float] = None
+    peak_profit: Optional[float] = None
+    ticks_to_peak = 0
+    max_drawdown = 0.0
+    final_profit: Optional[float] = None
+
+    for idx in range(end_idx):
+        t = ticks[idx]
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        final_profit = profit
+
+        if running_peak is None or profit > running_peak:
+            running_peak = profit
+            peak_profit = profit
+            ticks_to_peak = idx
+        else:
+            drawdown = running_peak - profit
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+    return {
+        "entry_peak_profit": peak_profit,
+        "entry_ticks_to_peak": ticks_to_peak,
+        "entry_max_drawdown_from_peak": max_drawdown,
+        "entry_final_profit": final_profit,
+        "entry_ticks_observed": end_idx,
+        "entry_price": entry_price,
     }
 
 
@@ -993,6 +1078,8 @@ def run(
     sweep_pre_be_threshold: bool = False,
     config: Any = Config,
     invert_signal: bool = False,
+    do_measure_entry_excursion: bool = False,
+    entry_excursion_max_ticks: int = 4000,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -1121,6 +1208,16 @@ def run(
                         max_ticks=full_lifecycle_max_ticks,
                         needs_conversion=needs_conversion,
                     )
+                elif do_measure_entry_excursion:
+                    sim = measure_entry_excursion(
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=entry_excursion_max_ticks,
+                        needs_conversion=needs_conversion,
+                    )
                 else:
                     sim = simulate_pre_be_phase(
                         exit_trade=exit_trade,
@@ -1163,6 +1260,9 @@ def run(
     elif full_lifecycle:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
+    elif do_measure_entry_excursion:
+        write_entry_excursion_csv(results, symbol)
+        summarize_entry_excursion(results, symbol)
     else:
         write_results_csv(results, symbol)
         summarize(results, symbol)
@@ -1380,6 +1480,73 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
         )
 
 
+def write_entry_excursion_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_entry_excursion_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "entry_price", "entry_peak_profit", "entry_ticks_to_peak",
+        "entry_max_drawdown_from_peak", "entry_final_profit", "entry_ticks_observed",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_entry_excursion(results: list[dict], symbol: str) -> None:
+    """Print aggregate stats for `--measure-entry-excursion`: does the
+    trade actually progress in its own favor after entry, with no exit
+    rule of any kind applied, over the real continuous tick stream --
+    the direct answer to "does price move in the signaled direction, and
+    does that hold up" that `--quick-check`'s fixed-horizon bar snapshots
+    can only approximate.
+    """
+    rows = [r for r in results if r.get("entry_peak_profit") is not None]
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+    if not rows:
+        print(f"No ticks available for any of {total} signals for {symbol} in this window.")
+        return
+
+    peaks = [r["entry_peak_profit"] for r in rows]
+    ticks_to_peak = [r["entry_ticks_to_peak"] for r in rows]
+    drawdowns = [r["entry_max_drawdown_from_peak"] for r in rows]
+    finals = [r["entry_final_profit"] for r in rows]
+
+    n = len(rows)
+    ever_favorable = sum(1 for p in peaks if p > 0)
+    still_favorable_at_end = sum(1 for f in finals if f > 0)
+    avg_peak = sum(peaks) / n
+    avg_ticks_to_peak = sum(ticks_to_peak) / n
+    avg_drawdown = sum(drawdowns) / n
+    avg_final = sum(finals) / n
+    # Of trades that did reach a positive peak, how much of that peak
+    # survived to the final observed tick, on average -- 100% would mean
+    # every trade held its own high-water mark; 0% would mean every trade
+    # gave the whole thing back.
+    favorable_rows = [(p, f) for p, f in zip(peaks, finals) if p > 0]
+    avg_retained_pct = (
+        sum(max(f, 0.0) / p for p, f in favorable_rows) / len(favorable_rows) * 100.0
+        if favorable_rows else 0.0
+    )
+
+    print(f"\n=== Entry excursion (no exit rule, real ticks from entry): {symbol} ===")
+    print(f"Total signals with tick data: {n} / {total}")
+    print(f"Ever reached a favorable peak (peak > 0): {ever_favorable} ({ever_favorable / n * 100.0:.1f}%)")
+    print(f"Still favorable at final observed tick: {still_favorable_at_end} ({still_favorable_at_end / n * 100.0:.1f}%)")
+    print(f"Avg peak profit: ${avg_peak:+.2f}   avg ticks to peak: {avg_ticks_to_peak:.1f}")
+    print(f"Avg max drawdown from running peak: ${avg_drawdown:.2f}")
+    print(f"Avg final (still-open, mark-to-market) profit: ${avg_final:+.2f}")
+    print(f"Of trades that ever went favorable, avg % of peak still held at final tick: {avg_retained_pct:.1f}%")
+
+
 def _cap_sweep_labels() -> list[str]:
     return [f"cap{str(c).replace('.', '_')}" for c in FULL_LIFECYCLE_CAP_CANDIDATES]
 
@@ -1489,6 +1656,8 @@ def main() -> None:
         args.sweep_pre_be_threshold,
         config=config,
         invert_signal=args.invert_signal,
+        do_measure_entry_excursion=args.measure_entry_excursion,
+        entry_excursion_max_ticks=args.entry_excursion_max_ticks,
     )
 
 
