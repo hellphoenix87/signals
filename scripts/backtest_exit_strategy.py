@@ -879,10 +879,21 @@ def simulate_full_lifecycle(
     cf_recovered_to_be: Optional[bool] = None
     cf_ticks_to_recover: Optional[int] = None
     cf_min_profit_after_exit: Optional[float] = None
+    # For trades that DO recover (above): once profit first crosses back to
+    # >= $0, does it then reverse again (dip back below $0 a second time),
+    # or keep climbing? Tracks the running peak reached after that first
+    # recovery point, and whether/when profit falls back below $0 again.
+    cf_post_recovery_peak: Optional[float] = None
+    cf_reversed_after_recovery: Optional[bool] = None
+    cf_ticks_to_reversal_after_recovery: Optional[int] = None
     if outcome == "profit_drop_after_be":
         cf_min = profit
         recovered = False
+        recovery_idx: Optional[int] = None
         ticks_to_recover = None
+        post_recovery_peak: Optional[float] = None
+        reversed_after_recovery = False
+        ticks_to_reversal_after_recovery = None
         for j in range(idx + 1, len(ticks)):
             t2 = ticks[j]
             price2 = float(t2["bid"]) if side == "buy" else float(t2["ask"])
@@ -895,9 +906,21 @@ def simulate_full_lifecycle(
             if not recovered and profit2 >= 0.0:
                 recovered = True
                 ticks_to_recover = j - idx
+                recovery_idx = j
+                post_recovery_peak = profit2
+            elif recovered:
+                if profit2 > post_recovery_peak:
+                    post_recovery_peak = profit2
+                if not reversed_after_recovery and profit2 < 0.0:
+                    reversed_after_recovery = True
+                    ticks_to_reversal_after_recovery = j - recovery_idx
         cf_recovered_to_be = recovered
         cf_ticks_to_recover = ticks_to_recover
         cf_min_profit_after_exit = cf_min
+        if recovered:
+            cf_post_recovery_peak = post_recovery_peak
+            cf_reversed_after_recovery = reversed_after_recovery
+            cf_ticks_to_reversal_after_recovery = ticks_to_reversal_after_recovery
 
     return {
         "outcome": outcome,
@@ -907,6 +930,9 @@ def simulate_full_lifecycle(
         "cf_recovered_to_be": cf_recovered_to_be,
         "cf_ticks_to_recover": cf_ticks_to_recover,
         "cf_min_profit_after_exit": cf_min_profit_after_exit,
+        "cf_post_recovery_peak": cf_post_recovery_peak,
+        "cf_reversed_after_recovery": cf_reversed_after_recovery,
+        "cf_ticks_to_reversal_after_recovery": cf_ticks_to_reversal_after_recovery,
         # Real running peak profit reached post-breakeven (None if BE never
         # armed, i.e. outcome in {"profit_drop", "failed_to_reach_be"}) --
         # lets `profit_drop_after_be` outcomes be split by how far above
@@ -1649,6 +1675,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
         "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
         "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
+        "cf_post_recovery_peak", "cf_reversed_after_recovery", "cf_ticks_to_reversal_after_recovery",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1700,6 +1727,19 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
             f"(avg {avg_recover_ticks:.1f} ticks to do so); {len(never_rows)} ({len(never_rows) / len(cf_rows) * 100.0:.1f}%) never did "
             f"within the observed window. Avg worst point reached after the cap point: ${avg_min_after:.2f} overall, ${avg_min_after_never:.2f} among those that never recovered."
         )
+
+        reversal_rows = [r for r in recovered_rows if r.get("cf_reversed_after_recovery") is not None]
+        if reversal_rows:
+            reversed_rows = [r for r in reversal_rows if r["cf_reversed_after_recovery"]]
+            held_rows = [r for r in reversal_rows if not r["cf_reversed_after_recovery"]]
+            avg_peak_reversed = sum(r["cf_post_recovery_peak"] for r in reversed_rows) / len(reversed_rows) if reversed_rows else 0.0
+            avg_peak_held = sum(r["cf_post_recovery_peak"] for r in held_rows) / len(held_rows) if held_rows else 0.0
+            print(
+                f"Of {len(reversal_rows)} trades that recovered to breakeven, {len(reversed_rows)} ({len(reversed_rows) / len(reversal_rows) * 100.0:.1f}%) "
+                f"reversed back below $0 again at some point (avg peak reached before that second reversal: ${avg_peak_reversed:.2f}); "
+                f"{len(held_rows)} ({len(held_rows) / len(reversal_rows) * 100.0:.1f}%) never went negative again after recovering "
+                f"(avg peak reached: ${avg_peak_held:.2f})."
+            )
 
     arm_ticks = [r["be_arm_ticks"] for r in results if r.get("be_arm_ticks") is not None]
     if arm_ticks:
