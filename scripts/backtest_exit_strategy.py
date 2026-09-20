@@ -282,6 +282,18 @@ def parse_args() -> argparse.Namespace:
         help="For every signal, continuously observe the real tick stream from the moment of entry -- with NO exit rule applied at all, not even the pre-BE soft-SL -- to see how the trade actually progresses over its whole natural path. Tracks the running peak profit ever reached, how many ticks it took, the largest pullback ever seen from whatever the running peak was at that moment, and the final (possibly still-open) profit at the tick budget cutoff. Unlike --quick-check (fixed-horizon M1 bar high/low snapshots), this is a continuous real-tick trace with no artificial horizon. Mutually exclusive with --full-lifecycle/--sweep-*.",
     )
     parser.add_argument("--entry-excursion-max-ticks", type=int, default=4000, help="How many real ticks past entry to observe for --measure-entry-excursion")
+    parser.add_argument(
+        "--trail-gap-pct",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_TRAIL_GAP_PCT for this run's real ExitTrade (default: whatever Config is set to, currently 0.6 -- i.e. tolerate giving back 60%% of peak before the post-BE trail fires). Only affects --full-lifecycle (and its --sweep-post-be-cap variant).",
+    )
+    parser.add_argument(
+        "--trail-gap-floor-money",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_TRAIL_GAP_FLOOR_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $2.0 -- this floor DOMINATES --trail-gap-pct for any peak below floor/pct, e.g. below $20 at pct=0.10, so pair a tight --trail-gap-pct with a correspondingly small floor override, e.g. 0.0, or the floor will silently override the intended percentage).",
+    )
     return parser.parse_args()
 
 
@@ -1080,6 +1092,8 @@ def run(
     invert_signal: bool = False,
     do_measure_entry_excursion: bool = False,
     entry_excursion_max_ticks: int = 4000,
+    trail_gap_pct: Optional[float] = None,
+    trail_gap_floor_money: Optional[float] = None,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -1134,7 +1148,14 @@ def run(
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
 
     strategy = strategy_factory(config=config, use_multi=True, symbol=symbol)
-    exit_config = ExitTradeConfig(be_arming_ticks=0) if disable_timeout else None
+    exit_overrides: dict[str, Any] = {}
+    if disable_timeout:
+        exit_overrides["be_arming_ticks"] = 0
+    if trail_gap_pct is not None:
+        exit_overrides["trail_gap_pct"] = trail_gap_pct
+    if trail_gap_floor_money is not None:
+        exit_overrides["trail_gap_floor_money"] = trail_gap_floor_money
+    exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
     cap_sweep_trades: list[tuple[str, Any]] = []
@@ -1658,6 +1679,8 @@ def main() -> None:
         invert_signal=args.invert_signal,
         do_measure_entry_excursion=args.measure_entry_excursion,
         entry_excursion_max_ticks=args.entry_excursion_max_ticks,
+        trail_gap_pct=args.trail_gap_pct,
+        trail_gap_floor_money=args.trail_gap_floor_money,
     )
 
 
