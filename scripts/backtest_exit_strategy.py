@@ -295,6 +295,11 @@ def parse_args() -> argparse.Namespace:
         help="Override Config.EXIT_TRAIL_GAP_FLOOR_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $2.0 -- this floor DOMINATES --trail-gap-pct for any peak below floor/pct, e.g. below $20 at pct=0.10, so pair a tight --trail-gap-pct with a correspondingly small floor override, e.g. 0.0, or the floor will silently override the intended percentage).",
     )
     parser.add_argument(
+        "--unified-post-be-stop",
+        action="store_true",
+        help="Replace the real post-BE two-manager sequence (loss-manager cap, then -- only while profit stays positive -- the profit-manager trail) with a single combined stop (trigger = peak - max(--trail-gap-floor-money, --trail-gap-pct * peak)) checked every tick regardless of sign. Tests whether the real trail's '0 < profit' gate is what lets fast reversals skip past it into the separate, much looser loss cap. Pre-BE phase (arming/soft-SL/timeout) is the real, unchanged LossExitManager. Mutually exclusive with --full-lifecycle's own post-BE logic (this replaces it) and with --sweep-post-be-cap/--sweep-pre-be-threshold.",
+    )
+    parser.add_argument(
         "--post-be-loss-cap",
         type=float,
         default=None,
@@ -914,6 +919,106 @@ def simulate_full_lifecycle(
     }
 
 
+def simulate_full_lifecycle_unified_stop(
+    *,
+    exit_trade,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+    trail_gap_pct: float,
+    trail_gap_floor_money: float,
+) -> dict:
+    """Same pre-BE phase as `simulate_full_lifecycle` (the real
+    `LossExitManager.check_exit_on_tick` handles arming/soft-SL/timeout
+    unchanged), but replaces the POST-BE phase's real two-manager
+    sequence (`LossExitManager`'s -$1 cap, then -- only while profit is
+    still positive -- `ProfitExitManager`'s trail) with a single
+    combined stop: `trigger = peak - max(trail_gap_floor_money,
+    trail_gap_pct * peak)`, checked every tick regardless of sign.
+
+    This tests a specific hypothesis: the real trail can only fire while
+    `0 < profit < peak` (see `ProfitExitManager.check_exit_on_tick`) --
+    if a fast tick-to-tick move jumps straight from just-above-trigger to
+    already non-positive in one step (easy when the trigger window is a
+    few cents wide for a small peak), the real trail's check never runs
+    that tick, and only the separate loss-manager cap (waiting much
+    lower, at -post_be_loss_cap_money) can catch it. A unified check with
+    no positivity requirement would instead catch that same tick at
+    wherever it actually landed -- likely still a loss, but a much
+    smaller one than falling all the way to the cap.
+
+    Returns the same shape as `simulate_full_lifecycle`, with `outcome`
+    in {"failed_to_reach_be", "profit_drop"} (real pre-BE outcomes,
+    unchanged), "unified_stop" (the new combined post-BE exit), or
+    "exhausted".
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    state = PosState(anchor=0.0, prev_price=0.0)
+    loss_manager = exit_trade._loss_manager
+
+    profit = 0.0
+    outcome = None
+    idx = -1
+    be_arm_ticks: Optional[int] = None
+    peak: Optional[float] = None
+    for idx, t in enumerate(ticks[:max_ticks]):
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+
+        if not getattr(state, "be_armed", False):
+            position = {
+                "symbol": symbol,
+                "type": pos_type,
+                "ticket": idx,
+                "price_open": entry_price,
+                "volume": lot,
+                "profit": profit,
+            }
+            action = loss_manager.check_exit_on_tick(position, to_tick_dict(t), state)
+            if action:
+                outcome = action.reason
+                break
+            if getattr(state, "be_armed", False):
+                be_arm_ticks = idx
+                peak = profit
+            continue
+
+        if peak is None or profit > peak:
+            peak = profit
+        gap = max(trail_gap_floor_money, trail_gap_pct * peak)
+        trigger = peak - gap
+        if profit <= trigger:
+            outcome = "unified_stop"
+            break
+
+    if outcome is None:
+        outcome = "exhausted"
+
+    return {
+        "outcome": outcome,
+        "profit": profit,
+        "ticks_used": idx + 1,
+        "entry_price": entry_price,
+        "post_be_peak_profit": peak,
+        "be_arm_ticks": be_arm_ticks,
+    }
+
+
+
 def simulate_full_lifecycle_cap_sweep(
     *,
     exit_trades: list[tuple[str, Any]],
@@ -1147,6 +1252,7 @@ def run(
     trail_gap_pct: Optional[float] = None,
     trail_gap_floor_money: Optional[float] = None,
     post_be_loss_cap: Optional[float] = None,
+    unified_post_be_stop: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -1211,6 +1317,14 @@ def run(
     if post_be_loss_cap is not None:
         exit_overrides["post_be_loss_cap_money"] = post_be_loss_cap
     exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
+    resolved_trail_gap_pct = (
+        trail_gap_pct if trail_gap_pct is not None
+        else float(getattr(Config, "EXIT_TRAIL_GAP_PCT", 0.6) or 0.6)
+    )
+    resolved_trail_gap_floor_money = (
+        trail_gap_floor_money if trail_gap_floor_money is not None
+        else float(getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0)
+    )
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
     cap_sweep_trades: list[tuple[str, Any]] = []
@@ -1273,6 +1387,19 @@ def run(
                         max_ticks=max_ticks,
                         needs_conversion=needs_conversion,
                     )
+                elif unified_post_be_stop:
+                    sim = simulate_full_lifecycle_unified_stop(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                        trail_gap_pct=resolved_trail_gap_pct,
+                        trail_gap_floor_money=resolved_trail_gap_floor_money,
+                    )
                 elif full_lifecycle:
                     sim = simulate_full_lifecycle(
                         exit_trade=exit_trade,
@@ -1333,6 +1460,9 @@ def run(
     elif sweep_pre_be_threshold:
         write_pre_be_threshold_sweep_csv(results, symbol)
         summarize_pre_be_threshold_sweep(results, symbol)
+    elif unified_post_be_stop:
+        write_full_lifecycle_csv(results, symbol)
+        summarize_full_lifecycle(results, symbol)
     elif full_lifecycle:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
@@ -1783,6 +1913,7 @@ def main() -> None:
         trail_gap_pct=args.trail_gap_pct,
         trail_gap_floor_money=args.trail_gap_floor_money,
         post_be_loss_cap=args.post_be_loss_cap,
+        unified_post_be_stop=args.unified_post_be_stop,
     )
 
 
