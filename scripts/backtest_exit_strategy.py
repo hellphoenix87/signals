@@ -265,6 +265,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-lifecycle-max-ticks", type=int, default=4000, help="Max real ticks fetched per trade for --full-lifecycle -- needs to cover pre-BE arming plus the full post-BE trail/cap lifecycle, not just the pre-BE window.")
     parser.add_argument("--sweep-post-be-cap", action="store_true", help="Only with --full-lifecycle: instead of using Config's single post-BE loss-cap value, replay FULL_LIFECYCLE_CAP_CANDIDATES against the same tick stream in one pass, each paired with the SAME real trailing-stop formula -- so cap retuning is tested against the real combined system, not in isolation.")
     parser.add_argument("--sweep-pre-be-threshold", action="store_true", help="Instead of using Config's single pre-breakeven soft-SL threshold, replay PRE_BE_THRESHOLD_CANDIDATES (each a real LossExitManager with a different max_loss_money, everything else at Config's real values) against the same tick stream in one pass -- Thread 2's test of whether a threshold conditional on M5-confirm state beats the flat $5 rule. Pre-BE phase only (mutually exclusive with --full-lifecycle); metadata capture (confidence/adx/m15_bias/m5_confirm/m1_entry) still included so results can be split by M5-confirm afterward.")
+    parser.add_argument(
+        "--mtf-entry-indicator",
+        choices=["macd", "sma", "rsi"],
+        default=None,
+        help="Override Config.MTF_ENTRY_INDICATOR for this run only (default: whatever Config is actually set to) -- lets the real full-lifecycle P&L be compared entry-indicator-by-entry-indicator under the identical exit-strategy config, isolating that one variable.",
+    )
     return parser.parse_args()
 
 
@@ -980,6 +986,7 @@ def run(
     full_lifecycle_max_ticks: int = 4000,
     sweep_post_be_cap: bool = False,
     sweep_pre_be_threshold: bool = False,
+    config: Any = Config,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -1030,7 +1037,7 @@ def run(
     m5_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_confirm]) for c in m5_candles]
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
 
-    strategy = strategy_factory(config=Config, use_multi=True)
+    strategy = strategy_factory(config=config, use_multi=True, symbol=symbol)
     exit_config = ExitTradeConfig(be_arming_ticks=0) if disable_timeout else None
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
@@ -1450,6 +1457,9 @@ def summarize_pre_be_threshold_sweep(results: list[dict], symbol: str) -> None:
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
+    config = Config
+    if args.mtf_entry_indicator is not None:
+        config = type("ConfigOverride", (Config,), {"MTF_ENTRY_INDICATOR": args.mtf_entry_indicator})
     run(
         symbol,
         args.weeks,
@@ -1466,6 +1476,7 @@ def main() -> None:
         args.full_lifecycle_max_ticks,
         args.sweep_post_be_cap,
         args.sweep_pre_be_threshold,
+        config=config,
     )
 
 
