@@ -78,17 +78,20 @@ class Config:
     MTF_CONFIRM_WEIGHT: float = 0.3
     MTF_ENTRY_WEIGHT: float = 0.2
     MTF_SCORE_THRESHOLD: float = 0.6
-    # M1 entry-trigger indicator for the MTF path. Was hardcoded to "macd"
-    # (the leftover pick after SMA/RSI were claimed by the bias/confirm
-    # layers, not because it tested best there). After fixing a bullish-only
-    # asymmetry in MultiTimeframeStrongSignalStrategy._pullback_completed
-    # (it never checked the sell-direction mirror), MACD's win rate under
-    # the corrected gate swung 33.6%/43.7% across two independent 4-week
-    # windows -- not reproducible either way. SMA reproduced cleanly
-    # (39.5%/39.6%, both above the 38.5% breakeven at target=8/stop=5) and
-    # is the only entry indicator that cleared this investigation's
-    # two-window bar -- see docs/test-results/mtf-pullback-gate-direction-fix.md.
-    MTF_ENTRY_INDICATOR: str = "sma"
+    # M1 entry-trigger indicator for the MTF path -- config-driven since the
+    # docs/test-results/mtf-pullback-gate-direction-fix.md investigation
+    # (was previously hardcoded to "macd" in strategy_factory). That
+    # investigation's signal-quality-proxy testing initially favored "sma"
+    # over "macd", but later full-lifecycle P&L testing in the same
+    # investigation (docs/test-results/full-lifecycle-entry-indicator-comparison.md
+    # onward) found the proxy didn't predict real P&L, and an extensive
+    # exit-strategy loss-cap sweep (docs/test-results/cap-5-second-window-test.md)
+    # never found a configuration where "sma" held up across two independent
+    # windows -- its one promising result reversed from +$49.60 to -$299.00
+    # between windows. Reverted to "macd" (the pre-investigation default)
+    # pending the follow-up plan (docs/plans/todo/test-additional-entry-indicators.md)
+    # rather than ship a switch the same investigation ended up not trusting.
+    MTF_ENTRY_INDICATOR: str = "macd"
 
     USE_N_TICK_CONFIRMATION = True
     N_TICK_CONFIRMATION = 1
