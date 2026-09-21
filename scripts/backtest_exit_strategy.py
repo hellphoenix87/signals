@@ -131,7 +131,12 @@ import MetaTrader5 as mt5
 
 from app.config.settings import Config
 from app.data.market_data import MarketData
-from app.signals.signal_generation import strategy_factory
+from app.signals.signal_generation import strategy_factory, build_indicator
+from app.signals.indicators.rsi import _compute_latest_rsi
+from app.signals.indicators.macd import _macd_histogram
+from app.signals.indicators.atr import calculate_atr
+
+_metadata_logger = logging.getLogger("backtest_exit_strategy.metadata")
 from app.trade_execution.broker import Broker
 from app.trade_execution.mode import TradingMode
 from app.risk.risk_manager import create_risk_manager
@@ -192,7 +197,15 @@ CAP_THRESHOLDS: list[float] = [-3.0, -5.0, -7.0, -10.0, -15.0]
 # 7.0 as the "cut" value under test, 15.0 as a looser reference to label
 # whether a 7.0-cut trade genuinely recovers (same technique used to
 # validate 1.0 against 3.0 originally).
-FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 7.0, 15.0]
+FULL_LIFECYCLE_CAP_CANDIDATES: list[float] = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 7.0, 15.0, 20.0, 30.0, 50.0]
+
+# Candidate tier widths for --sweep-staircase-tiers: $1.0 (the first
+# staircase-trail run's arbitrary starting choice) bracketed on both
+# sides to see whether a different width is more robust across windows.
+# Extended past $2.0 (0.5/1.0/1.5/2.0 sweep result) since both windows
+# were still improving monotonically at the top of that range, with no
+# peak/reversal found yet.
+STAIRCASE_TIER_CANDIDATES: list[float] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
 
 # Thread 2 (docs/exit-strategy-open-threads.md): candidate values for the
 # PRE-breakeven soft-SL money threshold (`Config.EXIT_MAX_LOSS_MONEY`,
@@ -272,6 +285,16 @@ def parse_args() -> argparse.Namespace:
         help="Override Config.MTF_ENTRY_INDICATOR for this run only (default: whatever Config is actually set to) -- lets the real full-lifecycle P&L be compared entry-indicator-by-entry-indicator under the identical exit-strategy config, isolating that one variable.",
     )
     parser.add_argument(
+        "--single-timeframe",
+        action="store_true",
+        help="Replay the single-timeframe strategy (M1-only, no M15 bias/M5 confirm gating) through the real exit system instead of the live MTF path -- lets the full-lifecycle P&L be compared MTF-vs-single-timeframe under the identical exit-strategy config. Default vote is macd+sma+rsi (Config.ENTRY_*_WEIGHT); use --indicators to override with a single named indicator. Mutually exclusive with --mtf-entry-indicator (that flag only affects the MTF entry layer).",
+    )
+    parser.add_argument(
+        "--indicators",
+        default=None,
+        help="Only with --single-timeframe: comma-separated indicator ablation (e.g. 'macd', 'sma'); overrides the default macd+sma+rsi vote, mirroring backtest_signals.py's own --indicators flag.",
+    )
+    parser.add_argument(
         "--invert-signal",
         action="store_true",
         help="Trade the OPPOSITE of whatever the strategy signals (buy signal -> sell trade, sell signal -> buy trade), otherwise identical -- tests whether the entry signal has real but backwards directional information, given the full-lifecycle finding that most trades confirm the signal direction (reach breakeven) and then reverse before profit is locked in. `direction` in the CSV/summary reflects the trade actually taken, not the raw signal.",
@@ -300,10 +323,70 @@ def parse_args() -> argparse.Namespace:
         help="Replace the real post-BE two-manager sequence (loss-manager cap, then -- only while profit stays positive -- the profit-manager trail) with a single combined stop (trigger = peak - max(--trail-gap-floor-money, --trail-gap-pct * peak)) checked every tick regardless of sign. Tests whether the real trail's '0 < profit' gate is what lets fast reversals skip past it into the separate, much looser loss cap. Pre-BE phase (arming/soft-SL/timeout) is the real, unchanged LossExitManager. Mutually exclusive with --full-lifecycle's own post-BE logic (this replaces it) and with --sweep-post-be-cap/--sweep-pre-be-threshold.",
     )
     parser.add_argument(
+        "--staircase-trail",
+        action="store_true",
+        help="Only with --full-lifecycle: replace ProfitExitManager's percentage-of-peak trail with a staircase/ratchet trail -- as the running peak crosses each --staircase-tier-width increment, that tier level becomes the new stop; if profit falls back to or through the highest tier fully crossed, exit. Giveback is capped at just under one tier width regardless of how large the peak gets, unlike the real trail's ~60%%-of-peak (unbounded) giveback. Pre-BE phase and the post-BE loss cap are the real, unchanged LossExitManager. Mutually exclusive with --unified-post-be-stop/--chain-on-cap/--hedge-on-cap.",
+    )
+    parser.add_argument(
+        "--staircase-tier-width",
+        type=float,
+        default=1.0,
+        help="Dollar width of each staircase trail tier (default: $1.0).",
+    )
+    parser.add_argument(
+        "--staircase-first-tier",
+        type=float,
+        default=None,
+        help="Only with --staircase-trail: activation threshold for the FIRST tier, if different from --staircase-tier-width -- e.g. --staircase-first-tier 0.5 --staircase-tier-width 2.0 gives tiers at $0.5, $2.5, $4.5, ... instead of evenly-spaced $2.0, $4.0, $6.0, ... Default: same as --staircase-tier-width (original evenly-spaced behavior).",
+    )
+    parser.add_argument(
+        "--sweep-staircase-cap",
+        action="store_true",
+        help="Only with --full-lifecycle --staircase-trail: instead of a single Config.EXIT_POST_BE_LOSS_CAP_MONEY value, replay FULL_LIFECYCLE_CAP_CANDIDATES against the same tick stream in one pass, each paired with the SAME staircase trail (--staircase-tier-width / --staircase-first-tier) -- so cap retuning is tested against the new trail shape, not the old percentage-of-peak one.",
+    )
+    parser.add_argument(
+        "--sweep-staircase-tiers",
+        action="store_true",
+        help="Only with --full-lifecycle: instead of a single --staircase-tier-width, replay STAIRCASE_TIER_CANDIDATES against the same tick stream in one pass, each with the SAME real LossExitManager (pre-BE phase and post-BE cap unchanged) -- so tier-width retuning is tested against the real combined system, not in isolation.",
+    )
+    parser.add_argument(
         "--post-be-loss-cap",
         type=float,
         default=None,
         help="Override Config.EXIT_POST_BE_LOSS_CAP_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $1.0). Pair with a tight --trail-gap-pct to test 'floor the post-BE worst case at breakeven instead of a real loss' -- e.g. --post-be-loss-cap 0.0 --trail-gap-pct 0.10 --trail-gap-floor-money 0.0.",
+    )
+    parser.add_argument(
+        "--chain-on-cap",
+        action="store_true",
+        help="Only with --full-lifecycle: dual-mode exit. Mode 1 (unchanged) runs until a leg's real outcome is profit_drop_after_be (hit the post-BE loss cap) -- Mode 2 then immediately opens a NEW leg in the same direction at that tick's price, with a fresh PosState (BE arming/trail/cap all reset), and keeps chaining for as long as consecutive legs keep hitting the cap. All exit rules (BE arming, pre-BE soft-SL, trail, cap) are identical for every leg -- only the re-entry-on-cap behavior is new. A leg ending any other way (trail capture, pre-BE timeout/soft-SL, tick budget exhausted) stops the chain. Reports one summed realized P&L per original signal across however many legs fired. Shares the same --full-lifecycle-max-ticks budget across the whole chain, not per leg.",
+    )
+    parser.add_argument(
+        "--chain-max-legs",
+        type=int,
+        default=20,
+        help="Safety cap on how many consecutive cap-hit legs --chain-on-cap will open for one original signal, in case whipsaw data would otherwise chain indefinitely within the tick budget.",
+    )
+    parser.add_argument(
+        "--chain-flip-direction",
+        action="store_true",
+        help="Only with --chain-on-cap: treat a -$1 cap hit as signal invalidation and REVERSE direction on every re-entry (buy hits cap -> open sell; if that sell also hits cap -> open buy; alternating) instead of re-entering the same direction. The hypothesis: losses outweigh wins in dollar size, so accept the small -$1 loss and pivot toward the move that's actually happening rather than betting the original direction was just early.",
+    )
+    parser.add_argument(
+        "--chain-loss-cap",
+        type=float,
+        default=None,
+        help="Only with --chain-on-cap: use a DIFFERENT post-BE loss cap for every re-entered leg (leg 2 onward) than leg 1's real live value -- e.g. --chain-loss-cap 3.0 gives the flip more room to reach the trail before being capped again, instead of getting re-capped at the same tight -$1. Leg 1 is always the real, unchanged live cap. Default: reuse the same cap for every leg.",
+    )
+    parser.add_argument(
+        "--hedge-on-cap",
+        action="store_true",
+        help="Only with --full-lifecycle (mutually exclusive with --chain-on-cap): instead of closing the original position when it hits -$1, open a SECOND position in the opposite direction at that price and hold BOTH. The original keeps running with its loss cap disabled (deliberately held, not stopped out again) but its trail still live; the new reverse leg runs under full normal rules (BE arm, pre-BE, trail, cap). An equal-size opposite pair's combined P&L is frozen tick to tick until one side closes -- this tracks both independently to their own real close and reports the summed total.",
+    )
+    parser.add_argument(
+        "--original-loss-cap",
+        type=float,
+        default=None,
+        help="Only with --hedge-on-cap: re-enable a REAL (wider) loss cap on the held-open original from the fork point onward, instead of leaving it fully uncapped -- e.g. --original-loss-cap 5.0 stops the original at -$5 rather than letting a persistent one-way move bleed it until the tick budget runs out. Default: original stays fully uncapped past the fork (only its trail can close it).",
     )
     return parser.parse_args()
 
@@ -879,6 +962,11 @@ def simulate_full_lifecycle(
     cf_recovered_to_be: Optional[bool] = None
     cf_ticks_to_recover: Optional[int] = None
     cf_min_profit_after_exit: Optional[float] = None
+    # Same idea as cf_recovered_to_be, but a lower bar: did price ever
+    # climb back to -$1 or better (not all the way to breakeven)? A
+    # trade can clear this without clearing cf_recovered_to_be.
+    cf_recovered_to_neg1: Optional[bool] = None
+    cf_ticks_to_recover_neg1: Optional[int] = None
     # For trades that DO recover (above): once profit first crosses back to
     # >= $0, does it then reverse again (dip back below $0 a second time),
     # or keep climbing? Tracks the running peak reached after that first
@@ -894,6 +982,8 @@ def simulate_full_lifecycle(
         post_recovery_peak: Optional[float] = None
         reversed_after_recovery = False
         ticks_to_reversal_after_recovery = None
+        recovered_neg1 = False
+        ticks_to_recover_neg1 = None
         for j in range(idx + 1, len(ticks)):
             t2 = ticks[j]
             price2 = float(t2["bid"]) if side == "buy" else float(t2["ask"])
@@ -903,6 +993,9 @@ def simulate_full_lifecycle(
             )
             if profit2 < cf_min:
                 cf_min = profit2
+            if not recovered_neg1 and profit2 >= -1.0:
+                recovered_neg1 = True
+                ticks_to_recover_neg1 = j - idx
             if not recovered and profit2 >= 0.0:
                 recovered = True
                 ticks_to_recover = j - idx
@@ -917,6 +1010,8 @@ def simulate_full_lifecycle(
         cf_recovered_to_be = recovered
         cf_ticks_to_recover = ticks_to_recover
         cf_min_profit_after_exit = cf_min
+        cf_recovered_to_neg1 = recovered_neg1
+        cf_ticks_to_recover_neg1 = ticks_to_recover_neg1
         if recovered:
             cf_post_recovery_peak = post_recovery_peak
             cf_reversed_after_recovery = reversed_after_recovery
@@ -930,6 +1025,8 @@ def simulate_full_lifecycle(
         "cf_recovered_to_be": cf_recovered_to_be,
         "cf_ticks_to_recover": cf_ticks_to_recover,
         "cf_min_profit_after_exit": cf_min_profit_after_exit,
+        "cf_recovered_to_neg1": cf_recovered_to_neg1,
+        "cf_ticks_to_recover_neg1": cf_ticks_to_recover_neg1,
         "cf_post_recovery_peak": cf_post_recovery_peak,
         "cf_reversed_after_recovery": cf_reversed_after_recovery,
         "cf_ticks_to_reversal_after_recovery": cf_ticks_to_reversal_after_recovery,
@@ -942,6 +1039,651 @@ def simulate_full_lifecycle(
         # Tick index (0-based) at which breakeven first armed, None if it
         # never did -- how long it actually took, for trades that got there.
         "be_arm_ticks": be_arm_ticks,
+    }
+
+
+def simulate_full_lifecycle_staircase_trail(
+    *,
+    exit_trade,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+    tier_width: float,
+    first_tier: Optional[float] = None,
+) -> dict:
+    """Same pre-BE phase as `simulate_full_lifecycle` (the real
+    `LossExitManager.check_exit_on_tick` handles arming/soft-SL/timeout
+    unchanged, and still owns the post-BE loss cap for negative
+    excursions), but replaces `ProfitExitManager`'s percentage-of-peak
+    trail with a staircase/ratchet trail: as the running peak crosses
+    each `tier_width` increment past `first_tier`, that tier level
+    becomes the new stop. If profit falls back to or through the highest
+    tier fully crossed, exit (`reason="staircase_trail_breach"`). Same
+    `0 < profit < peak` gating as the real trail (only fires while still
+    positive -- a reversal straight through zero is caught by the real
+    loss-manager cap instead, unchanged).
+
+    `first_tier` (default: `tier_width`, i.e. the original evenly-spaced
+    behavior) sets a DIFFERENT activation threshold than the step size --
+    e.g. `first_tier=0.5, tier_width=2.0` gives tiers at $0.5, $2.5,
+    $4.5, ... instead of $2.0, $4.0, $6.0, ... -- lets the trail engage
+    (and start protecting) much earlier than its steady-state step size,
+    directly targeting the `first_tier < peak <= tier_width` population
+    that's otherwise 100% left to the separate loss cap.
+
+    Unlike the real trail's giveback (which grows with the peak, ~60% of
+    whatever peak is reached), the staircase's giveback is capped at
+    just under one `tier_width`, however large the peak gets -- directly
+    targeting the finding that the real trail leaves ~70% of every real
+    peak uncaptured on large moves.
+
+    Returns the same shape as `simulate_full_lifecycle`.
+    """
+    first_tier = tier_width if first_tier is None else first_tier
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    state = PosState(anchor=0.0, prev_price=0.0)
+    loss_manager = exit_trade._loss_manager
+    profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
+
+    profit = 0.0
+    outcome = None
+    idx = -1
+    be_arm_ticks: Optional[int] = None
+    best_profit: Optional[float] = None
+    for idx, t in enumerate(ticks[:max_ticks]):
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+
+        position = {
+            "symbol": symbol,
+            "type": pos_type,
+            "ticket": idx,
+            "price_open": entry_price,
+            "volume": lot,
+            "profit": profit,
+        }
+
+        was_armed = getattr(state, "be_armed", False)
+        tick_dict = to_tick_dict(t)
+        action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+        if action:
+            outcome = action.reason
+            break
+
+        if not was_armed and getattr(state, "be_armed", False):
+            be_arm_ticks = idx
+            best_profit = profit
+
+        if profit_exits_on_tick and getattr(state, "be_armed", False):
+            if best_profit is None or profit > best_profit:
+                best_profit = profit
+            if tier_width > 0.0 and 0.0 < profit < best_profit and best_profit >= first_tier:
+                current_tier = first_tier + (int((best_profit - first_tier) / tier_width)) * tier_width
+                if current_tier > 0.0 and profit <= current_tier:
+                    outcome = "staircase_trail_breach"
+                    break
+
+    if outcome is None:
+        outcome = "exhausted"
+
+    return {
+        "outcome": outcome,
+        "profit": profit,
+        "ticks_used": idx + 1,
+        "entry_price": entry_price,
+        "post_be_peak_profit": best_profit,
+        "be_arm_ticks": be_arm_ticks,
+    }
+
+
+def simulate_full_lifecycle_staircase_sweep(
+    *,
+    exit_trade,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+    tier_widths: list,
+) -> dict:
+    """Like `simulate_full_lifecycle_staircase_trail`, but replays every
+    candidate `tier_width` against the same real tick stream in a single
+    pass -- each candidate has its own independent `PosState`, but the
+    SAME real `LossExitManager` (pre-BE phase and the post-BE loss cap
+    are unchanged and identical across candidates; only the trail's tier
+    width varies). A candidate stops updating once it resolves; others
+    continue independently over the same price path.
+
+    Returns `{"<label>_outcome", "<label>_profit", "<label>_ticks"}` for
+    every width in `tier_widths`, label = `tier{width with '.' -> '_'}`.
+    """
+    labels = [f"tier{str(w).replace('.', '_')}" for w in tier_widths]
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        result = {}
+        for label in labels:
+            result[f"{label}_outcome"] = "no_ticks"
+            result[f"{label}_profit"] = None
+            result[f"{label}_ticks"] = 0
+        return result
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+    loss_manager = exit_trade._loss_manager
+    profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
+
+    states = {label: PosState(anchor=0.0, prev_price=0.0) for label in labels}
+    best_profit: dict[str, Optional[float]] = {label: None for label in labels}
+    resolved = {label: False for label in labels}
+    outcome: dict[str, Optional[str]] = {label: None for label in labels}
+    result_profit: dict[str, Optional[float]] = {label: None for label in labels}
+    result_ticks: dict[str, Optional[int]] = {label: None for label in labels}
+
+    profit = 0.0
+    for idx, t in enumerate(ticks[:max_ticks]):
+        if all(resolved.values()):
+            break
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        position = {
+            "symbol": symbol, "type": pos_type, "ticket": idx,
+            "price_open": entry_price, "volume": lot, "profit": profit,
+        }
+        tick_dict = to_tick_dict(t)
+
+        for label, tier_width in zip(labels, tier_widths):
+            if resolved[label]:
+                continue
+            state = states[label]
+            was_armed = getattr(state, "be_armed", False)
+            action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                resolved[label] = True
+                outcome[label] = action.reason
+                result_profit[label] = profit
+                result_ticks[label] = idx + 1
+                continue
+            if not was_armed and getattr(state, "be_armed", False):
+                best_profit[label] = profit
+            if profit_exits_on_tick and getattr(state, "be_armed", False):
+                if best_profit[label] is None or profit > best_profit[label]:
+                    best_profit[label] = profit
+                if tier_width > 0.0 and 0.0 < profit < best_profit[label]:
+                    current_tier = (int(best_profit[label] / tier_width)) * tier_width
+                    if current_tier > 0.0 and profit <= current_tier:
+                        resolved[label] = True
+                        outcome[label] = "staircase_trail_breach"
+                        result_profit[label] = profit
+                        result_ticks[label] = idx + 1
+
+    for label in labels:
+        if not resolved[label]:
+            outcome[label] = "exhausted"
+            result_profit[label] = profit
+            result_ticks[label] = min(len(ticks), max_ticks)
+
+    result = {}
+    for label in labels:
+        result[f"{label}_outcome"] = outcome[label]
+        result[f"{label}_profit"] = result_profit[label]
+        result[f"{label}_ticks"] = result_ticks[label]
+    return result
+
+
+def simulate_full_lifecycle_staircase_cap_sweep(
+    *,
+    exit_trades: list,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+    tier_width: float,
+    first_tier: Optional[float] = None,
+) -> dict:
+    """Like `simulate_full_lifecycle_cap_sweep`, but every candidate uses
+    the SAME staircase trail (`tier_width`/`first_tier`, fixed across all
+    candidates) instead of each candidate's own real `ProfitExitManager`
+    -- only the post-BE loss cap value (each candidate's own
+    `LossExitManager`) varies. Tests cap retuning against the NEW trail
+    shape rather than the original percentage-of-peak one.
+
+    Returns `{"<label>_outcome", "<label>_profit", "<label>_ticks"}` for
+    every `(label, exit_trade)` pair in `exit_trades`.
+    """
+    first_tier = tier_width if first_tier is None else first_tier
+    labels = [label for label, _ in exit_trades]
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        result = {}
+        for label in labels:
+            result[f"{label}_outcome"] = "no_ticks"
+            result[f"{label}_profit"] = None
+            result[f"{label}_ticks"] = 0
+        return result
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    states = {label: PosState(anchor=0.0, prev_price=0.0) for label in labels}
+    best_profit: dict[str, Optional[float]] = {label: None for label in labels}
+    resolved = {label: False for label in labels}
+    outcome: dict[str, Optional[str]] = {label: None for label in labels}
+    result_profit: dict[str, Optional[float]] = {label: None for label in labels}
+    result_ticks: dict[str, Optional[int]] = {label: None for label in labels}
+    managers = {
+        label: (et._loss_manager, bool(getattr(et._config, "profit_exits_on_tick", True)))
+        for label, et in exit_trades
+    }
+
+    profit = 0.0
+    for idx, t in enumerate(ticks[:max_ticks]):
+        if all(resolved.values()):
+            break
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        position = {
+            "symbol": symbol, "type": pos_type, "ticket": idx,
+            "price_open": entry_price, "volume": lot, "profit": profit,
+        }
+        tick_dict = to_tick_dict(t)
+
+        for label in labels:
+            if resolved[label]:
+                continue
+            loss_manager, profit_exits_on_tick = managers[label]
+            state = states[label]
+            was_armed = getattr(state, "be_armed", False)
+            action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                resolved[label] = True
+                outcome[label] = action.reason
+                result_profit[label] = profit
+                result_ticks[label] = idx + 1
+                continue
+            if not was_armed and getattr(state, "be_armed", False):
+                best_profit[label] = profit
+            if profit_exits_on_tick and getattr(state, "be_armed", False):
+                if best_profit[label] is None or profit > best_profit[label]:
+                    best_profit[label] = profit
+                if tier_width > 0.0 and 0.0 < profit < best_profit[label] and best_profit[label] >= first_tier:
+                    current_tier = first_tier + (int((best_profit[label] - first_tier) / tier_width)) * tier_width
+                    if current_tier > 0.0 and profit <= current_tier:
+                        resolved[label] = True
+                        outcome[label] = "staircase_trail_breach"
+                        result_profit[label] = profit
+                        result_ticks[label] = idx + 1
+
+    for label in labels:
+        if not resolved[label]:
+            outcome[label] = "exhausted"
+            result_profit[label] = profit
+            result_ticks[label] = min(len(ticks), max_ticks)
+
+    result = {}
+    for label in labels:
+        result[f"{label}_outcome"] = outcome[label]
+        result[f"{label}_profit"] = result_profit[label]
+        result[f"{label}_ticks"] = result_ticks[label]
+    return result
+
+
+def simulate_chained_legs(
+    *,
+    exit_trade,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+    max_legs: int = 20,
+    flip_direction: bool = False,
+    chained_exit_trade=None,
+) -> dict:
+    """Dual-mode exit: identical to `simulate_full_lifecycle` (same real
+    `ExitTrade`, same BE-arming/pre-BE soft-SL/trail/cap rules, unchanged)
+    for a single leg -- but when a leg's real outcome is specifically
+    `profit_drop_after_be` (hit the post-BE loss cap), immediately opens a
+    NEW leg at that same tick's price, with a fresh `PosState` (BE
+    arming/trail/cap all reset), and keeps replaying the SAME shared tick
+    stream from there. Chains for as long as consecutive legs keep hitting
+    the cap (bounded by `max_legs`, a safety cap against pathological
+    whipsaw data); stops the moment a leg ends any other way (trail
+    capture, pre-BE timeout/soft-SL, or the tick budget runs out).
+
+    `flip_direction` controls what "that direction" means for the
+    re-entry: `False` re-enters the SAME direction as the leg that just
+    got capped (the original, naive reading); `True` (the actual
+    hypothesis under test) treats a cap hit as signal invalidation and
+    REVERSES direction on every re-entry -- buy hits -$1 -> open sell;
+    if that sell also hits -$1 -> open buy; alternating for as long as
+    the chain continues. Either way only `profit_drop_after_be` triggers
+    a re-entry -- a leg that fails to reach breakeven at all
+    (`failed_to_reach_be`) or hits the pre-BE soft SL (`profit_drop`) is
+    treated as terminal, not a signal to keep chaining.
+
+    `chained_exit_trade`, if given, is used for every RE-ENTERED leg
+    (leg 2 onward) instead of `exit_trade` -- lets the re-entry run under
+    a different (typically looser) post-BE loss cap than leg 1's real
+    live value, to test whether the flip just needs more room to reach
+    the trail rather than being re-capped at the same tight `-$1`. Leg 1
+    always uses `exit_trade` (the real, live-Config cap) unchanged.
+
+    Reports ONE summed realized P&L across however many legs fired, plus
+    `|`-joined per-leg outcome/profit/side breakdowns for inspection.
+    Same shared tick budget as a single `simulate_full_lifecycle` call --
+    chaining does not fetch extra ticks, it spends the existing budget
+    across more legs.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {
+            "outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None,
+            "num_legs": 0, "leg_outcomes": "", "leg_profits": "", "leg_sides": "",
+        }
+
+    leg_outcomes: list[str] = []
+    leg_profits: list[float] = []
+    leg_sides: list[str] = []
+    total_profit = 0.0
+    first_entry_price: Optional[float] = None
+    final_outcome = "exhausted"
+    total_ticks_used = 0
+    start_idx = 0
+    current_side = side
+
+    while start_idx < len(ticks) and len(leg_outcomes) < max_legs:
+        leg_exit_trade = exit_trade if len(leg_outcomes) == 0 or chained_exit_trade is None else chained_exit_trade
+        loss_manager = leg_exit_trade._loss_manager
+        profit_manager = leg_exit_trade._profit_manager
+        profit_exits_on_tick = bool(getattr(leg_exit_trade._config, "profit_exits_on_tick", True))
+
+        pos_type = 0 if current_side == "buy" else 1
+        entry_tick = ticks[start_idx]
+        entry_price = float(entry_tick["ask"]) if current_side == "buy" else float(entry_tick["bid"])
+        if first_entry_price is None:
+            first_entry_price = entry_price
+
+        state = PosState(anchor=0.0, prev_price=0.0)
+        leg_profit = 0.0
+        leg_outcome: Optional[str] = None
+        end_idx = start_idx
+
+        for idx in range(start_idx, len(ticks)):
+            t = ticks[idx]
+            price = float(t["bid"]) if current_side == "buy" else float(t["ask"])
+            leg_profit = compute_profit(
+                side=current_side, entry_price=entry_price, price=price, lot=lot,
+                contract_size=contract_size, needs_conversion=needs_conversion,
+            )
+            position = {
+                "symbol": symbol, "type": pos_type, "ticket": idx,
+                "price_open": entry_price, "volume": lot, "profit": leg_profit,
+            }
+            tick_dict = to_tick_dict(t)
+            action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                leg_outcome = action.reason
+                end_idx = idx
+                break
+            if profit_exits_on_tick:
+                action = profit_manager.check_exit_on_tick(position, tick_dict, state)
+                if action:
+                    leg_outcome = action.reason
+                    end_idx = idx
+                    break
+        else:
+            leg_outcome = "exhausted"
+            end_idx = len(ticks) - 1
+
+        leg_outcomes.append(leg_outcome)
+        leg_profits.append(leg_profit)
+        leg_sides.append(current_side)
+        total_profit += leg_profit
+        final_outcome = leg_outcome
+        total_ticks_used = end_idx + 1
+
+        if leg_outcome == "profit_drop_after_be" and end_idx + 1 < len(ticks):
+            start_idx = end_idx + 1
+            if flip_direction:
+                current_side = "sell" if current_side == "buy" else "buy"
+            continue
+        break
+
+    if len(leg_outcomes) >= max_legs and leg_outcomes[-1] == "profit_drop_after_be":
+        final_outcome = "max_legs_reached"
+
+    return {
+        "outcome": final_outcome,
+        "profit": total_profit,
+        "ticks_used": total_ticks_used,
+        "entry_price": first_entry_price,
+        "num_legs": len(leg_outcomes),
+        "leg_outcomes": "|".join(leg_outcomes),
+        "leg_profits": "|".join(f"{p:.2f}" for p in leg_profits),
+        "leg_sides": "|".join(leg_sides),
+    }
+
+
+def simulate_hedge_on_cap(
+    *,
+    exit_trade,
+    hedge_exit_trade=None,
+    original_exit_trade=None,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Hedge, not sequential re-entry: runs the original position normally
+    (real ExitTrade -- BE arm, pre-BE soft-SL/timeout, trail, cap) until
+    the FIRST time it would hit the post-BE loss cap. At that exact tick,
+    instead of closing it, opens a SECOND position in the opposite
+    direction at the same price (a fresh `PosState`, the real ExitTrade
+    rules -- BE arm/pre-BE/trail/cap, unchanged), while the original
+    keeps running with its own trailing stop still live, so it can still
+    close for a real profit if price fully recovers.
+
+    From that fork point, an equal-size buy+sell pair's COMBINED P&L is
+    mathematically frozen tick to tick -- one side's gain is exactly the
+    other's loss -- until one side actually closes. This function tracks
+    both independently from the fork, each closing on its own terms (or
+    marked at the tick budget cutoff if still open when ticks run out),
+    and reports each leg's own final outcome/profit plus the summed
+    total. If the original never hits the cap at all, no hedge opens and
+    this is identical to `simulate_full_lifecycle` for that trade.
+
+    `hedge_exit_trade`, if given, is used for the hedge leg instead of
+    `exit_trade` (e.g. to give the hedge its own different cap/trail);
+    defaults to reusing `exit_trade` for both.
+
+    `original_exit_trade`, if given, re-enables a REAL (wider) loss cap
+    on the original from the fork point onward, instead of leaving it
+    fully uncapped -- e.g. a `-$5`/`-$10` floor so a persistent one-way
+    move can't bleed the held-open original indefinitely while the tick
+    budget runs out (`exhausted`, marked at an arbitrary cutoff price).
+    Default `None` keeps the original fully uncapped past the fork (only
+    the trail can close it), the original behavior.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {
+            "outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None,
+            "hedge_opened": False, "leg_outcomes": "", "leg_profits": "", "leg_sides": "",
+        }
+
+    hedge_exit_trade = hedge_exit_trade or exit_trade
+    loss_manager = exit_trade._loss_manager
+    profit_manager = exit_trade._profit_manager
+    profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+    state = PosState(anchor=0.0, prev_price=0.0)
+
+    profit = 0.0
+    outcome: Optional[str] = None
+    fork_idx: Optional[int] = None
+    idx = -1
+    for idx, t in enumerate(ticks):
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        position = {
+            "symbol": symbol, "type": pos_type, "ticket": idx,
+            "price_open": entry_price, "volume": lot, "profit": profit,
+        }
+        tick_dict = to_tick_dict(t)
+        action = loss_manager.check_exit_on_tick(position, tick_dict, state)
+        if action:
+            outcome = action.reason
+            break
+        if profit_exits_on_tick:
+            action = profit_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                outcome = action.reason
+                break
+    else:
+        outcome = "exhausted"
+
+    if outcome != "profit_drop_after_be" or idx + 1 >= len(ticks):
+        # Never hit the cap (or ran out of ticks right at the cap tick) --
+        # no hedge opens, identical to a single simulate_full_lifecycle leg.
+        return {
+            "outcome": outcome,
+            "profit": profit,
+            "ticks_used": idx + 1,
+            "entry_price": entry_price,
+            "hedge_opened": False,
+            "leg_outcomes": outcome,
+            "leg_profits": f"{profit:.2f}",
+            "leg_sides": side,
+        }
+
+    fork_idx = idx + 1
+    hedge_side = "sell" if side == "buy" else "buy"
+    hedge_entry_tick = ticks[fork_idx]
+    hedge_entry_price = float(hedge_entry_tick["ask"]) if hedge_side == "buy" else float(hedge_entry_tick["bid"])
+    hedge_pos_type = 0 if hedge_side == "buy" else 1
+    hedge_state = PosState(anchor=0.0, prev_price=0.0)
+    hedge_loss_manager = hedge_exit_trade._loss_manager
+    hedge_profit_manager = hedge_exit_trade._profit_manager
+    hedge_profit_exits_on_tick = bool(getattr(hedge_exit_trade._config, "profit_exits_on_tick", True))
+    original_loss_manager = original_exit_trade._loss_manager if original_exit_trade is not None else None
+
+    original_closed = False
+    original_final_profit = profit  # value at the fork tick; updated below
+    original_outcome = "held_open"
+    hedge_closed = False
+    hedge_final_profit = 0.0
+    hedge_outcome: Optional[str] = None
+    last_idx = fork_idx - 1
+
+    for idx2 in range(fork_idx, len(ticks)):
+        t = ticks[idx2]
+        last_idx = idx2
+
+        if not original_closed:
+            orig_price = float(t["bid"]) if side == "buy" else float(t["ask"])
+            orig_profit = compute_profit(
+                side=side, entry_price=entry_price, price=orig_price, lot=lot,
+                contract_size=contract_size, needs_conversion=needs_conversion,
+            )
+            original_final_profit = orig_profit
+            orig_position = {
+                "symbol": symbol, "type": pos_type, "ticket": idx2,
+                "price_open": entry_price, "volume": lot, "profit": orig_profit,
+            }
+            tick_dict = to_tick_dict(t)
+            action = None
+            if original_loss_manager is not None:
+                # A real, wider cap re-enabled for the held-open original --
+                # bounds the tail risk instead of leaving it fully uncapped.
+                action = original_loss_manager.check_exit_on_tick(orig_position, tick_dict, state)
+            if action:
+                original_outcome = action.reason
+                original_closed = True
+            elif profit_exits_on_tick:
+                action = profit_manager.check_exit_on_tick(orig_position, tick_dict, state)
+                if action:
+                    original_outcome = action.reason
+                    original_closed = True
+
+        if not hedge_closed:
+            hedge_price = float(t["bid"]) if hedge_side == "buy" else float(t["ask"])
+            hedge_profit = compute_profit(
+                side=hedge_side, entry_price=hedge_entry_price, price=hedge_price, lot=lot,
+                contract_size=contract_size, needs_conversion=needs_conversion,
+            )
+            hedge_final_profit = hedge_profit
+            hedge_position = {
+                "symbol": symbol, "type": hedge_pos_type, "ticket": idx2,
+                "price_open": hedge_entry_price, "volume": lot, "profit": hedge_profit,
+            }
+            tick_dict = to_tick_dict(t)
+            action = hedge_loss_manager.check_exit_on_tick(hedge_position, tick_dict, hedge_state)
+            if action:
+                hedge_outcome = action.reason
+                hedge_closed = True
+            elif hedge_profit_exits_on_tick:
+                action = hedge_profit_manager.check_exit_on_tick(hedge_position, tick_dict, hedge_state)
+                if action:
+                    hedge_outcome = action.reason
+                    hedge_closed = True
+
+        if original_closed and hedge_closed:
+            break
+
+    if not original_closed:
+        original_outcome = "exhausted"
+    if hedge_outcome is None:
+        hedge_outcome = "exhausted"
+
+    total_profit = original_final_profit + hedge_final_profit
+
+    return {
+        "outcome": f"{original_outcome}+{hedge_outcome}",
+        "profit": total_profit,
+        "ticks_used": last_idx + 1,
+        "entry_price": entry_price,
+        "hedge_opened": True,
+        "leg_outcomes": f"{original_outcome}|{hedge_outcome}",
+        "leg_profits": f"{original_final_profit:.2f}|{hedge_final_profit:.2f}",
+        "leg_sides": f"{side}|{hedge_side}",
     }
 
 
@@ -1279,6 +2021,19 @@ def run(
     trail_gap_floor_money: Optional[float] = None,
     post_be_loss_cap: Optional[float] = None,
     unified_post_be_stop: bool = False,
+    chain_on_cap: bool = False,
+    chain_max_legs: int = 20,
+    chain_flip_direction: bool = False,
+    chain_loss_cap: Optional[float] = None,
+    hedge_on_cap: bool = False,
+    original_loss_cap: Optional[float] = None,
+    single_timeframe: bool = False,
+    indicator_names: Optional[list] = None,
+    staircase_trail: bool = False,
+    staircase_tier_width: float = 1.0,
+    staircase_first_tier: Optional[float] = None,
+    sweep_staircase_tiers: bool = False,
+    sweep_staircase_cap: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -1332,7 +2087,14 @@ def run(
     m5_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_confirm]) for c in m5_candles]
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
 
-    strategy = strategy_factory(config=config, use_multi=True, symbol=symbol)
+    indicators = (
+        {name: build_indicator(name, config) for name in indicator_names}
+        if single_timeframe and indicator_names
+        else None
+    )
+    strategy = strategy_factory(
+        config=config, indicators=indicators, use_multi=not single_timeframe, symbol=symbol
+    )
     exit_overrides: dict[str, Any] = {}
     if disable_timeout:
         exit_overrides["be_arming_ticks"] = 0
@@ -1353,8 +2115,24 @@ def run(
     )
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
+    chained_exit_trade = None
+    if chain_on_cap and chain_loss_cap is not None:
+        chained_overrides = dict(exit_overrides)
+        chained_overrides["post_be_loss_cap_money"] = chain_loss_cap
+        chained_exit_trade = create_exit_trade(
+            broker=broker, risk_manager=risk_manager, config=ExitTradeConfig(**chained_overrides)
+        )
+
+    original_exit_trade = None
+    if hedge_on_cap and original_loss_cap is not None:
+        original_overrides = dict(exit_overrides)
+        original_overrides["post_be_loss_cap_money"] = original_loss_cap
+        original_exit_trade = create_exit_trade(
+            broker=broker, risk_manager=risk_manager, config=ExitTradeConfig(**original_overrides)
+        )
+
     cap_sweep_trades: list[tuple[str, Any]] = []
-    if full_lifecycle and sweep_post_be_cap:
+    if full_lifecycle and (sweep_post_be_cap or sweep_staircase_cap):
         for c in FULL_LIFECYCLE_CAP_CANDIDATES:
             label = f"cap{str(c).replace('.', '_')}"
             cfg = ExitTradeConfig(post_be_loss_cap_money=c)
@@ -1379,19 +2157,35 @@ def run(
                 if m5_ptr == 0 or m15_ptr == 0:
                     continue
 
-                candles_by_tf = {
-                    tf_entry: m1_candles[: i + 1],
-                    tf_confirm: m5_candles[:m5_ptr],
-                    tf_bias: m15_candles[:m15_ptr],
-                }
-                signal = strategy.generate_signal(candles_by_tf)
+                if single_timeframe:
+                    signal = strategy.generate_signal(m1_candles[: i + 1])
+                else:
+                    candles_by_tf = {
+                        tf_entry: m1_candles[: i + 1],
+                        tf_confirm: m5_candles[:m5_ptr],
+                        tf_bias: m15_candles[:m15_ptr],
+                    }
+                    signal = strategy.generate_signal(candles_by_tf)
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
                 if invert_signal:
                     final_signal = "sell" if final_signal == "buy" else "buy"
 
-                if full_lifecycle and sweep_post_be_cap:
+                if full_lifecycle and sweep_staircase_cap:
+                    sim = simulate_full_lifecycle_staircase_cap_sweep(
+                        exit_trades=cap_sweep_trades,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                        tier_width=staircase_tier_width,
+                        first_tier=staircase_first_tier,
+                    )
+                elif full_lifecycle and sweep_post_be_cap:
                     sim = simulate_full_lifecycle_cap_sweep(
                         exit_trades=cap_sweep_trades,
                         symbol=symbol,
@@ -1425,6 +2219,57 @@ def run(
                         needs_conversion=needs_conversion,
                         trail_gap_pct=resolved_trail_gap_pct,
                         trail_gap_floor_money=resolved_trail_gap_floor_money,
+                    )
+                elif full_lifecycle and sweep_staircase_tiers:
+                    sim = simulate_full_lifecycle_staircase_sweep(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                        tier_widths=STAIRCASE_TIER_CANDIDATES,
+                    )
+                elif full_lifecycle and staircase_trail:
+                    sim = simulate_full_lifecycle_staircase_trail(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                        tier_width=staircase_tier_width,
+                        first_tier=staircase_first_tier,
+                    )
+                elif full_lifecycle and chain_on_cap:
+                    sim = simulate_chained_legs(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                        max_legs=chain_max_legs,
+                        flip_direction=chain_flip_direction,
+                        chained_exit_trade=chained_exit_trade,
+                    )
+                elif full_lifecycle and hedge_on_cap:
+                    sim = simulate_hedge_on_cap(
+                        exit_trade=exit_trade,
+                        original_exit_trade=original_exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
                     )
                 elif full_lifecycle:
                     sim = simulate_full_lifecycle(
@@ -1464,6 +2309,21 @@ def run(
                         post_be_max_ticks=post_be_max_ticks,
                         simulate_trail=simulate_trail,
                     )
+                indicator_votes = signal.get("indicators") or {}
+                num_agree = sum(1 for v in indicator_votes.values() if v == final_signal)
+                window = m1_candles[: i + 1]
+                rsi_value = _compute_latest_rsi(
+                    window, period=int(getattr(config, "ENTRY_RSI_PERIOD", 7))
+                )
+                hist = _macd_histogram(
+                    window, fast_period=7, slow_period=16, signal_period=5,
+                    log=_metadata_logger,
+                )
+                macd_hist_value = hist[0] if hist else None
+                atr_value = calculate_atr(
+                    window, period=int(getattr(config, "ENTRY_ATR_PERIOD", 14) or 14),
+                    logger=_metadata_logger,
+                )
                 results.append(
                     {
                         "time": m1_candle.get("time"),
@@ -1474,13 +2334,21 @@ def run(
                         "m5_confirm": signal.get("m5_confirm"),
                         "m1_entry": signal.get("m1_entry"),
                         "pullback_completed": signal.get("pullback_completed"),
+                        "num_indicators_agree": num_agree if indicator_votes else None,
+                        "indicator_votes": "|".join(f"{k}={v}" for k, v in indicator_votes.items()) or None,
+                        "rsi_value": rsi_value,
+                        "macd_hist_value": macd_hist_value,
+                        "atr_value": atr_value,
                         **sim,
                     }
                 )
     finally:
         logging.disable(logging.NOTSET)
 
-    if full_lifecycle and sweep_post_be_cap:
+    if full_lifecycle and sweep_staircase_cap:
+        write_staircase_cap_sweep_csv(results, symbol)
+        summarize_staircase_cap_sweep(results, symbol)
+    elif full_lifecycle and sweep_post_be_cap:
         write_full_lifecycle_cap_sweep_csv(results, symbol)
         summarize_full_lifecycle_cap_sweep(results, symbol)
     elif sweep_pre_be_threshold:
@@ -1489,6 +2357,18 @@ def run(
     elif unified_post_be_stop:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
+    elif full_lifecycle and sweep_staircase_tiers:
+        write_staircase_sweep_csv(results, symbol)
+        summarize_staircase_sweep(results, symbol)
+    elif full_lifecycle and staircase_trail:
+        write_full_lifecycle_csv(results, symbol)
+        summarize_full_lifecycle(results, symbol)
+    elif full_lifecycle and chain_on_cap:
+        write_chained_legs_csv(results, symbol)
+        summarize_chained_legs(results, symbol)
+    elif full_lifecycle and hedge_on_cap:
+        write_hedge_csv(results, symbol)
+        summarize_hedge(results, symbol)
     elif full_lifecycle:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
@@ -1508,6 +2388,7 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_exit_strategy_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
         "outcome", "profit", "ticks_used", "entry_price",
         "cf_outcome", "cf_profit", "cf_extra_ticks",
         "post_be_peak_profit", "post_be_ticks_to_peak", "post_be_max_drawdown_from_peak",
@@ -1673,8 +2554,10 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
         "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
         "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
+        "cf_recovered_to_neg1", "cf_ticks_to_recover_neg1",
         "cf_post_recovery_peak", "cf_reversed_after_recovery", "cf_ticks_to_reversal_after_recovery",
     ]
     with open(path, "w", newline="") as f:
@@ -1772,6 +2655,117 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
             print(f"  {label}: {len(bucket_rows)} ({outcome_str})")
 
 
+def write_chained_legs_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_chained_legs_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "outcome", "profit", "ticks_used", "entry_price", "num_legs", "leg_outcomes", "leg_profits", "leg_sides",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_chained_legs(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    all_profits = [r["profit"] for r in results if r["profit"] is not None]
+    total_pnl = sum(all_profits)
+    win_rate = sum(1 for p in all_profits if p > 0) / len(all_profits) * 100.0 if all_profits else 0.0
+    all_legs = [r["num_legs"] for r in results if r.get("num_legs") is not None]
+    chained = [r for r in results if r.get("num_legs", 1) > 1]
+
+    print(f"\n=== Chained-legs backtest (close at -$1, re-enter same direction, same rules apply): {symbol} ===")
+    print(f"Total original signals: {total}")
+    print(f"Total realized P&L (summed across all legs): ${total_pnl:+.2f}  win_rate={win_rate:.1f}%")
+    print(f"Avg legs per signal: {sum(all_legs) / len(all_legs):.2f}  (max: {max(all_legs) if all_legs else 0})")
+    print(f"Signals that re-entered at least once: {len(chained)} ({len(chained) / total * 100.0:.1f}%)")
+
+    by_outcome: dict[str, list[dict]] = {}
+    for r in results:
+        by_outcome.setdefault(r["outcome"], []).append(r)
+    print(f"\nBy FINAL leg's exit reason:")
+    for outcome, rows in sorted(by_outcome.items(), key=lambda kv: -len(kv[1])):
+        pct = len(rows) / total * 100.0
+        profits = [r["profit"] for r in rows if r["profit"] is not None]
+        avg_profit = sum(profits) / len(profits) if profits else 0.0
+        sub_total = sum(profits)
+        print(f"  {outcome:28s}: {len(rows):4d} ({pct:5.1f}%)  avg_total_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}")
+
+    by_legs: dict[int, list[dict]] = {}
+    for r in results:
+        by_legs.setdefault(r.get("num_legs", 1), []).append(r)
+    print(f"\nBy number of legs (1 = never re-entered):")
+    for n, rows in sorted(by_legs.items()):
+        profits = [r["profit"] for r in rows if r["profit"] is not None]
+        avg_profit = sum(profits) / len(profits) if profits else 0.0
+        sub_total = sum(profits)
+        win_r = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+        print(f"  {n:2d} leg(s): {len(rows):4d} trades  avg_total_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}  win_rate={win_r:.1f}%")
+
+
+def write_hedge_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_hedge_on_cap_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "outcome", "profit", "ticks_used", "entry_price", "hedge_opened", "leg_outcomes", "leg_profits", "leg_sides",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_hedge(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    all_profits = [r["profit"] for r in results if r["profit"] is not None]
+    total_pnl = sum(all_profits)
+    win_rate = sum(1 for p in all_profits if p > 0) / len(all_profits) * 100.0 if all_profits else 0.0
+    hedged = [r for r in results if r.get("hedge_opened")]
+    never_hedged = [r for r in results if not r.get("hedge_opened")]
+
+    print(f"\n=== Hedge-on-cap backtest (hold original + open reverse leg at -$1, no re-entry chaining): {symbol} ===")
+    print(f"Total original signals: {total}")
+    print(f"Total realized P&L: ${total_pnl:+.2f}  win_rate={win_rate:.1f}%")
+    print(f"Signals that opened a hedge (hit -$1): {len(hedged)} ({len(hedged) / total * 100.0:.1f}%)")
+    if never_hedged:
+        never_profits = [r["profit"] for r in never_hedged if r["profit"] is not None]
+        print(f"  Never hedged (never hit -$1): {len(never_hedged)}  total=${sum(never_profits):+.2f}")
+    if hedged:
+        hedged_profits = [r["profit"] for r in hedged if r["profit"] is not None]
+        hedged_win_rate = sum(1 for p in hedged_profits if p > 0) / len(hedged_profits) * 100.0 if hedged_profits else 0.0
+        print(f"  Hedged: {len(hedged)}  total=${sum(hedged_profits):+.2f}  avg=${sum(hedged_profits) / len(hedged_profits):+.2f}  win_rate={hedged_win_rate:.1f}%")
+
+        by_outcome: dict[str, list[dict]] = {}
+        for r in hedged:
+            by_outcome.setdefault(r["outcome"], []).append(r)
+        print(f"\n  By (original_outcome + hedge_outcome) combination:")
+        for outcome, rows in sorted(by_outcome.items(), key=lambda kv: -len(kv[1])):
+            profits = [r["profit"] for r in rows if r["profit"] is not None]
+            avg_profit = sum(profits) / len(profits) if profits else 0.0
+            print(f"    {outcome:45s}: {len(rows):3d}  avg=${avg_profit:+.2f}  total=${sum(profits):+.2f}")
+
+
 def write_entry_excursion_csv(results: list[dict], symbol: str) -> None:
     if not results:
         return
@@ -1780,6 +2774,7 @@ def write_entry_excursion_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_entry_excursion_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
         "entry_price", "entry_peak_profit", "entry_ticks_to_peak",
         "entry_max_drawdown_from_peak", "entry_final_profit", "entry_ticks_observed",
     ]
@@ -1851,6 +2846,7 @@ def write_full_lifecycle_cap_sweep_csv(results: list[dict], symbol: str) -> None
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_cap_sweep_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
     ] + [
         f"{label}_{suffix}" for label in _cap_sweep_labels() for suffix in ("outcome", "profit", "ticks")
     ]
@@ -1882,6 +2878,89 @@ def summarize_full_lifecycle_cap_sweep(results: list[dict], symbol: str) -> None
         )
 
 
+def write_staircase_cap_sweep_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_staircase_cap_sweep_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+    ] + [
+        f"{label}_{suffix}" for label in _cap_sweep_labels() for suffix in ("outcome", "profit", "ticks")
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_staircase_cap_sweep(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    print(f"\n=== Staircase-trail post-BE cap sweep (cap value varies, staircase trail fixed) for {symbol}, {total} trades ===")
+    for c, label in zip(FULL_LIFECYCLE_CAP_CANDIDATES, _cap_sweep_labels()):
+        profits = [r[f"{label}_profit"] for r in results if r.get(f"{label}_profit") is not None]
+        outcomes = [r[f"{label}_outcome"] for r in results if r.get(f"{label}_outcome") is not None]
+        total_pnl = sum(profits)
+        win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+        cap_hits = sum(1 for o in outcomes if o == "profit_drop_after_be")
+        trail_hits = sum(1 for o in outcomes if o == "staircase_trail_breach")
+        marker = "  <-- current production value" if c == float(getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0) else ""
+        print(
+            f"  -${c:<4.1f}: total=${total_pnl:+9.2f}  win_rate={win_rate:5.1f}%  "
+            f"cap_hits={cap_hits:4d}  trail_hits={trail_hits:4d}{marker}"
+        )
+
+
+def _staircase_sweep_labels() -> list[str]:
+    return [f"tier{str(w).replace('.', '_')}" for w in STAIRCASE_TIER_CANDIDATES]
+
+
+def write_staircase_sweep_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_staircase_tier_sweep_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+    ] + [
+        f"{label}_{suffix}" for label in _staircase_sweep_labels() for suffix in ("outcome", "profit", "ticks")
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_staircase_sweep(results: list[dict], symbol: str) -> None:
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+
+    print(f"\n=== Staircase tier-width sweep (real LossExitManager, tier width varies) for {symbol}, {total} trades ===")
+    for w, label in zip(STAIRCASE_TIER_CANDIDATES, _staircase_sweep_labels()):
+        profits = [r[f"{label}_profit"] for r in results if r.get(f"{label}_profit") is not None]
+        outcomes = [r[f"{label}_outcome"] for r in results if r.get(f"{label}_outcome") is not None]
+        total_pnl = sum(profits)
+        win_rate = sum(1 for p in profits if p > 0) / len(profits) * 100.0 if profits else 0.0
+        cap_hits = sum(1 for o in outcomes if o == "profit_drop_after_be")
+        trail_hits = sum(1 for o in outcomes if o == "staircase_trail_breach")
+        print(
+            f"  ${w:<4.2f} tiers: total=${total_pnl:+9.2f}  win_rate={win_rate:5.1f}%  "
+            f"cap_hits={cap_hits:4d}  trail_hits={trail_hits:4d}"
+        )
+
+
 def _pre_be_sweep_labels() -> list[str]:
     return [_pre_be_threshold_label(c) for c in PRE_BE_THRESHOLD_CANDIDATES]
 
@@ -1894,6 +2973,7 @@ def write_pre_be_threshold_sweep_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_pre_be_threshold_sweep_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
     ] + [
         f"{label}_{suffix}" for label in _pre_be_sweep_labels() for suffix in ("outcome", "profit", "ticks")
     ]
@@ -1927,6 +3007,12 @@ def summarize_pre_be_threshold_sweep(results: list[dict], symbol: str) -> None:
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
+    if args.single_timeframe and args.mtf_entry_indicator is not None:
+        print("--mtf-entry-indicator only affects the MTF entry layer -- it's a no-op with --single-timeframe. Aborting.")
+        sys.exit(1)
+    if args.indicators and not args.single_timeframe:
+        print("--indicators is a single-timeframe ablation flag -- requires --single-timeframe. Aborting.")
+        sys.exit(1)
     config = Config
     if args.mtf_entry_indicator is not None:
         config = type("ConfigOverride", (Config,), {"MTF_ENTRY_INDICATOR": args.mtf_entry_indicator})
@@ -1954,6 +3040,23 @@ def main() -> None:
         trail_gap_floor_money=args.trail_gap_floor_money,
         post_be_loss_cap=args.post_be_loss_cap,
         unified_post_be_stop=args.unified_post_be_stop,
+        chain_on_cap=args.chain_on_cap,
+        chain_max_legs=args.chain_max_legs,
+        chain_flip_direction=args.chain_flip_direction,
+        chain_loss_cap=args.chain_loss_cap,
+        hedge_on_cap=args.hedge_on_cap,
+        original_loss_cap=args.original_loss_cap,
+        single_timeframe=args.single_timeframe,
+        indicator_names=(
+            [n.strip() for n in args.indicators.split(",") if n.strip()]
+            if args.indicators
+            else None
+        ),
+        staircase_trail=args.staircase_trail,
+        staircase_tier_width=args.staircase_tier_width,
+        staircase_first_tier=args.staircase_first_tier,
+        sweep_staircase_tiers=args.sweep_staircase_tiers,
+        sweep_staircase_cap=args.sweep_staircase_cap,
     )
 
 
