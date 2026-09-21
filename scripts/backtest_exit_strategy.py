@@ -265,6 +265,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-lifecycle-max-ticks", type=int, default=4000, help="Max real ticks fetched per trade for --full-lifecycle -- needs to cover pre-BE arming plus the full post-BE trail/cap lifecycle, not just the pre-BE window.")
     parser.add_argument("--sweep-post-be-cap", action="store_true", help="Only with --full-lifecycle: instead of using Config's single post-BE loss-cap value, replay FULL_LIFECYCLE_CAP_CANDIDATES against the same tick stream in one pass, each paired with the SAME real trailing-stop formula -- so cap retuning is tested against the real combined system, not in isolation.")
     parser.add_argument("--sweep-pre-be-threshold", action="store_true", help="Instead of using Config's single pre-breakeven soft-SL threshold, replay PRE_BE_THRESHOLD_CANDIDATES (each a real LossExitManager with a different max_loss_money, everything else at Config's real values) against the same tick stream in one pass -- Thread 2's test of whether a threshold conditional on M5-confirm state beats the flat $5 rule. Pre-BE phase only (mutually exclusive with --full-lifecycle); metadata capture (confidence/adx/m15_bias/m5_confirm/m1_entry) still included so results can be split by M5-confirm afterward.")
+    parser.add_argument(
+        "--mtf-entry-indicator",
+        choices=["macd", "sma", "rsi"],
+        default=None,
+        help="Override Config.MTF_ENTRY_INDICATOR for this run only (default: whatever Config is actually set to) -- lets the real full-lifecycle P&L be compared entry-indicator-by-entry-indicator under the identical exit-strategy config, isolating that one variable.",
+    )
+    parser.add_argument(
+        "--invert-signal",
+        action="store_true",
+        help="Trade the OPPOSITE of whatever the strategy signals (buy signal -> sell trade, sell signal -> buy trade), otherwise identical -- tests whether the entry signal has real but backwards directional information, given the full-lifecycle finding that most trades confirm the signal direction (reach breakeven) and then reverse before profit is locked in. `direction` in the CSV/summary reflects the trade actually taken, not the raw signal.",
+    )
+    parser.add_argument(
+        "--measure-entry-excursion",
+        action="store_true",
+        help="For every signal, continuously observe the real tick stream from the moment of entry -- with NO exit rule applied at all, not even the pre-BE soft-SL -- to see how the trade actually progresses over its whole natural path. Tracks the running peak profit ever reached, how many ticks it took, the largest pullback ever seen from whatever the running peak was at that moment, and the final (possibly still-open) profit at the tick budget cutoff. Unlike --quick-check (fixed-horizon M1 bar high/low snapshots), this is a continuous real-tick trace with no artificial horizon. Mutually exclusive with --full-lifecycle/--sweep-*.",
+    )
+    parser.add_argument("--entry-excursion-max-ticks", type=int, default=4000, help="How many real ticks past entry to observe for --measure-entry-excursion")
+    parser.add_argument(
+        "--trail-gap-pct",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_TRAIL_GAP_PCT for this run's real ExitTrade (default: whatever Config is set to, currently 0.6 -- i.e. tolerate giving back 60%% of peak before the post-BE trail fires). Only affects --full-lifecycle (and its --sweep-post-be-cap variant).",
+    )
+    parser.add_argument(
+        "--trail-gap-floor-money",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_TRAIL_GAP_FLOOR_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $2.0 -- this floor DOMINATES --trail-gap-pct for any peak below floor/pct, e.g. below $20 at pct=0.10, so pair a tight --trail-gap-pct with a correspondingly small floor override, e.g. 0.0, or the floor will silently override the intended percentage).",
+    )
+    parser.add_argument(
+        "--unified-post-be-stop",
+        action="store_true",
+        help="Replace the real post-BE two-manager sequence (loss-manager cap, then -- only while profit stays positive -- the profit-manager trail) with a single combined stop (trigger = peak - max(--trail-gap-floor-money, --trail-gap-pct * peak)) checked every tick regardless of sign. Tests whether the real trail's '0 < profit' gate is what lets fast reversals skip past it into the separate, much looser loss cap. Pre-BE phase (arming/soft-SL/timeout) is the real, unchanged LossExitManager. Mutually exclusive with --full-lifecycle's own post-BE logic (this replaces it) and with --sweep-post-be-cap/--sweep-pre-be-threshold.",
+    )
+    parser.add_argument(
+        "--post-be-loss-cap",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_POST_BE_LOSS_CAP_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $1.0). Pair with a tight --trail-gap-pct to test 'floor the post-BE worst case at breakeven instead of a real loss' -- e.g. --post-be-loss-cap 0.0 --trail-gap-pct 0.10 --trail-gap-floor-money 0.0.",
+    )
     return parser.parse_args()
 
 
@@ -496,6 +536,85 @@ def measure_post_be_excursion(
     }
 
 
+def measure_entry_excursion(
+    *,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+) -> dict:
+    """Open a simulated position and continuously observe the real tick
+    stream from the moment of entry -- with NO exit rule applied at all,
+    not even the pre-BE soft-SL -- to see how the trade actually
+    progresses over its whole natural path. Mirrors
+    `measure_post_be_excursion`'s running-peak/drawdown-from-peak
+    tracking, but starts at tick 0 (entry) instead of at breakeven
+    arming, and applies no exit logic whatsoever -- pure observation of
+    what real price does after this specific entry, unfiltered by any
+    strategy decision.
+
+    Unlike `--quick-check` (which snapshots M1 candle high/low extremes
+    over a fixed few-minute horizon, run as separate independent calls
+    per horizon), this replays the actual sequential tick stream once,
+    continuously, for up to `max_ticks` -- a real trace of one trade's
+    progression, not a series of disconnected fixed-horizon photographs.
+
+    Returns `{"entry_peak_profit", "entry_ticks_to_peak",
+    "entry_max_drawdown_from_peak", "entry_final_profit",
+    "entry_ticks_observed", "entry_price"}`.
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {
+            "entry_peak_profit": None,
+            "entry_ticks_to_peak": 0,
+            "entry_max_drawdown_from_peak": None,
+            "entry_final_profit": None,
+            "entry_ticks_observed": 0,
+            "entry_price": None,
+        }
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    end_idx = min(len(ticks), max_ticks)
+
+    running_peak: Optional[float] = None
+    peak_profit: Optional[float] = None
+    ticks_to_peak = 0
+    max_drawdown = 0.0
+    final_profit: Optional[float] = None
+
+    for idx in range(end_idx):
+        t = ticks[idx]
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+        final_profit = profit
+
+        if running_peak is None or profit > running_peak:
+            running_peak = profit
+            peak_profit = profit
+            ticks_to_peak = idx
+        else:
+            drawdown = running_peak - profit
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+    return {
+        "entry_peak_profit": peak_profit,
+        "entry_ticks_to_peak": ticks_to_peak,
+        "entry_max_drawdown_from_peak": max_drawdown,
+        "entry_final_profit": final_profit,
+        "entry_ticks_observed": end_idx,
+        "entry_price": entry_price,
+    }
+
+
 def simulate_trail_rules(
     *,
     ticks,
@@ -715,6 +834,7 @@ def simulate_full_lifecycle(
     profit = 0.0
     outcome = None
     idx = -1
+    be_arm_ticks: Optional[int] = None
     for idx, t in enumerate(ticks[:max_ticks]):
         price = float(t["bid"]) if side == "buy" else float(t["ask"])
         profit = compute_profit(
@@ -731,6 +851,7 @@ def simulate_full_lifecycle(
             "profit": profit,
         }
 
+        was_armed = getattr(state, "be_armed", False)
         tick_dict = to_tick_dict(t)
         action = loss_manager.check_exit_on_tick(position, tick_dict, state)
         if action:
@@ -743,6 +864,173 @@ def simulate_full_lifecycle(
                 outcome = action.reason
                 break
 
+        if be_arm_ticks is None and not was_armed and getattr(state, "be_armed", False):
+            be_arm_ticks = idx
+
+    if outcome is None:
+        outcome = "exhausted"
+
+    # Counterfactual: for a real post-BE cap exit specifically, did price
+    # ever recover to breakeven (or better) afterward if we'd just kept
+    # watching with no exit rule applied? The ticks are already fetched
+    # (mt5.copy_ticks_from pulled the full max_ticks budget up front,
+    # independent of where the real replay actually stopped), so this is
+    # pure post-hoc observation of the same tick stream, not a new fetch.
+    cf_recovered_to_be: Optional[bool] = None
+    cf_ticks_to_recover: Optional[int] = None
+    cf_min_profit_after_exit: Optional[float] = None
+    # For trades that DO recover (above): once profit first crosses back to
+    # >= $0, does it then reverse again (dip back below $0 a second time),
+    # or keep climbing? Tracks the running peak reached after that first
+    # recovery point, and whether/when profit falls back below $0 again.
+    cf_post_recovery_peak: Optional[float] = None
+    cf_reversed_after_recovery: Optional[bool] = None
+    cf_ticks_to_reversal_after_recovery: Optional[int] = None
+    if outcome == "profit_drop_after_be":
+        cf_min = profit
+        recovered = False
+        recovery_idx: Optional[int] = None
+        ticks_to_recover = None
+        post_recovery_peak: Optional[float] = None
+        reversed_after_recovery = False
+        ticks_to_reversal_after_recovery = None
+        for j in range(idx + 1, len(ticks)):
+            t2 = ticks[j]
+            price2 = float(t2["bid"]) if side == "buy" else float(t2["ask"])
+            profit2 = compute_profit(
+                side=side, entry_price=entry_price, price=price2, lot=lot,
+                contract_size=contract_size, needs_conversion=needs_conversion,
+            )
+            if profit2 < cf_min:
+                cf_min = profit2
+            if not recovered and profit2 >= 0.0:
+                recovered = True
+                ticks_to_recover = j - idx
+                recovery_idx = j
+                post_recovery_peak = profit2
+            elif recovered:
+                if profit2 > post_recovery_peak:
+                    post_recovery_peak = profit2
+                if not reversed_after_recovery and profit2 < 0.0:
+                    reversed_after_recovery = True
+                    ticks_to_reversal_after_recovery = j - recovery_idx
+        cf_recovered_to_be = recovered
+        cf_ticks_to_recover = ticks_to_recover
+        cf_min_profit_after_exit = cf_min
+        if recovered:
+            cf_post_recovery_peak = post_recovery_peak
+            cf_reversed_after_recovery = reversed_after_recovery
+            cf_ticks_to_reversal_after_recovery = ticks_to_reversal_after_recovery
+
+    return {
+        "outcome": outcome,
+        "profit": profit,
+        "ticks_used": idx + 1,
+        "entry_price": entry_price,
+        "cf_recovered_to_be": cf_recovered_to_be,
+        "cf_ticks_to_recover": cf_ticks_to_recover,
+        "cf_min_profit_after_exit": cf_min_profit_after_exit,
+        "cf_post_recovery_peak": cf_post_recovery_peak,
+        "cf_reversed_after_recovery": cf_reversed_after_recovery,
+        "cf_ticks_to_reversal_after_recovery": cf_ticks_to_reversal_after_recovery,
+        # Real running peak profit reached post-breakeven (None if BE never
+        # armed, i.e. outcome in {"profit_drop", "failed_to_reach_be"}) --
+        # lets `profit_drop_after_be` outcomes be split by how far above
+        # breakeven the trade actually got before reversing into the loss
+        # cap, rather than just knowing that it did.
+        "post_be_peak_profit": getattr(state, "best_profit", None),
+        # Tick index (0-based) at which breakeven first armed, None if it
+        # never did -- how long it actually took, for trades that got there.
+        "be_arm_ticks": be_arm_ticks,
+    }
+
+
+def simulate_full_lifecycle_unified_stop(
+    *,
+    exit_trade,
+    symbol: str,
+    side: str,
+    entry_time: datetime.datetime,
+    lot: float,
+    contract_size: float,
+    max_ticks: int,
+    needs_conversion: bool,
+    trail_gap_pct: float,
+    trail_gap_floor_money: float,
+) -> dict:
+    """Same pre-BE phase as `simulate_full_lifecycle` (the real
+    `LossExitManager.check_exit_on_tick` handles arming/soft-SL/timeout
+    unchanged), but replaces the POST-BE phase's real two-manager
+    sequence (`LossExitManager`'s -$1 cap, then -- only while profit is
+    still positive -- `ProfitExitManager`'s trail) with a single
+    combined stop: `trigger = peak - max(trail_gap_floor_money,
+    trail_gap_pct * peak)`, checked every tick regardless of sign.
+
+    This tests a specific hypothesis: the real trail can only fire while
+    `0 < profit < peak` (see `ProfitExitManager.check_exit_on_tick`) --
+    if a fast tick-to-tick move jumps straight from just-above-trigger to
+    already non-positive in one step (easy when the trigger window is a
+    few cents wide for a small peak), the real trail's check never runs
+    that tick, and only the separate loss-manager cap (waiting much
+    lower, at -post_be_loss_cap_money) can catch it. A unified check with
+    no positivity requirement would instead catch that same tick at
+    wherever it actually landed -- likely still a loss, but a much
+    smaller one than falling all the way to the cap.
+
+    Returns the same shape as `simulate_full_lifecycle`, with `outcome`
+    in {"failed_to_reach_be", "profit_drop"} (real pre-BE outcomes,
+    unchanged), "unified_stop" (the new combined post-BE exit), or
+    "exhausted".
+    """
+    ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
+
+    entry_tick = ticks[0]
+    entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
+    pos_type = 0 if side == "buy" else 1
+
+    state = PosState(anchor=0.0, prev_price=0.0)
+    loss_manager = exit_trade._loss_manager
+
+    profit = 0.0
+    outcome = None
+    idx = -1
+    be_arm_ticks: Optional[int] = None
+    peak: Optional[float] = None
+    for idx, t in enumerate(ticks[:max_ticks]):
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        profit = compute_profit(
+            side=side, entry_price=entry_price, price=price, lot=lot,
+            contract_size=contract_size, needs_conversion=needs_conversion,
+        )
+
+        if not getattr(state, "be_armed", False):
+            position = {
+                "symbol": symbol,
+                "type": pos_type,
+                "ticket": idx,
+                "price_open": entry_price,
+                "volume": lot,
+                "profit": profit,
+            }
+            action = loss_manager.check_exit_on_tick(position, to_tick_dict(t), state)
+            if action:
+                outcome = action.reason
+                break
+            if getattr(state, "be_armed", False):
+                be_arm_ticks = idx
+                peak = profit
+            continue
+
+        if peak is None or profit > peak:
+            peak = profit
+        gap = max(trail_gap_floor_money, trail_gap_pct * peak)
+        trigger = peak - gap
+        if profit <= trigger:
+            outcome = "unified_stop"
+            break
+
     if outcome is None:
         outcome = "exhausted"
 
@@ -751,7 +1039,10 @@ def simulate_full_lifecycle(
         "profit": profit,
         "ticks_used": idx + 1,
         "entry_price": entry_price,
+        "post_be_peak_profit": peak,
+        "be_arm_ticks": be_arm_ticks,
     }
+
 
 
 def simulate_full_lifecycle_cap_sweep(
@@ -980,10 +1271,21 @@ def run(
     full_lifecycle_max_ticks: int = 4000,
     sweep_post_be_cap: bool = False,
     sweep_pre_be_threshold: bool = False,
+    config: Any = Config,
+    invert_signal: bool = False,
+    do_measure_entry_excursion: bool = False,
+    entry_excursion_max_ticks: int = 4000,
+    trail_gap_pct: Optional[float] = None,
+    trail_gap_floor_money: Optional[float] = None,
+    post_be_loss_cap: Optional[float] = None,
+    unified_post_be_stop: bool = False,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
         sys.exit(1)
+
+    if invert_signal:
+        print(f"[{symbol}] --invert-signal is ON: trading the OPPOSITE of every generated signal.")
 
     if disable_timeout:
         max_ticks = max(max_ticks, counterfactual_max_ticks)
@@ -1030,8 +1332,25 @@ def run(
     m5_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_confirm]) for c in m5_candles]
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
 
-    strategy = strategy_factory(config=Config, use_multi=True)
-    exit_config = ExitTradeConfig(be_arming_ticks=0) if disable_timeout else None
+    strategy = strategy_factory(config=config, use_multi=True, symbol=symbol)
+    exit_overrides: dict[str, Any] = {}
+    if disable_timeout:
+        exit_overrides["be_arming_ticks"] = 0
+    if trail_gap_pct is not None:
+        exit_overrides["trail_gap_pct"] = trail_gap_pct
+    if trail_gap_floor_money is not None:
+        exit_overrides["trail_gap_floor_money"] = trail_gap_floor_money
+    if post_be_loss_cap is not None:
+        exit_overrides["post_be_loss_cap_money"] = post_be_loss_cap
+    exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
+    resolved_trail_gap_pct = (
+        trail_gap_pct if trail_gap_pct is not None
+        else float(getattr(Config, "EXIT_TRAIL_GAP_PCT", 0.6) or 0.6)
+    )
+    resolved_trail_gap_floor_money = (
+        trail_gap_floor_money if trail_gap_floor_money is not None
+        else float(getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0)
+    )
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
     cap_sweep_trades: list[tuple[str, Any]] = []
@@ -1069,6 +1388,8 @@ def run(
                 final_signal = (signal.get("final_signal") or "hold").lower()
                 if final_signal not in ("buy", "sell"):
                     continue
+                if invert_signal:
+                    final_signal = "sell" if final_signal == "buy" else "buy"
 
                 if full_lifecycle and sweep_post_be_cap:
                     sim = simulate_full_lifecycle_cap_sweep(
@@ -1092,6 +1413,19 @@ def run(
                         max_ticks=max_ticks,
                         needs_conversion=needs_conversion,
                     )
+                elif unified_post_be_stop:
+                    sim = simulate_full_lifecycle_unified_stop(
+                        exit_trade=exit_trade,
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                        trail_gap_pct=resolved_trail_gap_pct,
+                        trail_gap_floor_money=resolved_trail_gap_floor_money,
+                    )
                 elif full_lifecycle:
                     sim = simulate_full_lifecycle(
                         exit_trade=exit_trade,
@@ -1101,6 +1435,16 @@ def run(
                         lot=lot,
                         contract_size=contract_size,
                         max_ticks=full_lifecycle_max_ticks,
+                        needs_conversion=needs_conversion,
+                    )
+                elif do_measure_entry_excursion:
+                    sim = measure_entry_excursion(
+                        symbol=symbol,
+                        side=final_signal,
+                        entry_time=closed_by,
+                        lot=lot,
+                        contract_size=contract_size,
+                        max_ticks=entry_excursion_max_ticks,
                         needs_conversion=needs_conversion,
                     )
                 else:
@@ -1142,9 +1486,15 @@ def run(
     elif sweep_pre_be_threshold:
         write_pre_be_threshold_sweep_csv(results, symbol)
         summarize_pre_be_threshold_sweep(results, symbol)
+    elif unified_post_be_stop:
+        write_full_lifecycle_csv(results, symbol)
+        summarize_full_lifecycle(results, symbol)
     elif full_lifecycle:
         write_full_lifecycle_csv(results, symbol)
         summarize_full_lifecycle(results, symbol)
+    elif do_measure_entry_excursion:
+        write_entry_excursion_csv(results, symbol)
+        summarize_entry_excursion(results, symbol)
     else:
         write_results_csv(results, symbol)
         summarize(results, symbol)
@@ -1323,7 +1673,9 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "outcome", "profit", "ticks_used", "entry_price",
+        "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
+        "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
+        "cf_post_recovery_peak", "cf_reversed_after_recovery", "cf_ticks_to_reversal_after_recovery",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1360,6 +1712,131 @@ def summarize_full_lifecycle(results: list[dict], symbol: str) -> None:
             f"  {outcome:28s}: {len(rows):4d} ({pct:5.1f}%)  "
             f"avg_profit=${avg_profit:+.2f}  total=${sub_total:+.2f}  avg_ticks={avg_ticks:.1f}"
         )
+
+    cf_rows = [r for r in results if r.get("cf_recovered_to_be") is not None]
+    if cf_rows:
+        recovered_rows = [r for r in cf_rows if r["cf_recovered_to_be"]]
+        never_rows = [r for r in cf_rows if not r["cf_recovered_to_be"]]
+        recover_ticks = [r["cf_ticks_to_recover"] for r in recovered_rows if r.get("cf_ticks_to_recover") is not None]
+        avg_recover_ticks = sum(recover_ticks) / len(recover_ticks) if recover_ticks else 0.0
+        avg_min_after = sum(r["cf_min_profit_after_exit"] for r in cf_rows) / len(cf_rows)
+        avg_min_after_never = sum(r["cf_min_profit_after_exit"] for r in never_rows) / len(never_rows) if never_rows else 0.0
+        print(
+            f"\nOf {len(cf_rows)} profit_drop_after_be trades, if the -$1 cap hadn't fired and price were just watched afterward: "
+            f"{len(recovered_rows)} ({len(recovered_rows) / len(cf_rows) * 100.0:.1f}%) would have recovered to breakeven or better "
+            f"(avg {avg_recover_ticks:.1f} ticks to do so); {len(never_rows)} ({len(never_rows) / len(cf_rows) * 100.0:.1f}%) never did "
+            f"within the observed window. Avg worst point reached after the cap point: ${avg_min_after:.2f} overall, ${avg_min_after_never:.2f} among those that never recovered."
+        )
+
+        reversal_rows = [r for r in recovered_rows if r.get("cf_reversed_after_recovery") is not None]
+        if reversal_rows:
+            reversed_rows = [r for r in reversal_rows if r["cf_reversed_after_recovery"]]
+            held_rows = [r for r in reversal_rows if not r["cf_reversed_after_recovery"]]
+            avg_peak_reversed = sum(r["cf_post_recovery_peak"] for r in reversed_rows) / len(reversed_rows) if reversed_rows else 0.0
+            avg_peak_held = sum(r["cf_post_recovery_peak"] for r in held_rows) / len(held_rows) if held_rows else 0.0
+            print(
+                f"Of {len(reversal_rows)} trades that recovered to breakeven, {len(reversed_rows)} ({len(reversed_rows) / len(reversal_rows) * 100.0:.1f}%) "
+                f"reversed back below $0 again at some point (avg peak reached before that second reversal: ${avg_peak_reversed:.2f}); "
+                f"{len(held_rows)} ({len(held_rows) / len(reversal_rows) * 100.0:.1f}%) never went negative again after recovering "
+                f"(avg peak reached: ${avg_peak_held:.2f})."
+            )
+
+    arm_ticks = [r["be_arm_ticks"] for r in results if r.get("be_arm_ticks") is not None]
+    if arm_ticks:
+        avg_arm = sum(arm_ticks) / len(arm_ticks)
+        sorted_arm = sorted(arm_ticks)
+        median_arm = sorted_arm[len(sorted_arm) // 2]
+        print(f"\nOf {len(arm_ticks)} trades that reached breakeven, avg ticks to arm: {avg_arm:.1f}  median: {median_arm}")
+
+    reached_be_rows = [r for r in results if r.get("post_be_peak_profit") is not None]
+    if reached_be_rows:
+        # Trail trigger = peak - max(floor, pct*peak); since that max() is
+        # always >= floor, trigger > 0 (trail structurally able to fire)
+        # iff peak > floor -- NOT wherever the floor/pct branches cross
+        # (that crossover, floor/pct, is a different, unrelated number).
+        floor = float(getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0)
+        print(f"\nOf {len(reached_be_rows)} trades that reached breakeven, split by real post-BE peak profit reached before final outcome (trail floor=${floor:.2f}):")
+        buckets = [
+            (f"peak <= $1 (barely above BE)", lambda p: p <= 1.0),
+            (f"$1 < peak <= ${floor:.2f} (trail structurally inactive: trigger <= 0)", lambda p: 1.0 < p <= floor),
+            (f"peak > ${floor:.2f} (trail structurally active: trigger > 0)", lambda p: p > floor),
+        ]
+        for label, pred in buckets:
+            bucket_rows = [r for r in reached_be_rows if pred(r["post_be_peak_profit"])]
+            if not bucket_rows:
+                continue
+            by_outcome_in_bucket: dict[str, int] = {}
+            for r in bucket_rows:
+                by_outcome_in_bucket[r["outcome"]] = by_outcome_in_bucket.get(r["outcome"], 0) + 1
+            outcome_str = ", ".join(f"{o}={c}" for o, c in sorted(by_outcome_in_bucket.items(), key=lambda kv: -kv[1]))
+            print(f"  {label}: {len(bucket_rows)} ({outcome_str})")
+
+
+def write_entry_excursion_csv(results: list[dict], symbol: str) -> None:
+    if not results:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{symbol}_entry_excursion_{run_stamp}.csv"
+    fieldnames = [
+        "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
+        "entry_price", "entry_peak_profit", "entry_ticks_to_peak",
+        "entry_max_drawdown_from_peak", "entry_final_profit", "entry_ticks_observed",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"Per-trade log: {path}")
+
+
+def summarize_entry_excursion(results: list[dict], symbol: str) -> None:
+    """Print aggregate stats for `--measure-entry-excursion`: does the
+    trade actually progress in its own favor after entry, with no exit
+    rule of any kind applied, over the real continuous tick stream --
+    the direct answer to "does price move in the signaled direction, and
+    does that hold up" that `--quick-check`'s fixed-horizon bar snapshots
+    can only approximate.
+    """
+    rows = [r for r in results if r.get("entry_peak_profit") is not None]
+    total = len(results)
+    if total == 0:
+        print(f"No buy/sell signals found for {symbol} in this window.")
+        return
+    if not rows:
+        print(f"No ticks available for any of {total} signals for {symbol} in this window.")
+        return
+
+    peaks = [r["entry_peak_profit"] for r in rows]
+    ticks_to_peak = [r["entry_ticks_to_peak"] for r in rows]
+    drawdowns = [r["entry_max_drawdown_from_peak"] for r in rows]
+    finals = [r["entry_final_profit"] for r in rows]
+
+    n = len(rows)
+    ever_favorable = sum(1 for p in peaks if p > 0)
+    still_favorable_at_end = sum(1 for f in finals if f > 0)
+    avg_peak = sum(peaks) / n
+    avg_ticks_to_peak = sum(ticks_to_peak) / n
+    avg_drawdown = sum(drawdowns) / n
+    avg_final = sum(finals) / n
+    # Of trades that did reach a positive peak, how much of that peak
+    # survived to the final observed tick, on average -- 100% would mean
+    # every trade held its own high-water mark; 0% would mean every trade
+    # gave the whole thing back.
+    favorable_rows = [(p, f) for p, f in zip(peaks, finals) if p > 0]
+    avg_retained_pct = (
+        sum(max(f, 0.0) / p for p, f in favorable_rows) / len(favorable_rows) * 100.0
+        if favorable_rows else 0.0
+    )
+
+    print(f"\n=== Entry excursion (no exit rule, real ticks from entry): {symbol} ===")
+    print(f"Total signals with tick data: {n} / {total}")
+    print(f"Ever reached a favorable peak (peak > 0): {ever_favorable} ({ever_favorable / n * 100.0:.1f}%)")
+    print(f"Still favorable at final observed tick: {still_favorable_at_end} ({still_favorable_at_end / n * 100.0:.1f}%)")
+    print(f"Avg peak profit: ${avg_peak:+.2f}   avg ticks to peak: {avg_ticks_to_peak:.1f}")
+    print(f"Avg max drawdown from running peak: ${avg_drawdown:.2f}")
+    print(f"Avg final (still-open, mark-to-market) profit: ${avg_final:+.2f}")
+    print(f"Of trades that ever went favorable, avg % of peak still held at final tick: {avg_retained_pct:.1f}%")
 
 
 def _cap_sweep_labels() -> list[str]:
@@ -1450,6 +1927,9 @@ def summarize_pre_be_threshold_sweep(results: list[dict], symbol: str) -> None:
 def main() -> None:
     args = parse_args()
     symbol = args.symbol or getattr(Config, "SYMBOLS", ["EURUSD"])[0]
+    config = Config
+    if args.mtf_entry_indicator is not None:
+        config = type("ConfigOverride", (Config,), {"MTF_ENTRY_INDICATOR": args.mtf_entry_indicator})
     run(
         symbol,
         args.weeks,
@@ -1466,6 +1946,14 @@ def main() -> None:
         args.full_lifecycle_max_ticks,
         args.sweep_post_be_cap,
         args.sweep_pre_be_threshold,
+        config=config,
+        invert_signal=args.invert_signal,
+        do_measure_entry_excursion=args.measure_entry_excursion,
+        entry_excursion_max_ticks=args.entry_excursion_max_ticks,
+        trail_gap_pct=args.trail_gap_pct,
+        trail_gap_floor_money=args.trail_gap_floor_money,
+        post_be_loss_cap=args.post_be_loss_cap,
+        unified_post_be_stop=args.unified_post_be_stop,
     )
 
 

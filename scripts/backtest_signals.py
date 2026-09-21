@@ -18,11 +18,26 @@ stdout. The signal generator's own per-candle logging is suppressed
 during the replay so it doesn't drown out the summary.
 
 `--mtf` replays the multi-timeframe strategy (SMA/M15 bias, RSI/M5
-confirm, MACD/M1 entry) instead of the single-timeframe path, fetching
-synchronized M1/M5/M15 history and feeding each layer only the higher-
-timeframe candles already closed as of each M1 decision point. This is
-independent of `Config.USE_MULTI_TIMEFRAME_SIGNALS`, which stays off for
-live trading regardless of this flag.
+confirm, `Config.MTF_ENTRY_INDICATOR`/M1 entry, default "sma") instead
+of the single-timeframe path, fetching synchronized M1/M5/M15 history
+and feeding each layer only the higher-timeframe candles already closed
+as of each M1 decision point. `Config.USE_MULTI_TIMEFRAME_SIGNALS` is
+live (`True`) as of PR #46 -- this flag exists to let this exact MTF
+path be replayed/ablated in a backtest independent of that setting, not
+because MTF itself is off in production.
+
+`--mtf-entry-indicator {macd,sma,rsi}` (requires `--mtf`) swaps the M1
+entry-trigger layer's indicator, leaving the M15 bias (SMA) and M5
+confirm (RSI) layers untouched -- `strategy_factory` already supports
+this: passing `indicators` explicitly bypasses `Config.MTF_ENTRY_INDICATOR`
+for the entry layer without touching the independently-built
+bias/confirm layers. Default (omitted) uses whatever `Config.MTF_ENTRY_INDICATOR`
+is set to. See docs/test-results/mtf-pullback-gate-direction-fix.md for
+why that's "sma", not the originally-hardcoded "macd": after fixing a
+bullish-only asymmetry in `MultiTimeframeStrongSignalStrategy._pullback_completed`,
+MACD's win rate as the M1 trigger swung 33.6%/43.7% across two
+independent windows (not reproducible), while SMA reproduced cleanly
+(39.5%/39.6%, both above breakeven).
 
 `--quick-check` replaces the fixed target/stop win-loss simulation with a
 much shorter, assumption-free read on entry timing: for each signal, look
@@ -122,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mtf",
         action="store_true",
-        help="Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm, MACD/M1 entry) instead of the single-timeframe path",
+        help="Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm, Config.MTF_ENTRY_INDICATOR/M1 entry) instead of the single-timeframe path",
     )
     parser.add_argument(
         "--quick-check",
@@ -134,6 +149,12 @@ def parse_args() -> argparse.Namespace:
         "--indicators",
         default=None,
         help="Comma-separated single-timeframe indicator ablation (e.g. 'macd', 'sma'); overrides the default macd+sma+rsi vote. Not compatible with --mtf.",
+    )
+    parser.add_argument(
+        "--mtf-entry-indicator",
+        choices=["macd", "sma", "rsi"],
+        default=None,
+        help="Override the MTF M1 entry-layer indicator (default: whatever Config.MTF_ENTRY_INDICATOR is set to, currently sma). Requires --mtf; leaves the M15 bias/M5 confirm layers unchanged.",
     )
     parser.add_argument("--mtf-score-threshold", type=float, default=None, help="Override Config.MTF_SCORE_THRESHOLD for --mtf runs")
     parser.add_argument("--mtf-adx-min-strength", type=float, default=None, help="Override Config.MTF_ADX_MIN_STRENGTH for --mtf runs")
@@ -468,9 +489,10 @@ def run_mtf_backtest(
     spread_pips: float = 0.0,
     start_pos: int = 1,
     ntick_n: Optional[int] = None,
+    entry_indicator_name: Optional[str] = None,
 ) -> None:
     """Replay the multi-timeframe strategy (SMA/M15 bias, RSI/M5 confirm,
-    MACD/M1 entry) and print a summary.
+    `Config.MTF_ENTRY_INDICATOR`/M1 entry) and print a summary.
 
     Fetches M1/M5/M15 history up front, then for each M1 candle passes each
     higher-timeframe layer only the candles already closed by that M1
@@ -486,6 +508,12 @@ def run_mtf_backtest(
     `NTickConfirmedSignalStrategy` (reproducing the live wrapper order
     exactly) and confirms each pending signal against real historical
     ticks. Not compatible with `quick_check`.
+
+    `entry_indicator_name`, when given, overrides the M1 entry layer's
+    indicator (default: `Config.MTF_ENTRY_INDICATOR`) by passing an
+    explicit `indicators` dict to `strategy_factory` -- the bias (SMA/M15)
+    and confirm (RSI/M5) layers are built independently of that dict, so
+    they're unaffected.
     """
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -515,8 +543,14 @@ def run_mtf_backtest(
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
     entry_seconds = TF_SECONDS[tf_entry]
 
+    entry_indicators = (
+        {entry_indicator_name: build_indicator(entry_indicator_name, config)}
+        if entry_indicator_name
+        else None
+    )
     strategy = strategy_factory(
         config=config,
+        indicators=entry_indicators,
         use_multi=True,
         use_n_tick=bool(ntick_n),
         n_ticks=ntick_n or 0,
@@ -588,8 +622,10 @@ def run_mtf_backtest(
         logging.disable(logging.NOTSET)
 
     print(f"Window: start_pos={start_pos}, spread_pips={spread_pips}")
-    file_tag = f"{symbol}_mtf" + (f"_{label}" if label else "")
-    display_name = f"{symbol} (multi-timeframe" + (f", {label})" if label else ")")
+    entry_tag = f"entry-{entry_indicator_name}" if entry_indicator_name else None
+    full_label = "_".join(p for p in (entry_tag, label) if p) or None
+    file_tag = f"{symbol}_mtf" + (f"_{full_label}" if full_label else "")
+    display_name = f"{symbol} (multi-timeframe" + (f", {full_label})" if full_label else ")")
     if quick_check:
         log_path = write_quick_results_csv(results, file_tag)
         summarize_quick(results, display_name, horizon_bars, log_path)
@@ -751,6 +787,10 @@ def main() -> None:
         print("--indicators is a single-timeframe ablation flag, not compatible with --mtf. Aborting.")
         sys.exit(1)
 
+    if args.mtf_entry_indicator and not args.mtf:
+        print("--mtf-entry-indicator requires --mtf. Aborting.")
+        sys.exit(1)
+
     if args.indicators and args.ml_entry:
         print("--indicators and --ml-entry are mutually exclusive (both override the entry layer). Aborting.")
         sys.exit(1)
@@ -786,6 +826,7 @@ def main() -> None:
             config=config, label="_".join(label_parts) or None,
             spread_pips=args.spread_pips, start_pos=args.start_pos,
             ntick_n=args.ntick,
+            entry_indicator_name=args.mtf_entry_indicator,
         )
     else:
         indicator_names = (

@@ -151,9 +151,14 @@ def strategy_factory(
         if indicators is None:
             if use_multi:
                 # Multi-timeframe path: bias (SMA/M15) and confirm (RSI/M5)
-                # layers below already own those indicators -- keep the entry
-                # (M1) layer MACD-only so timeframes don't duplicate signals.
-                indicators = {"macd": build_indicator("macd", config)}
+                # layers below already own those indicators -- the entry
+                # (M1) layer uses a single indicator, `Config.MTF_ENTRY_INDICATOR`,
+                # so timeframes don't duplicate signals. See that field's
+                # docstring for why it's "sma", not the originally-hardcoded
+                # "macd" -- MACD's post-gate-fix win rate wasn't reproducible
+                # across independent windows, SMA's was.
+                entry_name = getattr(config, "MTF_ENTRY_INDICATOR", "sma")
+                indicators = {entry_name: build_indicator(entry_name, config)}
             else:
                 indicators = {
                     name: build_indicator(name, config) for name in ("macd", "sma", "rsi")
