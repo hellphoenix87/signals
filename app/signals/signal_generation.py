@@ -8,6 +8,7 @@ from app.utils.configure_logging import logger as default_logger
 from app.signals.indicators.macd import calculate_macd as default_macd_fn
 from app.signals.indicators.sma_crossover import generate_sma_signal
 from app.signals.indicators.rsi import calculate_rsi
+from app.signals.indicators.bollinger import generate_bollinger_signal
 
 from app.signals.strategies.strong_signal_strategy import StrongSignalStrategy
 from app.signals.strategies.multi_timeframe import MultiTimeframeStrongSignalStrategy
@@ -42,6 +43,12 @@ def build_indicator(name: str, config: Any) -> Callable[[List[dict]], Any]:
         return functools.partial(
             calculate_rsi,
             period=int(getattr(config, "ENTRY_RSI_PERIOD", 7)),
+        )
+    if name == "bollinger":
+        return functools.partial(
+            generate_bollinger_signal,
+            window=int(getattr(config, "ENTRY_BOLLINGER_WINDOW", 20)),
+            std_mult=float(getattr(config, "ENTRY_BOLLINGER_STD_MULT", 2.0)),
         )
     raise ValueError(f"Unknown indicator: {name!r}")
 

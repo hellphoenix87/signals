@@ -267,7 +267,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sweep-pre-be-threshold", action="store_true", help="Instead of using Config's single pre-breakeven soft-SL threshold, replay PRE_BE_THRESHOLD_CANDIDATES (each a real LossExitManager with a different max_loss_money, everything else at Config's real values) against the same tick stream in one pass -- Thread 2's test of whether a threshold conditional on M5-confirm state beats the flat $5 rule. Pre-BE phase only (mutually exclusive with --full-lifecycle); metadata capture (confidence/adx/m15_bias/m5_confirm/m1_entry) still included so results can be split by M5-confirm afterward.")
     parser.add_argument(
         "--mtf-entry-indicator",
-        choices=["macd", "sma", "rsi"],
+        choices=["macd", "sma", "rsi", "bollinger"],
         default=None,
         help="Override Config.MTF_ENTRY_INDICATOR for this run only (default: whatever Config is actually set to) -- lets the real full-lifecycle P&L be compared entry-indicator-by-entry-indicator under the identical exit-strategy config, isolating that one variable.",
     )
