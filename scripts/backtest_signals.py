@@ -26,7 +26,7 @@ live (`True`) as of PR #46 -- this flag exists to let this exact MTF
 path be replayed/ablated in a backtest independent of that setting, not
 because MTF itself is off in production.
 
-`--mtf-entry-indicator {macd,sma,rsi}` (requires `--mtf`) swaps the M1
+`--mtf-entry-indicator {macd,sma,rsi,bollinger,stochastic}` (requires `--mtf`) swaps the M1
 entry-trigger layer's indicator, leaving the M15 bias (SMA) and M5
 confirm (RSI) layers untouched -- `strategy_factory` already supports
 this: passing `indicators` explicitly bypasses `Config.MTF_ENTRY_INDICATOR`
@@ -152,7 +152,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mtf-entry-indicator",
-        choices=["macd", "sma", "rsi"],
+        choices=["macd", "sma", "rsi", "bollinger", "stochastic"],
         default=None,
         help="Override the MTF M1 entry-layer indicator (default: whatever Config.MTF_ENTRY_INDICATOR is set to, currently sma). Requires --mtf; leaves the M15 bias/M5 confirm layers unchanged.",
     )

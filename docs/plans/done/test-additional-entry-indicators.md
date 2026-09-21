@@ -83,6 +83,17 @@ This plan builds two new candidate M1 entry indicators (Bollinger Bands, Stochas
 
 None — indicator choice (Bollinger Bands, Stochastic Oscillator), scope (two indicators, not three), and the two-window gating rule were decided during planning based on the PR #62 investigation's findings.
 
+## Outcome
+
+Both candidates were built, wired, and put through the Phase 3/4 two-window signal-quality proxy — and both were **ruled out at that stage**:
+
+- **Bollinger Bands**: 0 MTF-gated signals in both windows ([bollinger-entry-ablation.md](../../test-results/bollinger-entry-ablation.md)).
+- **Stochastic Oscillator**: 2 and 8 MTF-gated signals across the two windows ([stochastic-entry-ablation.md](../../test-results/stochastic-entry-ablation.md)) — technically nonzero, but far below the plan's 10-signals-per-window bar and too small a sample to trust.
+
+Both are same-bar contrarian/mean-reversion triggers, the same structural shape already shown to be incompatible with the MTF pullback gate for RSI (`mtf-pullback-gate-direction-fix.md`). Subphase 3.2/4.2 (entry-excursion trace) and Phase 5 (full-lifecycle P&L) were skipped per the plan's own gating rule, since there were no signals to trace or trade.
+
+**Net result for MACD/SMA's apparent entry-quality edge**: outcome (b) from the Goal section — the edge looks specific to MACD/SMA (and structurally, to non-contrarian trigger shapes generally), not shared by other indicator families, at least not by mean-reversion ones under today's pullback gate. Trend/crossover-style indicators (Donchian, Parabolic SAR) remain untested and are a more promising direction for a follow-up plan than further contrarian/oscillator indicators.
+
 ## QA
 
 (Not used — MVP/POC mode, no `qa` agent for this plan.)
