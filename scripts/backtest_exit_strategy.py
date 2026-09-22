@@ -215,6 +215,66 @@ STAIRCASE_TIER_CANDIDATES: list[float] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0
 # rule. 5.0 is today's live value, kept for direct comparison.
 PRE_BE_THRESHOLD_CANDIDATES: list[float] = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
 
+# --atr-normalize: bounds on the per-trade threshold scale factor. Fixed in
+# advance (see docs/plans/in-progress/volatility-normalized-thresholds.md) so
+# they can't be quietly tuned against results; an ATR far outside the baseline
+# shouldn't drive the soft SL to ~0 or to an effectively disabled value.
+ATR_SCALE_MIN: float = 0.5
+ATR_SCALE_MAX: float = 3.0
+
+# Thresholds scaled by --atr-normalize. All three are money values on
+# ExitTradeConfig, so they scale with the same factor.
+ATR_SCALED_FIELDS: tuple[str, ...] = (
+    "max_loss_money",
+    "post_be_loss_cap_money",
+    "trail_gap_floor_money",
+)
+
+
+def _atr_scale_factor(
+    atr_value: Optional[float], pip_size: float, baseline_pips: float
+) -> float:
+    """Per-trade threshold scale factor from the entry ATR.
+
+    `clamp(atr_pips / baseline_pips, ATR_SCALE_MIN, ATR_SCALE_MAX)`; returns
+    `1.0` (thresholds unchanged) when ATR or the baseline is unusable.
+    """
+    if not atr_value or not pip_size or baseline_pips <= 0:
+        return 1.0
+    atr_pips = float(atr_value) / float(pip_size)
+    if atr_pips <= 0:
+        return 1.0
+    return max(ATR_SCALE_MIN, min(ATR_SCALE_MAX, atr_pips / float(baseline_pips)))
+
+
+def _scaled_exit_trade(
+    scale: float,
+    *,
+    base_overrides: dict,
+    broker,
+    risk_manager,
+    cache: dict,
+):
+    """A real `ExitTrade` whose money thresholds are multiplied by `scale`.
+
+    Memoized on the rounded scale factor -- there are thousands of trades per
+    window but only a couple of hundred distinct rounded scales.
+    """
+    key = round(float(scale), 2)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    overrides = dict(base_overrides)
+    defaults = ExitTradeConfig()
+    for field in ATR_SCALED_FIELDS:
+        base = overrides.get(field, getattr(defaults, field))
+        overrides[field] = float(base) * key
+    built = create_exit_trade(
+        broker=broker, risk_manager=risk_manager, config=ExitTradeConfig(**overrides)
+    )
+    cache[key] = built
+    return built
+
 
 def to_tick_dict(t) -> dict:
     """`mt5.copy_ticks_from` returns a numpy structured array -- each
@@ -354,6 +414,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override Config.EXIT_POST_BE_LOSS_CAP_MONEY for this run's real ExitTrade (default: whatever Config is set to, currently $1.0). Pair with a tight --trail-gap-pct to test 'floor the post-BE worst case at breakeven instead of a real loss' -- e.g. --post-be-loss-cap 0.0 --trail-gap-pct 0.10 --trail-gap-floor-money 0.0.",
+    )
+    parser.add_argument(
+        "--pre-be-loss-threshold",
+        type=float,
+        default=None,
+        help="Override Config.EXIT_MAX_LOSS_MONEY (the PRE-breakeven soft-SL threshold, currently $5.0) for this run's real ExitTrade. Unlike --sweep-pre-be-threshold (pre-BE phase only), this works in --full-lifecycle mode, so the knock-on effect of surviving longer pre-BE -- more trades reaching BE, then running the real cap/trail -- is included in the reported P&L.",
+    )
+    parser.add_argument(
+        "--atr-normalize",
+        action="store_true",
+        help="Scale the money thresholds (max_loss_money, post_be_loss_cap_money, trail_gap_floor_money) per trade by that trade's entry ATR, instead of holding them fixed in dollars: scale = clamp(entry_atr_pips / --atr-baseline-pips, 0.5, 3.0). Keeps risk constant in volatility units rather than dollars -- requires predicting nothing, unlike a regime filter. Only with --full-lifecycle.",
+    )
+    parser.add_argument(
+        "--atr-baseline-pips",
+        type=float,
+        default=1.0,
+        help="Only with --atr-normalize: the ATR (in pips) at which thresholds equal their configured dollar values (default: 1.0, roughly the EURUSD M1 ATR of the recent windows the current values were tuned on).",
     )
     parser.add_argument(
         "--chain-on-cap",
@@ -2020,6 +2097,9 @@ def run(
     trail_gap_pct: Optional[float] = None,
     trail_gap_floor_money: Optional[float] = None,
     post_be_loss_cap: Optional[float] = None,
+    pre_be_loss_threshold: Optional[float] = None,
+    atr_normalize: bool = False,
+    atr_baseline_pips: float = 1.0,
     unified_post_be_stop: bool = False,
     chain_on_cap: bool = False,
     chain_max_legs: int = 20,
@@ -2050,7 +2130,8 @@ def run(
     risk_manager = create_risk_manager(broker)
     contract_size = broker.get_lot_value(symbol)
     sl_pips = float(getattr(Config, "DEFAULT_SL_PIPS", 5.0) or 5.0)
-    sl_price_distance = broker.get_pip_size(symbol) * sl_pips
+    pip_size = broker.get_pip_size(symbol)
+    sl_price_distance = pip_size * sl_pips
     fetch_ticks = max_ticks
     if run_counterfactual:
         fetch_ticks = max(fetch_ticks, counterfactual_max_ticks)
@@ -2104,6 +2185,9 @@ def run(
         exit_overrides["trail_gap_floor_money"] = trail_gap_floor_money
     if post_be_loss_cap is not None:
         exit_overrides["post_be_loss_cap_money"] = post_be_loss_cap
+    if pre_be_loss_threshold is not None:
+        exit_overrides["max_loss_money"] = pre_be_loss_threshold
+    _scaled_exit_trade_cache: dict[float, Any] = {}
     exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
     resolved_trail_gap_pct = (
         trail_gap_pct if trail_gap_pct is not None
@@ -2172,6 +2256,26 @@ def run(
                 if invert_signal:
                     final_signal = "sell" if final_signal == "buy" else "buy"
 
+                # ATR at entry is needed BEFORE the sim when --atr-normalize is on
+                # (it sizes that trade's thresholds); it is also logged as metadata
+                # for every run, so compute it once here either way.
+                atr_value = calculate_atr(
+                    m1_candles[: i + 1],
+                    period=int(getattr(config, "ENTRY_ATR_PERIOD", 14) or 14),
+                    logger=_metadata_logger,
+                )
+                trade_exit_trade = exit_trade
+                atr_scale = None
+                if atr_normalize and full_lifecycle:
+                    atr_scale = _atr_scale_factor(atr_value, pip_size, atr_baseline_pips)
+                    trade_exit_trade = _scaled_exit_trade(
+                        atr_scale,
+                        base_overrides=exit_overrides,
+                        broker=broker,
+                        risk_manager=risk_manager,
+                        cache=_scaled_exit_trade_cache,
+                    )
+
                 if full_lifecycle and sweep_staircase_cap:
                     sim = simulate_full_lifecycle_staircase_cap_sweep(
                         exit_trades=cap_sweep_trades,
@@ -2234,7 +2338,7 @@ def run(
                     )
                 elif full_lifecycle and staircase_trail:
                     sim = simulate_full_lifecycle_staircase_trail(
-                        exit_trade=exit_trade,
+                        exit_trade=trade_exit_trade,
                         symbol=symbol,
                         side=final_signal,
                         entry_time=closed_by,
@@ -2273,7 +2377,7 @@ def run(
                     )
                 elif full_lifecycle:
                     sim = simulate_full_lifecycle(
-                        exit_trade=exit_trade,
+                        exit_trade=trade_exit_trade,
                         symbol=symbol,
                         side=final_signal,
                         entry_time=closed_by,
@@ -2320,10 +2424,6 @@ def run(
                     log=_metadata_logger,
                 )
                 macd_hist_value = hist[0] if hist else None
-                atr_value = calculate_atr(
-                    window, period=int(getattr(config, "ENTRY_ATR_PERIOD", 14) or 14),
-                    logger=_metadata_logger,
-                )
                 results.append(
                     {
                         "time": m1_candle.get("time"),
@@ -2339,6 +2439,7 @@ def run(
                         "rsi_value": rsi_value,
                         "macd_hist_value": macd_hist_value,
                         "atr_value": atr_value,
+                        "atr_scale": atr_scale,
                         **sim,
                     }
                 )
@@ -2388,7 +2489,7 @@ def write_results_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_exit_strategy_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
         "outcome", "profit", "ticks_used", "entry_price",
         "cf_outcome", "cf_profit", "cf_extra_ticks",
         "post_be_peak_profit", "post_be_ticks_to_peak", "post_be_max_drawdown_from_peak",
@@ -2554,7 +2655,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
         "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
         "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
         "cf_recovered_to_neg1", "cf_ticks_to_recover_neg1",
@@ -2663,7 +2764,7 @@ def write_chained_legs_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_chained_legs_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
         "outcome", "profit", "ticks_used", "entry_price", "num_legs", "leg_outcomes", "leg_profits", "leg_sides",
     ]
     with open(path, "w", newline="") as f:
@@ -2722,7 +2823,7 @@ def write_hedge_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_hedge_on_cap_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
         "outcome", "profit", "ticks_used", "entry_price", "hedge_opened", "leg_outcomes", "leg_profits", "leg_sides",
     ]
     with open(path, "w", newline="") as f:
@@ -2774,7 +2875,7 @@ def write_entry_excursion_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_entry_excursion_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
         "entry_price", "entry_peak_profit", "entry_ticks_to_peak",
         "entry_max_drawdown_from_peak", "entry_final_profit", "entry_ticks_observed",
     ]
@@ -2846,7 +2947,7 @@ def write_full_lifecycle_cap_sweep_csv(results: list[dict], symbol: str) -> None
     path = RESULTS_DIR / f"{symbol}_full_lifecycle_cap_sweep_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
     ] + [
         f"{label}_{suffix}" for label in _cap_sweep_labels() for suffix in ("outcome", "profit", "ticks")
     ]
@@ -2886,7 +2987,7 @@ def write_staircase_cap_sweep_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_staircase_cap_sweep_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
     ] + [
         f"{label}_{suffix}" for label in _cap_sweep_labels() for suffix in ("outcome", "profit", "ticks")
     ]
@@ -2930,7 +3031,7 @@ def write_staircase_sweep_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_staircase_tier_sweep_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
     ] + [
         f"{label}_{suffix}" for label in _staircase_sweep_labels() for suffix in ("outcome", "profit", "ticks")
     ]
@@ -2973,7 +3074,7 @@ def write_pre_be_threshold_sweep_csv(results: list[dict], symbol: str) -> None:
     path = RESULTS_DIR / f"{symbol}_pre_be_threshold_sweep_{run_stamp}.csv"
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
-        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value",
+        "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
     ] + [
         f"{label}_{suffix}" for label in _pre_be_sweep_labels() for suffix in ("outcome", "profit", "ticks")
     ]
@@ -3039,6 +3140,9 @@ def main() -> None:
         trail_gap_pct=args.trail_gap_pct,
         trail_gap_floor_money=args.trail_gap_floor_money,
         post_be_loss_cap=args.post_be_loss_cap,
+        pre_be_loss_threshold=args.pre_be_loss_threshold,
+        atr_normalize=args.atr_normalize,
+        atr_baseline_pips=args.atr_baseline_pips,
         unified_post_be_stop=args.unified_post_be_stop,
         chain_on_cap=args.chain_on_cap,
         chain_max_legs=args.chain_max_legs,
