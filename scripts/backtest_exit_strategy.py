@@ -422,6 +422,12 @@ def parse_args() -> argparse.Namespace:
         help="Override Config.EXIT_MAX_LOSS_MONEY (the PRE-breakeven soft-SL threshold, currently $5.0) for this run's real ExitTrade. Unlike --sweep-pre-be-threshold (pre-BE phase only), this works in --full-lifecycle mode, so the knock-on effect of surviving longer pre-BE -- more trades reaching BE, then running the real cap/trail -- is included in the reported P&L.",
     )
     parser.add_argument(
+        "--be-arming-ticks",
+        type=int,
+        default=None,
+        help="Override Config.EXIT_BE_ARMING_TICKS (default 90) for this run's real ExitTrade -- the number of ticks a position gets to reach breakeven before the LossExitManager closes it. 0 disables the timeout entirely. Works in --full-lifecycle mode (unlike --disable-timeout, which is a phase-based flag and is ignored there). Excursion data shows ~89%% of trades reach their unconstrained peak AFTER tick 90, so this tests whether the arming wall, not the stop distance, is what caps the pre-BE phase.",
+    )
+    parser.add_argument(
         "--atr-normalize",
         action="store_true",
         help="Scale the money thresholds (max_loss_money, post_be_loss_cap_money, trail_gap_floor_money) per trade by that trade's entry ATR, instead of holding them fixed in dollars: scale = clamp(entry_atr_pips / --atr-baseline-pips, 0.5, 3.0). Keeps risk constant in volatility units rather than dollars -- requires predicting nothing, unlike a regime filter. Only with --full-lifecycle.",
@@ -2098,6 +2104,7 @@ def run(
     trail_gap_floor_money: Optional[float] = None,
     post_be_loss_cap: Optional[float] = None,
     pre_be_loss_threshold: Optional[float] = None,
+    be_arming_ticks: Optional[int] = None,
     atr_normalize: bool = False,
     atr_baseline_pips: float = 1.0,
     unified_post_be_stop: bool = False,
@@ -2187,6 +2194,8 @@ def run(
         exit_overrides["post_be_loss_cap_money"] = post_be_loss_cap
     if pre_be_loss_threshold is not None:
         exit_overrides["max_loss_money"] = pre_be_loss_threshold
+    if be_arming_ticks is not None:
+        exit_overrides["be_arming_ticks"] = be_arming_ticks
     _scaled_exit_trade_cache: dict[float, Any] = {}
     exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
     resolved_trail_gap_pct = (
@@ -3141,6 +3150,7 @@ def main() -> None:
         trail_gap_floor_money=args.trail_gap_floor_money,
         post_be_loss_cap=args.post_be_loss_cap,
         pre_be_loss_threshold=args.pre_be_loss_threshold,
+        be_arming_ticks=args.be_arming_ticks,
         atr_normalize=args.atr_normalize,
         atr_baseline_pips=args.atr_baseline_pips,
         unified_post_be_stop=args.unified_post_be_stop,

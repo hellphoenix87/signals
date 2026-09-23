@@ -1,6 +1,6 @@
 # Volatility-normalized exit thresholds
 
-Status: in-progress
+Status: done
 Mode: MVP/POC (main session implements directly, no tests, single branch)
 
 ## Problem
@@ -75,13 +75,27 @@ see scratchpad `preregistration.md`):
 - If it passes, a second run checks the staircase trail stacked on top
   (`--staircase-trail --staircase-tier-width 2.0`), since that is already confirmed.
 
-## Phase 3: outcome
+## Phase 3: outcome -- COMPLETE
 
-- If Phase 2 passes: propose the `Config` change (ATR-scaled thresholds in the live
-  `LossExitManager`/`ProfitExitManager`) as a separate plan, with forward testing on
-  demo before it is trusted.
-- If Phase 2 fails: record the negative result in `docs/test-results/` and stop --
-  do not retune the baseline or clamp bounds to rescue it.
+**Phase 2 FAILED**: ATR-normalized thresholds won 2 of 12 windows, -$565 on total
+(bar was >=9 of 12 and positive). Cause: scaling all three thresholds together scaled
+the `$1` post-BE cap up to `$3`, costing -$914 on W8 -- more than the softer SL and
+wider trail floor gained (+$673). Per the plan, no retuning of the clamp bounds was
+attempted to rescue it.
+
+The tooling built here (`--pre-be-loss-threshold`, `--be-arming-ticks`, `--atr-normalize`)
+then found the session's best result by testing the *inverse* hypothesis -- tightening
+rather than widening:
+
+**`EXIT_BE_ARMING_TICKS` 90 -> 30 PASSES: 10 of 12 windows, +$2,571, +$0.066/trade.**
+
+Full write-up, including eight other failed ideas and the entry-signal findings:
+`docs/test-results/pre-be-phase-and-entry-signal-investigation.md`.
+
+**No `Config` change made.** Both surviving changes (the 30-tick wall and the `$2`
+staircase trail) are backtest-only evidence and need forward testing on the demo
+account before they are trusted -- the wide-cap result looked more convincing than
+either and turned out to be noise around a handful of tail trades.
 
 ## Notes
 
