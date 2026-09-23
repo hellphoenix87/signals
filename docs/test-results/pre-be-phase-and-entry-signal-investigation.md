@@ -4,11 +4,12 @@ Date: 2026-09-22/23
 
 **TL;DR**: MT5 "Max bars in chart" was raised, unlocking ~27 months of history (12 four-week
 windows instead of 3.5). Every test below fixed its rule, thresholds and pass criteria *in
-writing before the data was fetched*. Two changes passed: the **`$2` staircase trail**
-(12 windows) and a **30-tick breakeven arming wall** (10/12 windows, +$0.066/trade, the
-largest single improvement found so far). Eight other ideas failed, including every
-market-state/regime rule and every entry-indicator change. **No `Config` change was made
-in this plan** -- both survivors need forward testing on demo first.
+writing before the data was fetched*. Three changes passed: an **entry spread gate**
+(12/12 windows, **+$0.276/trade** -- by far the largest effect found), a **30-tick breakeven
+arming wall** (10/12, +$0.066), and the **`$2` staircase trail** (12 windows, +$0.02).
+Nine other ideas failed, including every market-state/regime rule and every entry-indicator
+change. **No `Config` change was made in this plan** -- all three survivors need forward
+testing on demo first.
 
 ## Setup
 
@@ -52,6 +53,56 @@ every trade that ever works.
 Both losses are the two lowest-ATR windows (W1 at 0.74, W10 at 0.96, and W10 is a -$6 tie);
 gains scale with volatility (+$672 at ATR 1.47, +$459 at 1.11). **Not** encoded as a
 volatility-conditional rule -- that is the shape of every rule that failed below.
+
+### 3. Entry spread gate (`--max-entry-spread-pips`) -- **PASS, 12/12**
+
+| | baseline | gate 1.5 pips | gate 1.0 pips |
+|---|---|---|---|
+| Windows won | -- | 11 of 12 | **12 of 12** |
+| Total, 12 windows | -$44,122 | -$31,905 (+$12,216) | **-$30,281 (+$13,841)** |
+| Per trade | -$1.022 | -$0.772 | **-$0.746 (+$0.276)** |
+
+Diagnosis first, then the fix. ~31% of pre-BE soft-SL hits fire on **tick 1**, and 92% of
+those sit in the daily rollover window (UTC hour 0), where EURUSD spread reaches 8-14 pips --
+**-$16 to -$28 at 0.2 lots against a $5 (2.5 pip) stop**. Raw ticks confirm price barely moves
+while the mark sits at -$27:
+
+```
+2026-02-11 00:04:02  bid=1.18879 ask=1.19020  spread=14.1p   mark=-$28.20
+2026-02-11 00:05:52  bid=1.18875 ask=1.19019  spread=14.4p   mark=-$28.80
+```
+
+These trades are stopped by **spread, not by price**: -$8.10 average vs -$5.36 for genuine
+stops, ~45% of all pre-BE stop losses from ~370 doomed-at-entry trades across 3 windows.
+Skip rate is 5-14% in volatile windows, under 1% in calm ones -- a specific population, not
+broad thinning. Both pass criteria were met (>=9/12 windows AND pooled per-trade improvement),
+so this is not the "trading less always lowers the total" effect that made Bollinger look good.
+
+**Caveat on magnitudes**: baselines were captured hours before the gated runs, and `--start-pos`
+counts bars back from *now*, so the two cover slightly different windows (~1.5% of trades; W1
+shows more trades *with* the filter than without, which is only possible via drift). The
+direction is consistent 12/12 and the effect is ~14x larger than the drift, but exact figures
+need a fresh-baseline rerun once the drift issue is fixed.
+
+## n-tick confirmation: three latent defects (fixed, all inert in production)
+
+`N_TICK_CONFIRMATION = 1` keeps the wrapper unapplied (the factory requires `n_ticks > 1`),
+so the feature **reads as enabled in config but never engages**. Inspecting it found:
+
+1. **Flat ticks counted as confirmation.** `min_pip_move` defaults to 0.0 and the factory never
+   passed it, so `movement >= 0` made a tick with no price change "favorable". Measured: 31.2%
+   of real EURUSD ticks leave the bid unchanged; 64.7% of ticks would pass as favorable for a
+   buy, about half on no movement. P(3 consecutive) was 26.7% instead of ~4%.
+2. **`LIQUIDITY_CHECK_AFTER_NTICK = True` promised a spread check that was never implemented.**
+   The pre-confirmation branch is skipped when the flag is True, and no post-confirmation check
+   existed -- so a signal could confirm straight into a 14-pip rollover spread.
+3. **The factory never passed `max_spread_points`**, so it defaulted to `None` and the check
+   could not fire even once implemented.
+
+Note the live spread gate that *does* exist -- `TradeExecutor._spread_ok`, wired into the entry
+path -- is disabled by `MAX_SPREAD_POINTS = 0` (fails open by design). So the bot currently has
+**no spread protection at all** while trading a session where spread reaches 14 pips daily.
+Test K's result is the backtest case for switching it on.
 
 ## What failed
 
