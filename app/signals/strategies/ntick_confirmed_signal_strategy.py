@@ -92,10 +92,21 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
             self._last_tick_price = self._pending_entry_price
 
         movement = price - self._last_tick_price
-        if self._pending_signal == "buy":
-            favorable = movement >= self.min_pip_move
-        elif self._pending_signal == "sell":
-            favorable = movement <= -self.min_pip_move
+        # A tick that does not move counts as NOT favorable. With the default
+        # min_pip_move of 0.0 a `>=` test made flat ticks confirm, and 31% of
+        # real EURUSD ticks leave the bid unchanged -- 64.7% of ticks would
+        # have passed as "favorable" for a buy, roughly half of them on no
+        # movement at all. Require genuine movement when no threshold is set.
+        if self.min_pip_move > 0:
+            if self._pending_signal == "buy":
+                favorable = movement >= self.min_pip_move
+            else:
+                favorable = movement <= -self.min_pip_move
+        else:
+            if self._pending_signal == "buy":
+                favorable = movement > 0
+            else:
+                favorable = movement < 0
 
         if favorable:
             self._tick_results.append(True)
@@ -105,6 +116,25 @@ class NTickConfirmedSignalStrategy(BaseSignalStrategy):
                     f"[NTick] Favorable tick: movement={movement}, tick_results={self._tick_results}"
                 )
             if len(self._tick_results) == self.n_ticks:
+                # `liquidity_check_after_ntick` promised a spread check at this
+                # point; it was never implemented, so a signal could confirm
+                # into an 8-14 pip rollover spread (-$16 to -$28 at 0.2 lots,
+                # against a $5 soft SL). Checked here, where the tick that
+                # completes confirmation is the one we would trade on.
+                if (
+                    self.liquidity_check_after_ntick
+                    and self.max_spread_points is not None
+                    and spread_points is not None
+                    and spread_points > self.max_spread_points
+                ):
+                    if self.logger:
+                        self.logger.info(
+                            f"[NTick] Confirmation reached but spread {spread_points} > "
+                            f"{self.max_spread_points}: discarding signal."
+                        )
+                    self._tick_results = []
+                    self._last_tick_price = self._pending_entry_price
+                    return
                 if self.logger:
                     self.logger.info(
                         f"[NTick] {self.n_ticks} consecutive favorable ticks: confirming {self._pending_signal}."
