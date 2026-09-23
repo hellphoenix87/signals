@@ -247,7 +247,17 @@ def strategy_factory(
         )
 
     if use_n_tick and n_ticks > 1:
-        strategy = NTickConfirmedSignalStrategy(strategy, n_ticks=n_ticks, config=config)
+        # max_spread_points was never passed, so the wrapper's liquidity check
+        # defaulted to None and could not fire even when enabled. Config's
+        # MAX_SPREAD_POINTS is in MT5 points, the same unit the orchestrator
+        # hands to on_new_tick. 0 keeps it disabled.
+        max_spread_points = float(getattr(config, "MAX_SPREAD_POINTS", 0) or 0)
+        strategy = NTickConfirmedSignalStrategy(
+            strategy,
+            n_ticks=n_ticks,
+            max_spread_points=max_spread_points if max_spread_points > 0 else None,
+            config=config,
+        )
 
     if getattr(config, "USE_SESSION_FILTER", False):
         blocked_hours_by_symbol = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {})
