@@ -231,6 +231,18 @@ ATR_SCALED_FIELDS: tuple[str, ...] = (
 )
 
 
+def _entry_spread_pips(tick, pip_size: float) -> float:
+    """Spread at the entry tick, in pips. The full-lifecycle sim marks P&L
+    against the opposite side of the book, so a wide spread puts a position
+    instantly underwater without price having moved -- measured at ~14 pips
+    (= -$28 at 0.2 lots) during the daily rollover window, enough to trip the
+    $5 pre-BE soft SL on tick 1."""
+    try:
+        return (float(tick["ask"]) - float(tick["bid"])) / pip_size
+    except Exception:
+        return 0.0
+
+
 def _atr_scale_factor(
     atr_value: Optional[float], pip_size: float, baseline_pips: float
 ) -> float:
@@ -422,6 +434,12 @@ def parse_args() -> argparse.Namespace:
         help="Override Config.EXIT_MAX_LOSS_MONEY (the PRE-breakeven soft-SL threshold, currently $5.0) for this run's real ExitTrade. Unlike --sweep-pre-be-threshold (pre-BE phase only), this works in --full-lifecycle mode, so the knock-on effect of surviving longer pre-BE -- more trades reaching BE, then running the real cap/trail -- is included in the reported P&L.",
     )
     parser.add_argument(
+        "--max-entry-spread-pips",
+        type=float,
+        default=None,
+        help="Skip any entry whose first tick's spread exceeds this many pips. Measured cause: ~31%% of pre-BE soft-SL hits fire on tick 1, 92%% of them in the daily rollover window where spread reaches 8-14 pips (= -$16 to -$28 at 0.2 lots) -- the position is underwater on spread alone, before price moves. Skipped signals are dropped from the trade list entirely, not counted as $0 trades.",
+    )
+    parser.add_argument(
         "--be-arming-ticks",
         type=int,
         default=None,
@@ -487,6 +505,8 @@ def simulate_pre_be_phase(
     sl_price_distance: float,
     run_counterfactual: bool,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
     measure_post_be: bool = False,
     post_be_max_ticks: int = 0,
     simulate_trail: bool = False,
@@ -507,6 +527,11 @@ def simulate_pre_be_phase(
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -711,6 +736,8 @@ def measure_entry_excursion(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
 ) -> dict:
     """Open a simulated position and continuously observe the real tick
     stream from the moment of entry -- with NO exit rule applied at all,
@@ -744,6 +771,11 @@ def measure_entry_excursion(
         }
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     end_idx = min(len(ticks), max_ticks)
 
@@ -972,6 +1004,8 @@ def simulate_full_lifecycle(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
 ) -> dict:
     """Open a simulated position and replay real historical ticks through
     the actual, complete `ExitTrade` -- `exit_trade._loss_manager` THEN (if
@@ -989,6 +1023,11 @@ def simulate_full_lifecycle(
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -1135,6 +1174,8 @@ def simulate_full_lifecycle_staircase_trail(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
     tier_width: float,
     first_tier: Optional[float] = None,
 ) -> dict:
@@ -1172,6 +1213,11 @@ def simulate_full_lifecycle_staircase_trail(
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -1243,6 +1289,8 @@ def simulate_full_lifecycle_staircase_sweep(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
     tier_widths: list,
 ) -> dict:
     """Like `simulate_full_lifecycle_staircase_trail`, but replays every
@@ -1267,6 +1315,11 @@ def simulate_full_lifecycle_staircase_sweep(
         return result
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
     loss_manager = exit_trade._loss_manager
@@ -1343,6 +1396,8 @@ def simulate_full_lifecycle_staircase_cap_sweep(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
     tier_width: float,
     first_tier: Optional[float] = None,
 ) -> dict:
@@ -1368,6 +1423,11 @@ def simulate_full_lifecycle_staircase_cap_sweep(
         return result
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -1588,6 +1648,8 @@ def simulate_hedge_on_cap(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
 ) -> dict:
     """Hedge, not sequential re-entry: runs the original position normally
     (real ExitTrade -- BE arm, pre-BE soft-SL/timeout, trail, cap) until
@@ -1632,6 +1694,11 @@ def simulate_hedge_on_cap(
     profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
     state = PosState(anchor=0.0, prev_price=0.0)
@@ -1780,6 +1847,8 @@ def simulate_full_lifecycle_unified_stop(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
     trail_gap_pct: float,
     trail_gap_floor_money: float,
 ) -> dict:
@@ -1812,6 +1881,11 @@ def simulate_full_lifecycle_unified_stop(
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -1880,6 +1954,8 @@ def simulate_full_lifecycle_cap_sweep(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
 ) -> dict:
     """Like `simulate_full_lifecycle`, but replays every `(label,
     exit_trade)` pair in `exit_trades` against the same real tick stream in
@@ -1904,6 +1980,11 @@ def simulate_full_lifecycle_cap_sweep(
         return result
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -1984,6 +2065,8 @@ def simulate_pre_be_threshold_sweep(
     contract_size: float,
     max_ticks: int,
     needs_conversion: bool,
+    max_entry_spread_pips: Optional[float] = None,
+    pip_size: float = 0.0001,
 ) -> dict:
     """Thread 2 (docs/exit-strategy-open-threads.md): replays every
     `(label, exit_trade)` pair in `exit_trades` -- each a full `ExitTrade`
@@ -2023,6 +2106,11 @@ def simulate_pre_be_threshold_sweep(
         return result
 
     entry_tick = ticks[0]
+    if max_entry_spread_pips is not None:
+        spread_pips = _entry_spread_pips(entry_tick, pip_size)
+        if spread_pips > max_entry_spread_pips:
+            return {"outcome": "skipped_wide_spread", "profit": None,
+                    "ticks_used": 0, "entry_price": None, "entry_spread_pips": spread_pips}
     entry_price = float(entry_tick["ask"]) if side == "buy" else float(entry_tick["bid"])
     pos_type = 0 if side == "buy" else 1
 
@@ -2105,6 +2193,7 @@ def run(
     post_be_loss_cap: Optional[float] = None,
     pre_be_loss_threshold: Optional[float] = None,
     be_arming_ticks: Optional[int] = None,
+    max_entry_spread_pips: Optional[float] = None,
     atr_normalize: bool = False,
     atr_baseline_pips: float = 1.0,
     unified_post_be_stop: bool = False,
@@ -2355,6 +2444,8 @@ def run(
                         contract_size=contract_size,
                         max_ticks=full_lifecycle_max_ticks,
                         needs_conversion=needs_conversion,
+                        max_entry_spread_pips=max_entry_spread_pips,
+                        pip_size=pip_size,
                         tier_width=staircase_tier_width,
                         first_tier=staircase_first_tier,
                     )
@@ -2394,6 +2485,8 @@ def run(
                         contract_size=contract_size,
                         max_ticks=full_lifecycle_max_ticks,
                         needs_conversion=needs_conversion,
+                        max_entry_spread_pips=max_entry_spread_pips,
+                        pip_size=pip_size,
                     )
                 elif do_measure_entry_excursion:
                     sim = measure_entry_excursion(
@@ -2433,6 +2526,8 @@ def run(
                     log=_metadata_logger,
                 )
                 macd_hist_value = hist[0] if hist else None
+                if sim.get("outcome") == "skipped_wide_spread":
+                    continue
                 results.append(
                     {
                         "time": m1_candle.get("time"),
@@ -3151,6 +3246,7 @@ def main() -> None:
         post_be_loss_cap=args.post_be_loss_cap,
         pre_be_loss_threshold=args.pre_be_loss_threshold,
         be_arming_ticks=args.be_arming_ticks,
+        max_entry_spread_pips=args.max_entry_spread_pips,
         atr_normalize=args.atr_normalize,
         atr_baseline_pips=args.atr_baseline_pips,
         unified_post_be_stop=args.unified_post_be_stop,
