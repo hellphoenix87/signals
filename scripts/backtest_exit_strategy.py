@@ -231,6 +231,44 @@ ATR_SCALED_FIELDS: tuple[str, ...] = (
 )
 
 
+def _confirm_entry_tick(
+    ticks,
+    side: str,
+    candle_close_price: float,
+    n_ticks: int,
+    max_wait_seconds: float = 60.0,
+):
+    """Index of the tick that completes n-tick confirmation, or None.
+
+    Mirrors `NTickConfirmedSignalStrategy.on_new_tick` as it behaves after the
+    flat-tick fix: the reference price starts at the signal candle's close and
+    ratchets up on each favorable tick; an unfavorable (or flat) tick resets
+    the counter and the reference. Live does a hard reset on every new M1
+    candle, so confirmation that has not completed within `max_wait_seconds`
+    of the candle close is abandoned rather than carried forward.
+    """
+    ref = float(candle_close_price)
+    streak = 0
+    t0 = None
+    for i, t in enumerate(ticks):
+        ts = float(t["time"])
+        if t0 is None:
+            t0 = ts
+        elif ts - t0 > max_wait_seconds:
+            return None
+        price = float(t["bid"]) if side == "buy" else float(t["ask"])
+        favorable = (price > ref) if side == "buy" else (price < ref)
+        if favorable:
+            streak += 1
+            ref = price
+            if streak >= n_ticks:
+                return i
+        else:
+            streak = 0
+            ref = float(candle_close_price)
+    return None
+
+
 def _entry_spread_pips(tick, pip_size: float) -> float:
     """Spread at the entry tick, in pips. The full-lifecycle sim marks P&L
     against the opposite side of the book, so a wide spread puts a position
@@ -434,6 +472,12 @@ def parse_args() -> argparse.Namespace:
         help="Override Config.EXIT_MAX_LOSS_MONEY (the PRE-breakeven soft-SL threshold, currently $5.0) for this run's real ExitTrade. Unlike --sweep-pre-be-threshold (pre-BE phase only), this works in --full-lifecycle mode, so the knock-on effect of surviving longer pre-BE -- more trades reaching BE, then running the real cap/trail -- is included in the reported P&L.",
     )
     parser.add_argument(
+        "--n-tick-confirmation",
+        type=int,
+        default=None,
+        help="Require N consecutive favorable ticks after the signal candle closes before entering, mirroring the live NTickConfirmedSignalStrategy (post-fix: flat ticks do NOT count, and an unfavorable tick resets both the streak and the reference price). Confirmation must complete within 60s of the candle close, matching live's hard reset on each new M1 candle; unconfirmed signals are dropped from the trade list. The live wrapper cannot be exercised by a backtest otherwise -- it confirms via on_new_tick, which this script never calls, so setting Config.N_TICK_CONFIRMATION alone would yield zero trades.",
+    )
+    parser.add_argument(
         "--max-entry-spread-pips",
         type=float,
         default=None,
@@ -506,6 +550,8 @@ def simulate_pre_be_phase(
     run_counterfactual: bool,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
     measure_post_be: bool = False,
     post_be_max_ticks: int = 0,
@@ -526,6 +572,14 @@ def simulate_pre_be_phase(
     if ticks is None or len(ticks) == 0:
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -737,6 +791,8 @@ def measure_entry_excursion(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
 ) -> dict:
     """Open a simulated position and continuously observe the real tick
@@ -770,6 +826,14 @@ def measure_entry_excursion(
             "entry_price": None,
         }
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1005,6 +1069,8 @@ def simulate_full_lifecycle(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
 ) -> dict:
     """Open a simulated position and replay real historical ticks through
@@ -1022,6 +1088,14 @@ def simulate_full_lifecycle(
     if ticks is None or len(ticks) == 0:
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1175,6 +1249,8 @@ def simulate_full_lifecycle_staircase_trail(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
     tier_width: float,
     first_tier: Optional[float] = None,
@@ -1212,6 +1288,14 @@ def simulate_full_lifecycle_staircase_trail(
     if ticks is None or len(ticks) == 0:
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1290,6 +1374,8 @@ def simulate_full_lifecycle_staircase_sweep(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
     tier_widths: list,
 ) -> dict:
@@ -1314,6 +1400,14 @@ def simulate_full_lifecycle_staircase_sweep(
             result[f"{label}_ticks"] = 0
         return result
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1397,6 +1491,8 @@ def simulate_full_lifecycle_staircase_cap_sweep(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
     tier_width: float,
     first_tier: Optional[float] = None,
@@ -1422,6 +1518,14 @@ def simulate_full_lifecycle_staircase_cap_sweep(
             result[f"{label}_ticks"] = 0
         return result
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1649,6 +1753,8 @@ def simulate_hedge_on_cap(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
 ) -> dict:
     """Hedge, not sequential re-entry: runs the original position normally
@@ -1693,6 +1799,14 @@ def simulate_hedge_on_cap(
     profit_manager = exit_trade._profit_manager
     profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1848,6 +1962,8 @@ def simulate_full_lifecycle_unified_stop(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
     trail_gap_pct: float,
     trail_gap_floor_money: float,
@@ -1880,6 +1996,14 @@ def simulate_full_lifecycle_unified_stop(
     if ticks is None or len(ticks) == 0:
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -1955,6 +2079,8 @@ def simulate_full_lifecycle_cap_sweep(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
 ) -> dict:
     """Like `simulate_full_lifecycle`, but replays every `(label,
@@ -1979,6 +2105,14 @@ def simulate_full_lifecycle_cap_sweep(
             result[f"{label}_ticks"] = 0
         return result
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -2066,6 +2200,8 @@ def simulate_pre_be_threshold_sweep(
     max_ticks: int,
     needs_conversion: bool,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
+    candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
 ) -> dict:
     """Thread 2 (docs/exit-strategy-open-threads.md): replays every
@@ -2105,6 +2241,14 @@ def simulate_pre_be_threshold_sweep(
             result[f"{label}_ticks"] = 0
         return result
 
+    if n_tick_confirmation and n_tick_confirmation > 1:
+        ci = _confirm_entry_tick(
+            ticks, side, candle_close_price if candle_close_price else float(ticks[0]["bid"]),
+            n_tick_confirmation,
+        )
+        if ci is None:
+            return {"outcome": "unconfirmed", "profit": None, "ticks_used": 0, "entry_price": None}
+        ticks = ticks[ci:]
     entry_tick = ticks[0]
     if max_entry_spread_pips is not None:
         spread_pips = _entry_spread_pips(entry_tick, pip_size)
@@ -2194,6 +2338,7 @@ def run(
     pre_be_loss_threshold: Optional[float] = None,
     be_arming_ticks: Optional[int] = None,
     max_entry_spread_pips: Optional[float] = None,
+    n_tick_confirmation: Optional[int] = None,
     atr_normalize: bool = False,
     atr_baseline_pips: float = 1.0,
     unified_post_be_stop: bool = False,
@@ -2446,6 +2591,8 @@ def run(
                         needs_conversion=needs_conversion,
                         max_entry_spread_pips=max_entry_spread_pips,
                         pip_size=pip_size,
+                        n_tick_confirmation=n_tick_confirmation,
+                        candle_close_price=float(m1_candle.get("close") or 0.0),
                         tier_width=staircase_tier_width,
                         first_tier=staircase_first_tier,
                     )
@@ -2487,6 +2634,8 @@ def run(
                         needs_conversion=needs_conversion,
                         max_entry_spread_pips=max_entry_spread_pips,
                         pip_size=pip_size,
+                        n_tick_confirmation=n_tick_confirmation,
+                        candle_close_price=float(m1_candle.get("close") or 0.0),
                     )
                 elif do_measure_entry_excursion:
                     sim = measure_entry_excursion(
@@ -2526,7 +2675,7 @@ def run(
                     log=_metadata_logger,
                 )
                 macd_hist_value = hist[0] if hist else None
-                if sim.get("outcome") == "skipped_wide_spread":
+                if sim.get("outcome") in ("skipped_wide_spread", "unconfirmed"):
                     continue
                 results.append(
                     {
@@ -3247,6 +3396,7 @@ def main() -> None:
         pre_be_loss_threshold=args.pre_be_loss_threshold,
         be_arming_ticks=args.be_arming_ticks,
         max_entry_spread_pips=args.max_entry_spread_pips,
+        n_tick_confirmation=args.n_tick_confirmation,
         atr_normalize=args.atr_normalize,
         atr_baseline_pips=args.atr_baseline_pips,
         unified_post_be_stop=args.unified_post_be_stop,
