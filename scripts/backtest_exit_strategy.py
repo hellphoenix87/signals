@@ -2495,6 +2495,20 @@ def run(
     )
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
+    # Print the EFFECTIVE exit settings, not just the CLI overrides: these
+    # default from Config, so merging a Config change silently redefines what
+    # an un-flagged "baseline" run means. A result should say what produced it.
+    _eff = exit_config or ExitTradeConfig()
+    print(
+        f"[{symbol}] exit config: be_arming_ticks={_eff.be_arming_ticks} "
+        f"max_loss_money=${_eff.max_loss_money} post_be_cap=${_eff.post_be_loss_cap_money} "
+        f"trail={_eff.trail_gap_pct:.0%}/${_eff.trail_gap_floor_money} "
+        f"| entry_spread_gate={'off' if max_entry_spread_pips is None else str(max_entry_spread_pips)+'p'} "
+        f"n_tick={n_tick_confirmation or 1} "
+        f"| strategy={'single-timeframe' if single_timeframe else 'MTF'}"
+    )
+
+
     chained_exit_trade = None
     if chain_on_cap and chain_loss_cap is not None:
         chained_overrides = dict(exit_overrides)
