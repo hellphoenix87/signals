@@ -112,3 +112,33 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   trades RSI wanted early. Smoke test (half week) showed win rate 40.1% vs 25-28% and zero
   pre-BE stops, but was -$16 ex-exhausted. Motivation, not evidence.
 - Two concurrent streams maximum (three exhaust the MT5 terminal's connection slots).
+
+## Testing protocol from 2026-09-24: staged escalation
+
+Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only
+earn the next set by passing the current one.
+
+| Stage | Windows | Purpose |
+|---|---|---|
+| Screen | **W6, W5, W7 + W2** | 3 worst + 1 calm |
+| Expand 1 | + W10, W8 | 6 windows |
+| Expand 2 | + W9, W12 | 8 windows |
+| Full | + W4, W3, W1 | 12 windows |
+
+Severity ranking under the shipped config (gate 1.0p + arm=30), worst first:
+W6 -$1.125/trade, W5 -$0.950, W7 -$0.883, W10 -$0.824, W8 -$0.814, W9 -$0.712,
+W12 -$0.690, W11 -$0.683, W4 -$0.669, W3 -$0.441, W1 -$0.356, W2 -$0.324.
+
+**Why a calm window is in the screen set.** Screening only on the worst windows biases toward
+changes that repair high-volatility damage while quietly hurting calm conditions. That already
+happened once: `arm=30` gained most in volatile windows (+$672, +$518) and *lost* in W1, the
+calmest (-$120). Including W2 forces a change to avoid wrecking calm conditions before it
+earns more windows.
+
+**Expansion windows must stay unseen.** Each hypothesis screened on the same 4 windows spends
+their credibility -- screen ten ideas there and one passes by luck. Do not look at an expansion
+window's number while iterating on the screen set; that converts out-of-sample data into
+in-sample data and is exactly how the wide-cap result happened.
+
+**Pass bars stay as before**: a variant must beat the SHIPPED config (not a bare baseline), on
+both window count and pooled per-trade expectancy.
