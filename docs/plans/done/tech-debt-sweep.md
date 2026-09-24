@@ -1,6 +1,6 @@
 # Tech Debt Sweep
 
-Status: in-progress
+Status: done
 
 ## Goal
 
@@ -48,6 +48,29 @@ are brittle against every subsequent refactor — delete them.
 **Note on MVP/POC mode:** this repo's default workflow says "no tests." This plan is an explicit,
 scoped exception — repairing the test suite *is* the deliverable of Phase 1, and Phase 2's whole
 point is adding coverage.
+
+## Outcome
+
+All four phases landed. `pipenv run pytest`: **44 failed / 122 passed -> 150 passed, 0 failed.**
+
+**Mid-plan direction change (user, during Phase 1): delete obsolete tests, do not repair unit or
+integration tests.** Phases 1.2 and 1.3 as written below were therefore only partly executed:
+
+- The three files already retargeted when that direction landed were kept, since they were green
+  and cover live code: `tests/services/test_trade_services.py`,
+  `tests/e2e/test_orchestrator_exit_close_failure_logged.py`,
+  `tests/e2e/test_orchestrator_generate_signal_direct_call.py`.
+- Everything still failing after that point was deleted instead: both DEMO-harnessed exit e2e
+  files, the MTF entry test (its `pullback_completed` gate genuinely evaluates `False` now, so it
+  asserted behavior the system no longer has), the two `test_loss.py` arming-window tests, two
+  `test_profit.py` tests, `TestExitTradeOnCandleCloseWithHTF`, and the two "all ten routes" tests.
+
+Coverage knowingly dropped as a result is recorded as item 7 in `docs/tech-debt.md`: `ExitTrade`'s
+cooldown gate, `ProfitExitManager.check_exit_on_candle_close`'s HTF gating, and `LossExitManager`'s
+BE arming window now have no tests at all. That is money-moving logic, and rebuilding it against
+the current API is the natural follow-up to this plan.
+
+Phases 2, 3 and 4 landed as specified.
 
 ## Phases
 
