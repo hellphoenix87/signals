@@ -215,6 +215,10 @@ STAIRCASE_TIER_CANDIDATES: list[float] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0
 # rule. 5.0 is today's live value, kept for direct comparison.
 PRE_BE_THRESHOLD_CANDIDATES: list[float] = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
 
+# Days of extra candles fetched before a pinned window's start, so the first
+# signals have full indicator history rather than a truncated warmup.
+WARMUP_DAYS: int = 3
+
 # --atr-normalize: bounds on the per-trade threshold scale factor. Fixed in
 # advance (see docs/plans/in-progress/volatility-normalized-thresholds.md) so
 # they can't be quietly tuned against results; an ATR far outside the baseline
@@ -267,6 +271,18 @@ def _confirm_entry_tick(
             streak = 0
             ref = float(candle_close_price)
     return None
+
+
+def _parse_dt(value: Optional[str]) -> Optional[datetime.datetime]:
+    """Parse a --start-date/--end-date value; None passes through."""
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise SystemExit(f"Could not parse date {value!r}; use YYYY-MM-DD or 'YYYY-MM-DD HH:MM'")
 
 
 def _entry_spread_pips(tick, pip_size: float) -> float:
@@ -375,7 +391,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", default=None, help="Symbol to backtest (default: Config.SYMBOLS[0])")
     parser.add_argument("--weeks", type=float, default=4.0, help="Weeks of M1 history to fetch (approximate)")
-    parser.add_argument("--start-pos", type=int, default=1, help="MT5 bars back from now to start the M1 window")
+    parser.add_argument("--start-pos", type=int, default=1, help="MT5 bars back from now to start the M1 window. DRIFTS: it counts back from the moment the run starts, so the same value covers a different window every run (~1.5%% of trades over a few hours) and two runs made at different times are NOT comparable. Prefer --start-date for anything you intend to compare.")
+    parser.add_argument("--start-date", type=str, default=None, help="Pin the window to a wall-clock date (YYYY-MM-DD, or YYYY-MM-DD HH:MM) instead of bars-back-from-now. Makes a run reproducible and two variants exactly comparable. Ends at --end-date, or --weeks later.")
+    parser.add_argument("--end-date", type=str, default=None, help="End of the pinned window (YYYY-MM-DD[ HH:MM]); defaults to --start-date plus --weeks.")
     parser.add_argument("--lot", type=float, default=0.2, help="Fixed simulated lot size (default: 0.2, matching the current $1000 sizing basis)")
     parser.add_argument("--max-ticks-per-trade", type=int, default=500, help="Max real ticks fetched per simulated trade (be_arming_ticks=90 by default, so this is a generous ceiling)")
     parser.add_argument("--counterfactual", action="store_true", help="For every soft_sl/timed_out trade, continue the same real tick stream as if only the broker-side wide SL existed, to see whether the early cut was actually a good call")
@@ -2355,6 +2373,8 @@ def run(
     staircase_first_tier: Optional[float] = None,
     sweep_staircase_tiers: bool = False,
     sweep_staircase_cap: bool = False,
+    start_date: Optional[datetime.datetime] = None,
+    end_date: Optional[datetime.datetime] = None,
 ) -> None:
     if not mt5.initialize():
         print("MT5 initialization failed.")
@@ -2391,20 +2411,40 @@ def run(
     entry_seconds = TF_SECONDS[tf_entry]
 
     m1_count = int(weeks * M1_BARS_PER_TRADING_WEEK)
-    m1_candles = fetch_history(market_data, symbol, tf_entry, m1_count, start_pos)
-    if not m1_candles:
-        print(f"No historical M1 candles returned for {symbol}.")
-        return
-
-    m5_count = max(int(m1_count / 5), 100)
-    m15_count = max(int(m1_count / 15), 100)
-    m5_start_pos = max(1, int(start_pos / 5))
-    m15_start_pos = max(1, int(start_pos / 15))
-    m5_candles = fetch_history(market_data, symbol, tf_confirm, m5_count, m5_start_pos)
-    m15_candles = fetch_history(market_data, symbol, tf_bias, m15_count, m15_start_pos)
+    warmup_start: Optional[datetime.datetime] = None
+    if start_date is not None:
+        # Pinned window: fetch a warmup margin BEFORE the requested start so the
+        # first signals have the same indicator history as any other candle,
+        # then skip those warmup candles in the signal loop below.
+        end = end_date or (start_date + datetime.timedelta(weeks=weeks))
+        warmup_start = start_date - datetime.timedelta(days=WARMUP_DAYS)
+        m1_candles = market_data.get_candles_range(symbol, tf_entry, warmup_start, end)
+        m5_candles = market_data.get_candles_range(symbol, tf_confirm, warmup_start, end)
+        m15_candles = market_data.get_candles_range(symbol, tf_bias, warmup_start, end)
+        for seq in (m1_candles, m5_candles, m15_candles):
+            for c in seq:
+                c["symbol"] = symbol
+    else:
+        m1_candles = fetch_history(market_data, symbol, tf_entry, m1_count, start_pos)
+        m5_count = max(int(m1_count / 5), 100)
+        m15_count = max(int(m1_count / 15), 100)
+        m5_start_pos = max(1, int(start_pos / 5))
+        m15_start_pos = max(1, int(start_pos / 15))
+        m5_candles = fetch_history(market_data, symbol, tf_confirm, m5_count, m5_start_pos)
+        m15_candles = fetch_history(market_data, symbol, tf_bias, m15_count, m15_start_pos)
     if not m5_candles or not m15_candles:
         print(f"No historical M5/M15 candles returned for {symbol}.")
         return
+
+    _signal_candles = [c for c in m1_candles if start_date is None or c["time"] >= start_date]
+    if _signal_candles:
+        print(
+            f"[{symbol}] window: {_signal_candles[0]['time']} .. {_signal_candles[-1]['time']} "
+            f"({len(_signal_candles)} M1 candles"
+            + (f", pinned via --start-date" if start_date is not None
+               else f", via --start-pos {start_pos} -- DRIFTS between runs")
+            + ")"
+        )
 
     m5_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_confirm]) for c in m5_candles]
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
@@ -2478,6 +2518,8 @@ def run(
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             for i, m1_candle in enumerate(m1_candles):
+                if warmup_start is not None and m1_candle["time"] < start_date:
+                    continue
                 closed_by = m1_candle["time"] + datetime.timedelta(seconds=entry_seconds)
                 m5_ptr = bisect.bisect_right(m5_close_times, closed_by)
                 m15_ptr = bisect.bisect_right(m15_close_times, closed_by)
@@ -3417,6 +3459,8 @@ def main() -> None:
         staircase_first_tier=args.staircase_first_tier,
         sweep_staircase_tiers=args.sweep_staircase_tiers,
         sweep_staircase_cap=args.sweep_staircase_cap,
+        start_date=_parse_dt(args.start_date),
+        end_date=_parse_dt(args.end_date),
     )
 
 

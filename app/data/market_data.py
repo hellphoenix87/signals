@@ -69,6 +69,31 @@ class MarketData:
 
         return candles
 
+    def get_candles_range(self, symbol, timeframe, start, end, verbose: bool = False):
+        """Fetch candles between two datetimes instead of by bars-back-from-now.
+
+        `copy_rates_from_pos` counts backwards from the present, so the same
+        `start_pos` covers a different window on every run -- fine for "recent
+        history", useless for comparing two runs against each other. This pins
+        the window to wall-clock dates so a backtest is reproducible and two
+        variants can be compared on identical data.
+
+        `start`/`end` are naive datetimes in the same local convention
+        `_rates_to_dict_list` produces, so a date read off one result can be
+        handed straight back in.
+        """
+        self._ensure_symbol_selected(symbol)
+        rates = mt5.copy_rates_range(symbol, timeframe, start, end)
+        if rates is None or len(rates) == 0:
+            if verbose:
+                print(f"No candles for {symbol} ({timeframe}) in {start}..{end}")
+                print("MT5 error:", mt5.last_error())
+            return []
+        candles = self._rates_to_dict_list(rates)
+        if verbose:
+            print(f"[{symbol}] get_candles_range fetched: {len(candles)} candles")
+        return candles
+
     def _ensure_symbol_selected(self, symbol):
         """Ensure the symbol is in Market Watch before fetching data."""
         if not mt5.symbol_select(symbol, True):
