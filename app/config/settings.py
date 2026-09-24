@@ -167,7 +167,26 @@ class Config:
     EXIT_SOFT_SL_MONEY_GRACE_TICKS: int = 5
     EXIT_ON_FIRST_TICK_NOT_FAVORABLE: bool = False
     EXIT_BE_DISTANCE_PIPS: float = 0.5
-    EXIT_BE_ARMING_TICKS: int = 90
+    # Ticks a position gets to reach breakeven before LossExitManager closes it.
+    #
+    # 90 -> 30. Breakeven arms at median 0-11 ticks (p90 = 5-55), so only
+    # 2.5-15.1% of trades arm after tick 30: the wall keeps nearly every trade
+    # that ever works while killing non-starters 3x sooner. It also converts
+    # expensive distance exits into cheap time ones -- on a high-volatility
+    # window the $5 soft SL fired 340 times for -$2,005 at 90 ticks vs 170
+    # times for -$1,015 at 30, and the time exit itself got cheaper (-$2.25 ->
+    # -$1.63) because it fires before the trade has bled as far.
+    #
+    # Backtest, 12 date-pinned windows (see the canonical list in
+    # docs/test-results/pre-be-phase-and-entry-signal-investigation.md):
+    # stacked on the spread gate it wins 12/12 against the gate alone,
+    # -$0.748 -> -$0.693 per trade. Standalone it was worth +$0.066; on top of
+    # the gate it is +$0.055, since the gate already removes some trades this
+    # would otherwise have cut late.
+    #
+    # Tested and rejected: 300 ticks and no timeout at all (2/4 -- released
+    # trades do not reach their peak, they bleed to the $5 stop instead).
+    EXIT_BE_ARMING_TICKS: int = 30
     EXIT_MIN_PROFIT_PIPS: float = 0.0
     EXIT_BUFFER_PIPS: float = 0.2
     EXIT_EPS_PIPS: float = 0.0
