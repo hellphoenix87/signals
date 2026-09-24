@@ -29,7 +29,7 @@ Date: 2026-09-21
 
 1. **The loss cap, not the trail, is where the money is lost.** Single-timeframe W1/W2: cap exits = ~82–85% of real losses (-$2,856 / -$2,767); the trail is net positive (+$1,540 / +$1,468).
 2. **The percentage trail gives back ~70% of every winning move.** Trail exits reached avg peak $4.28–4.31 but captured only $1.40–1.41 (29.6–29.8%) in both windows.
-3. **`$2` staircase trail beats the live 60%/$2 trail** (single-timeframe, live `$1` cap, 10k ticks): W1 -$1,048 → -$647, W2 -$681 → -$630. It captures the same population (peak > $2) more efficiently and ~2.4× faster (~340 vs ~820 ticks). **Only validated on W1–W2**; confirm on W3/W4 at the live cap before relying on it.
+3. **`$2` staircase trail beats the live 60%/$2 trail** (single-timeframe, live `$1` cap, 10k ticks): W1 -$1,048 → -$647, W2 -$681 → -$630. It captures the same population (peak > $2) more efficiently and ~2.4× faster (~340 vs ~820 ticks). ~~Only validated on W1–W2~~ — **confirmed on W3/W4 on 2026-09-24 and now wired into production**; see [staircase-trail-w3-w4-confirmation.md](staircase-trail-w3-w4-confirmation.md).
 4. **Earlier trail activation is worse.** First tier at $0.5 (step $2): W1 -$646 → -$846, W2 -$630 → -$789, despite win rate rising to ~57–60%. Same lesson as the `$0`-cap and unified-stop tests: reacting to small early peaks trades away bigger later moves.
 5. **The signal's direction has a real edge.** Normal minus inverted (`--invert-signal`), same exits: +$740 / +$616 / +$886 at the `$1` cap in W1/W2/W3, positive at every cap tested. (Not checked on W4.)
 6. **Single-timeframe ≈ MTF per trade**, just ~30× more trades: -$0.14 to -$0.24/trade vs MTF -$0.19 to -$0.26. Entry frequency and selectivity don't change the per-trade edge.
@@ -61,6 +61,6 @@ W3 was the most volatile intraday but went nowhere over the month. That fits "th
 ## Takeaways for the next session
 
 - **Treat any exit-parameter result found and judged on the same windows as unconfirmed.** Today every such result failed out of sample. Fix the rule and thresholds first, then test on unseen data. Forward testing on the demo account is the only fully fit-proof check.
-- **Most promising open item**: confirm the `$2` staircase trail vs. the live percentage trail at the live `$1` cap on W3/W4. If it holds, it's the one change here worth considering for `ProfitExitManager`.
+- ~~**Most promising open item**: confirm the `$2` staircase trail vs. the live percentage trail at the live `$1` cap on W3/W4.~~ **DONE 2026-09-24 -- it held, 4/4 windows** (W3 -$1,499.40 -> -$1,118.60, W4 -$3,023.40 -> -$2,783.80). Wired into `ProfitExitManager` via `Config.EXIT_STAIRCASE_TRAIL_ENABLED`. See [staircase-trail-w3-w4-confirmation.md](staircase-trail-w3-w4-confirmation.md). Next open item is retuning the post-BE `$1` cap against the new trail shape.
 - **Untested entry-time context** (genuinely different information from M1 price indicators): H4/daily trend, position within the day's range, session/time-of-day vs. post-BE reversal, economic-calendar events.
 - **Unblock more history**: raise MT5 "Max bars in chart" to get full W4/W5 M1 data.
