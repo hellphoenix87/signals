@@ -183,3 +183,52 @@ live bot) trade only the Asian session plus the late US tail -- never the London
 4. **Untested and promising**: raising the entry timeframe (M5 entry has 6.0x move-to-cost vs
    M1's 2.7x). Blocked by sample size under MTF gating (~25 trades/window), so it would need
    to run ungated.
+
+## Addendum (2026-09-24): clean re-validation on pinned windows
+
+Every result above compared runs made at different times, so `--start-pos` drift contaminated
+the magnitudes (see the caveat under Test K). With `--start-date` (PR #67) two runs of the same
+window are byte-identical, so baseline and variant now see exactly the same candles.
+
+**Canonical windows**, fixed permanently -- use these for any future comparison:
+
+| | from | to | | | from | to |
+|---|---|---|---|---|---|---|
+| W1 | 2026-08-25 | 2026-09-22 | | W7 | 2026-03-10 | 2026-04-07 |
+| W2 | 2026-07-28 | 2026-08-25 | | W8 | 2026-02-10 | 2026-03-10 |
+| W3 | 2026-06-30 | 2026-07-28 | | W9 | 2026-01-13 | 2026-02-10 |
+| W4 | 2026-06-02 | 2026-06-30 | | W10 | 2025-12-16 | 2026-01-13 |
+| W5 | 2026-05-05 | 2026-06-02 | | W11 | 2025-11-18 | 2025-12-16 |
+| W6 | 2026-04-07 | 2026-05-05 | | W12 | 2025-10-21 | 2025-11-18 |
+
+### Results
+
+| | baseline | spread gate 1.0p | gate + arm=30 |
+|---|---|---|---|
+| Total, 12 windows | -$43,754 | -$30,193 | **-$27,938** |
+| Per trade | -$1.016 | -$0.748 | **-$0.693** |
+| Windows won | -- | **12 / 12** vs baseline | **12 / 12** vs *gate alone* |
+
+**Combined: 32% less bleed per trade.**
+
+Two corrections to what was written above:
+
+1. **The +$0.276/trade gate figure held up.** Clean measurement gives **+$0.268**. The drift was
+   real but was not what produced the result. A 5-window partial had suggested the effect would
+   halve (+$0.144) -- that was an artifact of the early windows being the calm ones where the
+   gate matters least, not evidence of inflation.
+2. **arm=30 stacks, but smaller than standalone**: +$0.055/trade on top of the gate versus
+   +$0.066 measured alone. Some overlap -- the gate removes trades the wall would otherwise
+   have cut late. It still clears the "must beat the simpler option" bar (12/12 against the
+   gate alone, not merely against baseline), so it earns its place, but it contributes about a
+   fifth of the gate's value.
+
+Trade counts are identical between `gate` and `gate + arm=30` in every window, confirming the
+two act on different populations: the gate decides *whether* to enter, the wall decides *when
+to give up* on a position already open.
+
+### Tooling note
+
+Three parallel backtests exhausted the MT5 terminal's connection slots and aborted mid-batch
+with `MT5 initialization failed`, silently losing 7 of 12 windows for two variants. `initialize()`
+now retries with backoff. Two concurrent streams are safe; three are not.

@@ -124,6 +124,7 @@ import io
 import logging
 import statistics
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -218,6 +219,11 @@ PRE_BE_THRESHOLD_CANDIDATES: list[float] = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
 # Days of extra candles fetched before a pinned window's start, so the first
 # signals have full indicator history rather than a truncated warmup.
 WARMUP_DAYS: int = 3
+
+# Parallel backtests share one MT5 terminal; initialize() can fail transiently
+# when several start at once.
+MT5_INIT_ATTEMPTS: int = 5
+MT5_INIT_BACKOFF_SECONDS: float = 3.0
 
 # --atr-normalize: bounds on the per-trade threshold scale factor. Fixed in
 # advance (see docs/plans/in-progress/volatility-normalized-thresholds.md) so
@@ -2376,9 +2382,16 @@ def run(
     start_date: Optional[datetime.datetime] = None,
     end_date: Optional[datetime.datetime] = None,
 ) -> None:
-    if not mt5.initialize():
-        print("MT5 initialization failed.")
-        sys.exit(1)
+    # One terminal serves every process, and a batch of parallel backtests can
+    # exhaust its connection slots -- which used to abort the run outright and
+    # lose a whole variant's windows silently. Retry with backoff instead.
+    for attempt in range(MT5_INIT_ATTEMPTS):
+        if mt5.initialize():
+            break
+        if attempt == MT5_INIT_ATTEMPTS - 1:
+            print(f"MT5 initialization failed after {MT5_INIT_ATTEMPTS} attempts: {mt5.last_error()}")
+            sys.exit(1)
+        time.sleep(MT5_INIT_BACKOFF_SECONDS * (attempt + 1))
 
     if invert_signal:
         print(f"[{symbol}] --invert-signal is ON: trading the OPPOSITE of every generated signal.")
