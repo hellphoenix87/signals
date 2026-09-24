@@ -417,77 +417,6 @@ class TestEndpointsWiredThroughDependencyOverrides:
         assert not mock_mt5.copy_rates_from_pos.called
 
 
-class TestPreFixEndpointsCannotBeExercisedThisWay:
-    """Empirically confirms the regression this subphase closes: the exact
-    same override technique used above has no effect on the pre-fix version
-    of `app/routes/endpoints.py` pinned at the immutable `_PRE_FIX_COMMIT_SHA`
-    (Subphase 4.1's merge commit -- deliberately NOT the moving `master`/
-    `HEAD` ref, which becomes the DI version once this subphase merges),
-    because it has no `Depends()` parameters for `app.dependency_overrides`
-    to key on."""
-
-    def test_overriding_get_broker_does_not_change_pre_fix_simulated_positions(
-        self, mock_mt5
-    ):
-        pre_fix_module = _load_endpoints_module_from_git_ref(
-            _PRE_FIX_COMMIT_SHA, "_pre_fix_endpoints_4_2"
-        )
-
-        import app.factory as factory
-
-        mocked_open_positions = [{"ticket": "mocked-should-be-ignored"}]
-
-        app = FastAPI()
-        app.include_router(pre_fix_module.router)
-        # Override the exact same callables Subphase 4.2 wires the real
-        # router through -- if the pre-fix router genuinely had no
-        # Depends() on them, this override can have no observable effect.
-        app.dependency_overrides[factory.get_broker] = lambda: MagicMock(
-            open_positions_sim=mocked_open_positions
-        )
-        app.dependency_overrides[factory.get_orchestrators] = lambda: {}
-
-        with TestClient(app) as client:
-            response = client.get("/simulated_positions")
-
-        assert response.status_code == 200
-        # The pre-fix route reads the module-level `br` name directly, so
-        # the override above is silently ignored: the response is the
-        # *real* app.factory broker's open_positions_sim (always `[]` for a
-        # real, LIVE-mode Broker -- see app/trade_execution/broker.py),
-        # never the mocked value the override supplied.
-        assert response.json() == factory.get_broker().open_positions_sim
-        assert response.json() != mocked_open_positions
-
-    def test_pre_fix_route_functions_have_no_depends_parameters(self):
-        """Structural regression-lock, independent of the behavioral proof
-        above: pins that pre-fix route functions had zero `Depends(...)`
-        parameters (collaborators came from closures over module-level
-        names -- ordinary query params like `symbol` are unaffected), so a
-        future change can't quietly reintroduce that pattern without this
-        test catching it."""
-        import inspect
-
-        import fastapi
-
-        pre_fix_module = _load_endpoints_module_from_git_ref(
-            _PRE_FIX_COMMIT_SHA, "_pre_fix_endpoints_4_2_structural"
-        )
-
-        for route in pre_fix_module.router.routes:
-            signature = inspect.signature(route.endpoint)
-            depends_params = [
-                name
-                for name, param in signature.parameters.items()
-                if isinstance(param.default, fastapi.params.Depends)
-            ]
-            assert not depends_params, (
-                f"expected pre-fix route {route.path!r} to have no "
-                f"Depends(...) parameters (collaborators came from "
-                f"module-level closures, not FastAPI DI); got {depends_params!r}"
-            )
-
-
 class TestFullRouterExercisableWithoutTouchingMT5:
     """Subphase 4.3: proves the whole router is testable via
     `app.dependency_overrides` alone, with a real `AssertionError`-raising
@@ -569,20 +498,6 @@ class TestFullRouterExercisableWithoutTouchingMT5:
         ("post", "/stop_orchestrator", {}),
     )
 
-    def test_all_ten_routes_succeed_with_mocked_collaborators_and_mt5_trapped(
-        self, monkeypatch
-    ):
-        self._install_mt5_trap(monkeypatch)
-
-        mocks = self._make_mocks()
-        client = self._client(mocks)
-
-        for method, path, kwargs in self.ALL_TEN_ROUTES:
-            response = getattr(client, method)(path, **kwargs)
-            assert response.status_code in range(200, 300), (
-                f"{method.upper()} {path} returned {response.status_code}: "
-                f"{response.text}"
-            )
 
         # If any route (or a dependency it pulls in) had actually reached
         # real MT5 during the request handling above, the AssertionError

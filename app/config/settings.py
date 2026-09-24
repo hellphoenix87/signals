@@ -58,12 +58,17 @@ class Config:
     # Config-switchable alternative to the hand-coded vote above -- see
     # docs/test-results/ml-entry-model-comparison.md. Off by default:
     # opt-in only, since it needs a trained model file to exist.
+    # Inert while False: MLSignalStrategy is still constructed and wired by
+    # `strategy_factory`, but never wraps the base strategy.
     USE_ML_ENTRY_MODEL: bool = False
     ML_MODEL_PATH: str = "models/entry_signal_model.joblib"
 
     USE_CLOSED_CANDLES_ONLY: bool = True
     DROP_LAST_CANDLE_ALWAYS: bool = False
 
+    # ATR momentum gate. Both must be > 0 for
+    # `AtrMomentumFilteredSignalStrategy` to wrap the entry layer; 0/0 leaves
+    # it built-but-inert.
     ENTRY_ATR_PERIOD: int = 0
     ENTRY_ATR_MOVE_MULT: float = 0
 
@@ -112,12 +117,17 @@ class Config:
     # never found a configuration where "sma" held up across two independent
     # windows -- its one promising result reversed from +$49.60 to -$299.00
     # between windows. Reverted to "macd" (the pre-investigation default)
-    # pending the follow-up plan (docs/plans/todo/test-additional-entry-indicators.md)
+    # pending the follow-up plan (docs/plans/done/test-additional-entry-indicators.md)
     # rather than ship a switch the same investigation ended up not trusting.
     MTF_ENTRY_INDICATOR: str = "macd"
 
-    USE_N_TICK_CONFIRMATION = True
-    N_TICK_CONFIRMATION = 1
+    # N-tick entry confirmation. `strategy_factory` only wraps the base
+    # strategy when N_TICK_CONFIRMATION > 1, so the flag alone does nothing --
+    # it read `True` here for months alongside N_TICK_CONFIRMATION = 1, which
+    # made the live bot look like it confirmed entries across ticks when it
+    # never has. Both must be set to enable it: flag True AND the count > 1.
+    USE_N_TICK_CONFIRMATION: bool = False
+    N_TICK_CONFIRMATION: int = 1
     LIQUIDITY_CHECK_AFTER_NTICK = True
 
     # Backtest found MTF badly underperforms during 08:00-18:59 UTC
