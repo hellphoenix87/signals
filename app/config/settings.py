@@ -67,7 +67,24 @@ class Config:
     ENTRY_ATR_PERIOD: int = 0
     ENTRY_ATR_MOVE_MULT: float = 0
 
-    MAX_SPREAD_POINTS: float = 0
+    # Entry spread gate (TradeExecutor._spread_ok), in MT5 POINTS -- EURUSD is
+    # 5-digit, so 1 pip = 10 points. 0 disables it, which is how this shipped:
+    # the gate existed and was wired into the entry path but never fired.
+    #
+    # 15 points = 1.5 pips, ~4x the 0.27-0.39 pip spread EURUSD normally shows
+    # in the hours this bot trades. It targets the daily rollover window (UTC
+    # hour 0), where spread reaches 8-14 pips = 80-140 points: at 0.2 lots that
+    # marks a fresh position -$16 to -$28 on the spread alone, against a $5
+    # (2.5 pip) pre-BE soft SL, so it is stopped out before price moves at all.
+    # Measured: ~31% of pre-BE stop hits fire on TICK 1, 92% of those in that
+    # window, averaging -$8.10 vs -$5.36 for genuine stops.
+    #
+    # Backtest (12 windows, EURUSD, single-timeframe): 12/12 windows improved,
+    # per-trade -$1.022 -> -$0.746. A 1.0-pip gate scored marginally better
+    # (+$0.026/trade) but leaves less headroom over normal spread; tighten to 10
+    # only after the demo's live spread distribution has been observed.
+    # See docs/test-results/pre-be-phase-and-entry-signal-investigation.md
+    MAX_SPREAD_POINTS: float = 15
 
     USE_MULTI_TIMEFRAME_SIGNALS = True
     MTF_BIAS_SMA_SHORT: int = 10
