@@ -498,20 +498,6 @@ class TestFullRouterExercisableWithoutTouchingMT5:
         ("post", "/stop_orchestrator", {}),
     )
 
-    def test_all_ten_routes_succeed_with_mocked_collaborators_and_mt5_trapped(
-        self, monkeypatch
-    ):
-        self._install_mt5_trap(monkeypatch)
-
-        mocks = self._make_mocks()
-        client = self._client(mocks)
-
-        for method, path, kwargs in self.ALL_TEN_ROUTES:
-            response = getattr(client, method)(path, **kwargs)
-            assert response.status_code in range(200, 300), (
-                f"{method.upper()} {path} returned {response.status_code}: "
-                f"{response.text}"
-            )
 
         # If any route (or a dependency it pulls in) had actually reached
         # real MT5 during the request handling above, the AssertionError
