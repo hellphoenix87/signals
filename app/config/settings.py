@@ -71,7 +71,7 @@ class Config:
     # 5-digit, so 1 pip = 10 points. 0 disables it, which is how this shipped:
     # the gate existed and was wired into the entry path but never fired.
     #
-    # 15 points = 1.5 pips, ~4x the 0.27-0.39 pip spread EURUSD normally shows
+    # 10 points = 1.0 pips, ~3x the 0.27-0.39 pip spread EURUSD normally shows
     # in the hours this bot trades. It targets the daily rollover window (UTC
     # hour 0), where spread reaches 8-14 pips = 80-140 points: at 0.2 lots that
     # marks a fresh position -$16 to -$28 on the spread alone, against a $5
@@ -79,12 +79,18 @@ class Config:
     # Measured: ~31% of pre-BE stop hits fire on TICK 1, 92% of those in that
     # window, averaging -$8.10 vs -$5.36 for genuine stops.
     #
-    # Backtest (12 windows, EURUSD, single-timeframe): 12/12 windows improved,
-    # per-trade -$1.022 -> -$0.746. A 1.0-pip gate scored marginally better
-    # (+$0.026/trade) but leaves less headroom over normal spread; tighten to 10
-    # only after the demo's live spread distribution has been observed.
+    # Backtest, 12 DATE-PINNED windows (byte-reproducible), single-timeframe:
+    # 12/12 windows improved, per-trade -$1.016 -> -$0.748.
+    #
+    # Set to 10, not 15, so live matches the threshold every pinned measurement
+    # used. 15 was the original ship (more headroom, 11/12 on drifting windows),
+    # but that left no pinned-window evidence for the value actually running --
+    # reintroducing exactly the research-vs-production gap the pinned windows
+    # were meant to close. Both block the 80-140 point rollover spikes that
+    # motivated the gate; they differ only on moderate spreads, worth ~$0.026
+    # per trade.
     # See docs/test-results/pre-be-phase-and-entry-signal-investigation.md
-    MAX_SPREAD_POINTS: float = 15
+    MAX_SPREAD_POINTS: float = 10
 
     USE_MULTI_TIMEFRAME_SIGNALS = True
     MTF_BIAS_SMA_SHORT: int = 10
