@@ -93,3 +93,22 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   post-BE caps = $1 (baseline), $1.5. Every extra value tested makes a lucky winner more likely.
   Whatever survives must be forward-tested on demo before it is trusted, not shipped on
   backtest evidence alone.
+
+## Test L (REVISED 2026-09-24, before running) -- n-tick confirmation on top of the shipped config
+- The original Test L (above) predated the spread gate and named a bare baseline. That is now
+  the wrong comparison: the gate and the 30-tick wall are both live, so the only decision-
+  relevant question is whether n-tick adds anything ON TOP of them.
+- Baseline: --max-entry-spread-pips 1.0 --be-arming-ticks 30 (= the shipped config).
+- Variants: the same plus --n-tick-confirmation 2, and 3.
+- 12 date-pinned canonical windows, STF, 10k ticks, ex-exhausted.
+- PASS requires BOTH:
+  (a) beats the shipped config in >= 9 of 12 windows, AND
+  (b) pooled per-trade expectancy improves.
+  Beating the bare baseline is NOT sufficient -- same rule that rejected the $1.5 combinations.
+- Report alongside totals: trade count dropped (n-tick discards signals that never confirm),
+  win rate, and mean entry price vs the signal candle's close.
+- KNOWN RISK: the entry is 98.4% RSI, a MEAN-REVERSION signal, while n-tick is a MOMENTUM
+  filter -- it buys only after the bounce has started, i.e. later and worse on exactly the
+  trades RSI wanted early. Smoke test (half week) showed win rate 40.1% vs 25-28% and zero
+  pre-BE stops, but was -$16 ex-exhausted. Motivation, not evidence.
+- Two concurrent streams maximum (three exhaust the MT5 terminal's connection slots).
