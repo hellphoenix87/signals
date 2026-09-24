@@ -1,6 +1,6 @@
 # Staircase Profit Trail
 
-Status: in-progress
+Status: done
 
 ## Goal
 
