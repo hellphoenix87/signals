@@ -93,3 +93,52 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   post-BE caps = $1 (baseline), $1.5. Every extra value tested makes a lucky winner more likely.
   Whatever survives must be forward-tested on demo before it is trusted, not shipped on
   backtest evidence alone.
+
+## Test L (REVISED 2026-09-24, before running) -- n-tick confirmation on top of the shipped config
+- The original Test L (above) predated the spread gate and named a bare baseline. That is now
+  the wrong comparison: the gate and the 30-tick wall are both live, so the only decision-
+  relevant question is whether n-tick adds anything ON TOP of them.
+- Baseline: --max-entry-spread-pips 1.0 --be-arming-ticks 30 (= the shipped config).
+- Variants: the same plus --n-tick-confirmation 2, and 3.
+- 12 date-pinned canonical windows, STF, 10k ticks, ex-exhausted.
+- PASS requires BOTH:
+  (a) beats the shipped config in >= 9 of 12 windows, AND
+  (b) pooled per-trade expectancy improves.
+  Beating the bare baseline is NOT sufficient -- same rule that rejected the $1.5 combinations.
+- Report alongside totals: trade count dropped (n-tick discards signals that never confirm),
+  win rate, and mean entry price vs the signal candle's close.
+- KNOWN RISK: the entry is 98.4% RSI, a MEAN-REVERSION signal, while n-tick is a MOMENTUM
+  filter -- it buys only after the bounce has started, i.e. later and worse on exactly the
+  trades RSI wanted early. Smoke test (half week) showed win rate 40.1% vs 25-28% and zero
+  pre-BE stops, but was -$16 ex-exhausted. Motivation, not evidence.
+- Two concurrent streams maximum (three exhaust the MT5 terminal's connection slots).
+
+## Testing protocol from 2026-09-24: staged escalation
+
+Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only
+earn the next set by passing the current one.
+
+| Stage | Windows | Purpose |
+|---|---|---|
+| Screen | **W6, W5, W7 + W2** | 3 worst + 1 calm |
+| Expand 1 | + W10, W8 | 6 windows |
+| Expand 2 | + W9, W12 | 8 windows |
+| Full | + W4, W3, W1 | 12 windows |
+
+Severity ranking under the shipped config (gate 1.0p + arm=30), worst first:
+W6 -$1.125/trade, W5 -$0.950, W7 -$0.883, W10 -$0.824, W8 -$0.814, W9 -$0.712,
+W12 -$0.690, W11 -$0.683, W4 -$0.669, W3 -$0.441, W1 -$0.356, W2 -$0.324.
+
+**Why a calm window is in the screen set.** Screening only on the worst windows biases toward
+changes that repair high-volatility damage while quietly hurting calm conditions. That already
+happened once: `arm=30` gained most in volatile windows (+$672, +$518) and *lost* in W1, the
+calmest (-$120). Including W2 forces a change to avoid wrecking calm conditions before it
+earns more windows.
+
+**Expansion windows must stay unseen.** Each hypothesis screened on the same 4 windows spends
+their credibility -- screen ten ideas there and one passes by luck. Do not look at an expansion
+window's number while iterating on the screen set; that converts out-of-sample data into
+in-sample data and is exactly how the wide-cap result happened.
+
+**Pass bars stay as before**: a variant must beat the SHIPPED config (not a bare baseline), on
+both window count and pooled per-trade expectancy.
