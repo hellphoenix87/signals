@@ -25,7 +25,7 @@ leave 44 failures as ambient noise.
 
 ## 2. `TradeExecutor._spread_ok` has zero test coverage -- and is now live
 
-`MAX_SPREAD_POINTS = 15` shipped in PR #66, enabling a gate that **no test has ever executed**.
+`MAX_SPREAD_POINTS` shipped in PR #66 (15, retuned to 10 in PR #70), enabling a gate that **no test has ever executed**.
 `grep -rl "_spread_ok\|MAX_SPREAD_POINTS" tests/` returns nothing.
 
 The backtest does NOT cover it either: it uses its own `--max-entry-spread-pips` check against
@@ -65,7 +65,7 @@ abandoned in favour of STF.
 
 Two `Config` changes shipped on backtest evidence alone, with no live verification:
 
-- `MAX_SPREAD_POINTS = 15` (PR #66)
+- `MAX_SPREAD_POINTS` (PR #66, retuned to 10 in PR #70)
 - `EXIT_BE_ARMING_TICKS = 30` (PR #68)
 
 The app has not been run since either change. A single smoke run against MT5 -- confirming it
