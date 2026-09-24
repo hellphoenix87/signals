@@ -1,7 +1,7 @@
 # Tech debt inventory
 
-Captured 2026-09-24. Items 1-4 were worked in `docs/plans/done/tech-debt-sweep.md`
-(same day); what remains is items 5 and 6.
+Captured 2026-09-24. Items 1-4 and 6 were worked in `docs/plans/done/tech-debt-sweep.md`
+(same day); what remains is items 5, 7 and 8.
 
 ## ~~1. The test suite has been broken for months~~ -- RESOLVED
 
@@ -48,16 +48,38 @@ abandoned in favour of STF.
 Deliberately not fixed: it optimizes a path nothing currently runs. Worth doing only if MTF
 research restarts.
 
-## 6. Unvalidated live changes
+## ~~6. Unvalidated live changes~~ -- SMOKE RUN DONE 2026-09-24
 
-Two `Config` changes shipped on backtest evidence alone, with no live verification:
+Ran against the live terminal (account 112575722, MetaQuotes-Demo, `trade_mode=0`, $100k).
+**No orders were placed and the balance is unchanged.**
 
-- `MAX_SPREAD_POINTS` (PR #66, retuned to 10 in PR #70)
-- `EXIT_BE_ARMING_TICKS = 30` (PR #68)
+What was confirmed:
 
-The app has not been run since either change. A single smoke run against MT5 -- confirming it
-starts, generates signals, and logs `Skipping signal (spread too wide)` when spread exceeds the
-configured points -- would close this. Needs a running MT5 terminal, so it is a manual step.
+- App boots: `mt5.initialize()` via lifespan succeeds, `Broker initialized in TradingMode.LIVE`,
+  all of `/status`, `/tick`, `/signal/latest`, `/simulated_positions` respond. Trading does not
+  auto-start -- `/trading/start` is explicit.
+- Signals generate on every M1 close with MTF active (`m15_bias`, `m5_confirm`, `m1_entry`,
+  `adx`). Two candle closes observed, both `hold`, so no entry was attempted.
+- **`_spread_ok` verified on the real path** -- real `MarketData.get_symbol_tick`, real
+  `Broker.get_point_size`, real `execute_signals`, with only `place_buy`/`place_sell`
+  intercepted so a gate failure would be recorded rather than sent. 30 runs against live ticks
+  with the threshold forced to 0.5 points: **30/30 correct** (8 blocked at 1.0 pts with the
+  expected `Skipping signal (spread too wide)` log, 22 allowed at 0.0 pts).
+- `get_broker_utc_offset_hours` resolves to 5 and the session filter compares true UTC
+  correctly (candle-basis 00:32 - 5h = 19:32 UTC). Gating is not shifted.
+
+**Finding worth acting on: `MAX_SPREAD_POINTS = 10` is effectively inert on this feed.**
+Sampled live EURUSD spread is **0-1 points (0.0-0.1 pips)** -- 14 of 20 samples were exactly
+0.0, the rest 1.0. PR #70 tuned 15 -> 10 as "~3x the 0.27-0.39 pip spread EURUSD normally
+shows", i.e. it assumed 2.7-3.9 points; the live demo feed is roughly 4x tighter than that
+assumption. At 10 points the gate will only ever fire during a rollover spike, which may well be
+the intent -- but it is not doing anything the rest of the day, and the 15 -> 10 retune changed
+nothing observable. Worth deciding whether the threshold should track the feed this account
+actually quotes, and whether that feed is representative of the broker this would run against
+for real.
+
+`EXIT_BE_ARMING_TICKS = 30` was **not** exercised: it only engages once a position is open, and
+no signal went actionable during the run. Still unvalidated live.
 
 ## 7. Exit-strategy coverage dropped during the item-1 cleanup
 
