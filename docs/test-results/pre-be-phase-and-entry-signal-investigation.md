@@ -232,3 +232,53 @@ to give up* on a position already open.
 Three parallel backtests exhausted the MT5 terminal's connection slots and aborted mid-batch
 with `MT5 initialization failed`, silently losing 7 of 12 windows for two variants. `initialize()`
 now retries with backoff. Two concurrent streams are safe; three are not.
+
+## Test L (2026-09-24): n-tick entry confirmation -- PASSES, but small
+
+Measured against the SHIPPED config (spread gate + arm=30), not a bare baseline, on the 12
+date-pinned windows.
+
+| | shipped | n-tick 2 | n-tick 3 |
+|---|---|---|---|
+| Total | -$27,938 | -$15,815 | -$10,901 |
+| Per trade | -$0.693 | **-$0.629** | **-$0.627** |
+| Trades | 40,344 | 25,130 (-38%) | 17,374 (-57%) |
+| Windows won | -- | **12 / 12** | **12 / 12** |
+| Pooled win rate | 22.1% | 23.4% | 23.3% |
+
+Both pass the pre-registered bar (>= 9/12 AND pooled per-trade improves). **But most of the
+headline total improvement is simply trading less**: per trade gains only +$0.064 while trade
+count falls 38%.
+
+**The cost/benefit was predicted in advance and landed at the margin.** Before running, the
+entry penalty was measured directly from tick data -- requiring 2 consecutive favorable ticks
+means entering 0.33 pips worse, or **$0.66 at 0.2 lots** (N=3: 0.59 pips, $1.19) -- against a
+maximum possible saving of ~$0.68/trade from eliminating the pre-BE loss buckets. Predicted:
+"N=2 is a coin flip, N=3 probably loses". Actual: +$0.064 for N=2, the saving edging out the
+cost by a hair. N=3 matched it only by discarding 57% of signals.
+
+**The half-week smoke test's 40.1% win rate was an artifact.** Real pooled win rate moves
+22.1% -> 23.4%, and per window it is mixed (W9 20.1->26.2 and W10 17.4->24.2, but W12
+24.6->20.4 and W11 24.5->21.7). Nothing in this investigation has systematically moved win
+rate, which remains the variable that decides profitability.
+
+**N=2 preferred over N=3**: identical per-trade result, 45% more samples retained.
+
+**Note on the thesis mismatch.** n-tick is a *momentum* filter on a *mean-reversion* entry
+(98.4% of signals are RSI-alone). It requires price to move your way before entering, on a
+signal whose premise is that the move your way is a limited snapback -- so part of the expected
+move is spent before entry. The aligned filter for an RSI entry would be the inverse: wait for
+price to move *further against* you, buying a better price into a more stretched condition.
+Untested.
+
+### Running totals after Test L
+
+| Change | Per-trade gain | Windows |
+|---|---|---|
+| Entry spread gate 1.0p | **+$0.268** | 12/12 |
+| 30-tick arming wall | +$0.055 | 12/12 (vs gate alone) |
+| n-tick 2 | +$0.064 | 12/12 (vs gate+wall) |
+| `$2` staircase trail | +$0.02 | 12 (not shipped) |
+
+Baseline -$1.016 -> -$0.629 per trade with all three, a 38% reduction. **Still no profitable
+window in 226 measured runs.**
