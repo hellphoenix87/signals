@@ -56,14 +56,51 @@ class ProfitExitManager:
         pct = float(getattr(self.config, "trail_gap_pct", 0.6) or 0.6)
         return max(floor, pct * peak)
 
+    def _staircase_trigger(self, peak: float):
+        """Highest staircase tier fully crossed by `peak`, or `None` if the
+        staircase is inactive for it.
+
+        Tiers run `first_tier`, `first_tier + width`, `first_tier + 2*width`,
+        ... and the one returned becomes the stop, so giveback is capped at
+        just under one `width` however large the peak grows -- unlike
+        `_trail_gap`, whose allowance scales with the peak. A `first_tier` of
+        `0` means "same as `width`" (the validated $2/$4/$6... shape); see
+        `Config.EXIT_STAIRCASE_FIRST_TIER` for why engaging earlier was
+        rejected.
+        """
+        width = float(getattr(self.config, "staircase_tier_width", 0.0) or 0.0)
+        if width <= 0.0:
+            return None
+
+        first = float(getattr(self.config, "staircase_first_tier", 0.0) or 0.0)
+        if first <= 0.0:
+            first = width
+
+        if peak < first:
+            return None
+
+        return first + int((peak - first) / width) * width
+
+    def _trail_trigger(self, peak: float):
+        """Return `(trigger, reason)` for the configured post-breakeven trail.
+
+        `trigger` is `None` when no trail currently applies -- for the
+        staircase that means the peak has not reached the first tier yet.
+        Callers must treat `None` as "do not exit", not as `0`.
+        """
+        if getattr(self.config, "staircase_trail_enabled", False):
+            return self._staircase_trigger(peak), "staircase_trail_breach"
+
+        return peak - self._trail_gap(peak), "trailing_breach_pct_of_peak"
+
     def check_exit_on_tick(self, position, tick, state: PosState):
         """Arm break-even, track best-profit-seen, and exit if profit pulls
-        back more than the trailing gap (`_trail_gap`, a percentage of peak
-        with a dollar floor) from that peak
-        (`reason="trailing_breach_pct_of_peak"`). The trail only actively
-        enforces once the gap-adjusted trigger is positive -- a peak still
-        smaller than its own gap leaves the trail inactive rather than
-        force-exiting on ordinary noise near breakeven."""
+        back past the configured trail trigger (`_trail_trigger`: a
+        staircase tier when `staircase_trail_enabled`, else a
+        percentage-of-peak gap). The trail only actively enforces once that
+        trigger is positive -- a peak below the first tier (or smaller than
+        its own gap) leaves the trail inactive rather than force-exiting on
+        ordinary noise near breakeven."""
         if not getattr(self.config, "profit_exits_on_tick", True):
             return None
 
@@ -116,16 +153,16 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        trigger = state.best_profit - self._trail_gap(state.best_profit)
+        trigger, breach_reason = self._trail_trigger(state.best_profit)
 
         if 0.00 < profit < state.best_profit:
-            if trigger > 0.0 and profit <= trigger:
+            if trigger is not None and trigger > 0.0 and profit <= trigger:
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
                     position_side=side,
                     volume=volume,
-                    reason="trailing_breach_pct_of_peak",
+                    reason=breach_reason,
                 )
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
             if profit >= state.best_profit:
@@ -192,16 +229,16 @@ class ProfitExitManager:
             state.best_profit = profit
             state.breach_ticks = 0
 
-        trigger = state.best_profit - self._trail_gap(state.best_profit)
+        trigger, breach_reason = self._trail_trigger(state.best_profit)
 
         if 0.00 < profit < state.best_profit:
-            if trigger > 0.0 and profit <= trigger:
+            if trigger is not None and trigger > 0.0 and profit <= trigger:
                 return self._exit_action(
                     ticket=ticket,
                     symbol=symbol,
                     position_side=side,
                     volume=volume,
-                    reason="trailing_breach_pct_of_peak",
+                    reason=breach_reason,
                 )
             state.breach_ticks = getattr(state, "breach_ticks", 0) + 1
             if profit >= state.best_profit:

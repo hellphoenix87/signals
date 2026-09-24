@@ -55,6 +55,18 @@ class ExitTradeConfig:
     )
     trail_gap_pct: float = float(getattr(Config, "EXIT_TRAIL_GAP_PCT", 0.6) or 0.6)
 
+    staircase_trail_enabled: bool = bool(
+        getattr(Config, "EXIT_STAIRCASE_TRAIL_ENABLED", False)
+    )
+    staircase_tier_width: float = float(
+        getattr(Config, "EXIT_STAIRCASE_TIER_WIDTH", 2.0) or 2.0
+    )
+    # 0.0 is a legitimate configured value meaning "same as tier width", so it
+    # is resolved in ProfitExitManager rather than coerced away by `or` here.
+    staircase_first_tier: float = float(
+        getattr(Config, "EXIT_STAIRCASE_FIRST_TIER", 0.0) or 0.0
+    )
+
     eps_pips: float = float(getattr(Config, "EXIT_EPS_PIPS", 0.0) or 0.0)
 
     exit_on_first_tick_not_favorable: bool = bool(
