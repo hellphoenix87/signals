@@ -31,7 +31,10 @@ sequential stages (4 -> 2 -> 4 -> 2 windows), stopping on a failed stage.
 - All four graded on total: TIGHT made 63 / 1 / 55 / 14 trades (0-14% kept) vs SHIPPED 457 / 55 /
   3,488 / 3,350. SHIPPED lost -$338 / -$132 / -$2,527 / -$2,938; TIGHT -$9 / -$1 / -$20 / -$12.
 - Cumulative: SHIPPED 17,147 tr -$13,209 (-$0.770/tr); TIGHT 916 tr -$300 (-$0.328/tr).
-### Phase 5: Stage 4 -- W18, W24; write docs/test-results/tight-spread-gate.md
+### Phase 5: Stage 4 -- W18, W24; write docs/test-results/tight-spread-gate.md -- PASS, 12/12 (bar >= 9)
+- W18: TIGHT -$0.953/tr vs -$1.422 (198 vs 255 trades). W24: TIGHT abstains (6 trades) vs -$3,321.
+- Final pooled: SHIPPED 21,123 tr -$16,893 (-$0.800/tr); TIGHT 1,120 tr -$496 (-$0.443/tr).
+- Write-up: docs/test-results/tight-spread-gate.md.
 
 Each stage: one unfiltered run per window, grade against the pre-registered cumulative bar,
 commit + push, report. A failed stage ends the plan.
