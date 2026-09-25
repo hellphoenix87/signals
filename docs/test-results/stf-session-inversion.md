@@ -5,8 +5,8 @@ Date: 2026-09-25. Pre-registered in [pre-registrations-2026-09-22.md](pre-regist
 
 **TL;DR**: For single-timeframe (STF, live since PR #73), the live session filter blocks the
 *better* trades. Trading only 08:00-18:59 UTC (the hours it currently blocks) beats the shipped
-filter on per-trade expectancy in **6 of 6** graded windows, pooled -$0.665 -> **-$0.539/trade**
-(+$0.126), and cuts total loss **29%** (-$13,558 -> -$9,628). **Every arm still loses in every
+filter on per-trade expectancy in **8 of 8** graded windows, pooled -$0.648 -> **-$0.509/trade**
+(+$0.139), and cuts total loss **28%** (-$17,216 -> -$12,313). **Every arm still loses in every
 window** -- this is "lose less", not an edge. Stage status: see [Stages](#stages).
 
 ## Why the filter exists, and why it doesn't transfer
@@ -51,9 +51,11 @@ often. The proxy could not see that; the full lifecycle does.
 | W2 (calm) | -0.123 | -0.061 | +0.062 | -$462 | -$199 |
 | W10 | -0.700 | -0.427 | +0.273 | -$2,334 | -$1,222 |
 | W8 | -0.687 | -0.436 | +0.251 | -$2,494 | -$1,321 |
-| **Pooled (6)** | **-0.665** | **-0.539** | **+0.126** | **-$13,558** | **-$9,628** |
+| W9 | -0.610 | -0.404 | +0.206 | -$2,240 | -$1,334 |
+| W12 | -0.565 | -0.448 | +0.117 | -$1,419 | -$1,351 |
+| **Pooled (8)** | **-0.648** | **-0.509** | **+0.139** | **-$17,216** | **-$12,313** |
 
-Trade counts: SHIPPED 20,404, INVERTED 17,861 (12% fewer), OFF 38,265.
+Trade counts: SHIPPED 26,586, INVERTED 24,181 (9% fewer), OFF 50,767.
 
 ### Screen (W6/W5/W7/W2) -- PASS
 
@@ -66,6 +68,13 @@ trading days.
 Bar fixed before grading (not in the original pre-registration, stated before the numbers were
 read): cumulative >= 5 of 6 windows, pooled per-trade and pooled total both better. Result: 6/6,
 and the two expansion windows show the **largest** gains of any window (+$0.27, +$0.25).
+
+### Expand 2 (+W9/W12) -- PASS
+
+Bar stated before grading: cumulative >= 6 of 8, pooled per-trade and total both better. Result:
+**8/8**. W12 straddles the 26 Oct 2025 DST change (handled by the production conversion). In W12
+INVERTED traded **more** than SHIPPED (3,015 vs 2,510) and still lost less -- the gain is not an
+artifact of trading less.
 
 ## Mechanism
 
@@ -86,7 +95,8 @@ them go on to the trail. Post-BE behaviour (cap cost per hit) is unchanged.
 - **W6 is a tie** (+$0.007). The gain is not uniform; it is largest in winter windows (W10, W8).
 - **Not tested: which of the 24 hours matter.** Only the pre-registered 11-hour block, flipped.
   Single hours are unstable (session-filter-analysis.md, Finding 4) -- do not hand-pick hours.
-- **Fewer trades** (-12%) accounts for part of the total-loss reduction; per-trade improves too.
+- **Fewer trades** (-9% pooled) accounts for part of the total-loss reduction, but per-trade
+  improves in every window, and W12 improves with *more* trades.
 
 ## Side finding: the filter was 2h off in winter
 
@@ -109,8 +119,8 @@ numbers to the cent.
 |---|---|---|
 | Screen | W6, W5, W7, W2 | PASS (4/4) |
 | Expand 1 | + W10, W8 | PASS (6/6) |
-| Expand 2 | + W9, W12 | running |
-| Full | + W4, W3, W1 | -- (W3 was the hypothesis source) |
+| Expand 2 | + W9, W12 | PASS (8/8) |
+| Full | + W4, W1 (W3 excluded: hypothesis source) | running |
 
 ## Shipping (not done -- user decision)
 
