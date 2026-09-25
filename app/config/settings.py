@@ -97,7 +97,23 @@ class Config:
     # See docs/test-results/pre-be-phase-and-entry-signal-investigation.md
     MAX_SPREAD_POINTS: float = 10
 
-    USE_MULTI_TIMEFRAME_SIGNALS = True
+    # STF (False) vs MTF gating (True). Set to False on 2026-09-25: research
+    # moved to single-timeframe long ago -- MTF gating "costs 30x the sample
+    # size and picks worse trades" in 10 of 12 windows, and "its smaller total
+    # loss comes from abstaining, not selecting" (see
+    # docs/test-results/pre-be-phase-and-entry-signal-investigation.md) -- but
+    # this flag was left True from PR #46, so live ran a strategy none of the
+    # recent evidence was measured on. The $2 staircase trail (PR #72) in
+    # particular was validated on four STF windows while live ran MTF.
+    #
+    # COST, deliberately accepted: MTF took ~25 trades per 4-week window, STF
+    # takes ~3,625. At a negative per-trade expectancy (-$0.31 in W3) that is
+    # roughly 40-45x more absolute loss per window. STF is the better research
+    # vehicle (statistical power); it is NOT a cheaper live config. Revisit
+    # when per-trade expectancy is what's being optimised.
+    #
+    # Every MTF_* setting below is kept so flipping back stays one line.
+    USE_MULTI_TIMEFRAME_SIGNALS = False
     MTF_BIAS_SMA_SHORT: int = 10
     MTF_BIAS_SMA_LONG: int = 50
     MTF_ADX_PERIOD: int = 14
