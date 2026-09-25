@@ -1248,6 +1248,9 @@ def simulate_full_lifecycle(
         "profit": profit,
         "ticks_used": idx + 1,
         "entry_price": entry_price,
+        # Logged so spread gates can be graded from one ungated run: entry
+        # spread is the strongest single predictor of a pre-BE timeout.
+        "entry_spread_pips": _entry_spread_pips(entry_tick, pip_size),
         "cf_recovered_to_be": cf_recovered_to_be,
         "cf_ticks_to_recover": cf_ticks_to_recover,
         "cf_min_profit_after_exit": cf_min_profit_after_exit,
@@ -2992,7 +2995,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
         "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
-        "outcome", "profit", "ticks_used", "entry_price", "post_be_peak_profit", "be_arm_ticks",
+        "outcome", "profit", "ticks_used", "entry_price", "entry_spread_pips", "post_be_peak_profit", "be_arm_ticks",
         "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
         "cf_recovered_to_neg1", "cf_ticks_to_recover_neg1",
         "cf_post_recovery_peak", "cf_reversed_after_recovery", "cf_ticks_to_reversal_after_recovery",

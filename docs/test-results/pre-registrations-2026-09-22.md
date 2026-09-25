@@ -138,6 +138,49 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
 - On PASS: expand to W10/W8 without looking at them first. On FAIL: stop; the W3 split was noise.
 - Report per window: trades, total, per-trade, win rate for all three arms.
 
+## Test N (2026-09-25, before running) -- tight entry spread gate (1 point = 0.1 pip)
+
+- **Hypothesis source** (exploratory, the 10 Test M windows): the pre-BE leak is ~90% of net
+  loss, and it is almost entirely the 30-tick `failed_to_reach_be` timeout. Entry spread is the
+  dominant predictor of that timeout (AUC 0.75; 0.0 pip -> 0% timeouts, 0.2 -> 29%, >=0.5 -> 52%+);
+  RSI/MACD values carry no information (AUC 0.50). Largely mechanical: a zero-spread entry is born
+  at breakeven. Windows differ mostly by broker spread regime (zero-spread entries: W2 63%, W1 43%
+  vs W5/W6 0%), not market regime. Pooled, entries <= 0.1 pip averaged -$0.13/trade vs -$0.51 for
+  all. Those 10 windows are spent and are NOT graded.
+- **Arms** (both = live config: STF, staircase, arm=30, DST-correct session filter ON blocking
+  08-18 UTC):
+  - SHIPPED: entry spread gate 1.0 pip (`MAX_SPREAD_POINTS = 10`).
+  - TIGHT: entry spread <= 1 point = 0.1 pip. Live form: `MAX_SPREAD_POINTS = 1.5` (spreads are
+    whole points; 1.5 avoids `_spread_ok`'s float `<=` rejecting a 1-point spread computed as
+    1.0000000001).
+  Both read from ONE run per window (`--max-entry-spread-pips 1.0`, session filter OFF), using the
+  logged `entry_spread_pips` (TIGHT = round(entry_spread_pips * 10) <= 1) and the production
+  `SessionFilteredSignalStrategy._utc_hour` (SHIPPED session = UTC hour not in 08-18). Trades are
+  simulated independently, so a subset equals a gated run.
+- **Secondary, not graded**: the same TIGHT-vs-SHIPPED comparison under all hours and under the
+  inverted session (Test M).
+- **Windows** (unseen; tick data verified): W13 2025-09-23, W14 08-26, W15 07-29, W16 07-01,
+  W17 06-03, W18 05-06, W19 04-08, W20 03-11, W21 02-11, W22 01-14, W23 2024-12-17, W24 11-19
+  (each start date + 28 days). **Stage order fixed now, spread across the year, not chosen by
+  spread regime**:
+  - Stage 1 (direction): W13, W16, W19, W22
+  - Stage 2 (confirm): W14, W20
+  - Stage 3: W15, W17, W21, W23
+  - Stage 4: W18, W24
+- **Per-window win**: TIGHT $/trade > SHIPPED $/trade. If TIGHT has < 100 trades in a window
+  (it abstained through a wide-spread regime) per-trade is not graded; TIGHT wins that window iff
+  its total loss is smaller.
+- **Stage bars (cumulative)**, each ALSO requiring pooled per-trade (TIGHT's own trades) better and
+  pooled total no worse:
+  - Stage 1: >= 3 of 4 -- sets direction. Fail -> stop.
+  - Stage 2: >= 5 of 6. Fail -> stop.
+  - Stage 3: >= 8 of 10.
+  - Stage 4: >= 9 of 12 -> PASS = candidate to ship (`MAX_SPREAD_POINTS = 1.5`, user decision).
+- **Report per window**: trades and % kept, zero-spread share, $/trade and total for both arms.
+- **Known risk**: demo-account spreads. On a real account with typical spreads >= 0.2 pip, TIGHT
+  would barely trade -- which would itself say the strategy only survives near-zero spread.
+- Reserve windows W25-W30 (2024-06-04 .. 2024-10-22) stay unseen.
+
 ## Testing protocol from 2026-09-24: staged escalation
 
 Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only
