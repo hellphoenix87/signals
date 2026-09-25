@@ -24,7 +24,7 @@ they claim to.
 - Acceptance: frame-minus-UTC = 3 for Feb/early-Mar/Dec timestamps, 5 for 30 Mar-24 Oct; summer
   behaviour identical to the live-measured offset (no live change today). Verified.
 
-### Phase 3: Screen W6/W5/W7/W2 and record the result
+### Phase 3: Screen W6/W5/W7/W2 and record the result -- DONE (PASS at every stage, 10/10)
 - Change: one unfiltered production run per window; grade SHIPPED vs INVERTED per the
   pre-registration; write `docs/test-results/stf-session-inversion.md`.
 - Acceptance: verdict stated against the pre-registered criteria (a)/(b)/(c). On PASS, expansion

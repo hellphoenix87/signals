@@ -5,9 +5,10 @@ Date: 2026-09-25. Pre-registered in [pre-registrations-2026-09-22.md](pre-regist
 
 **TL;DR**: For single-timeframe (STF, live since PR #73), the live session filter blocks the
 *better* trades. Trading only 08:00-18:59 UTC (the hours it currently blocks) beats the shipped
-filter on per-trade expectancy in **8 of 8** graded windows, pooled -$0.648 -> **-$0.509/trade**
-(+$0.139), and cuts total loss **28%** (-$17,216 -> -$12,313). **Every arm still loses in every
-window** -- this is "lose less", not an edge. Stage status: see [Stages](#stages).
+filter on per-trade expectancy in **10 of 10** graded windows (every stage of the staged protocol),
+pooled -$0.571 -> **-$0.445/trade** (+$0.126, Welch t = 9.2, better on 147 of 198 trading days),
+and cuts total loss **31%** (-$19,501 -> -$13,436). **It is still net negative in 9 of 10
+windows** -- this is "lose less", not an edge. Shipping it is a one-line Config change (below).
 
 ## Why the filter exists, and why it doesn't transfer
 
@@ -53,9 +54,12 @@ often. The proxy could not see that; the full lifecycle does.
 | W8 | -0.687 | -0.436 | +0.251 | -$2,494 | -$1,321 |
 | W9 | -0.610 | -0.404 | +0.206 | -$2,240 | -$1,334 |
 | W12 | -0.565 | -0.448 | +0.117 | -$1,419 | -$1,351 |
-| **Pooled (8)** | **-0.648** | **-0.509** | **+0.139** | **-$17,216** | **-$12,313** |
+| W4 | -0.503 | -0.383 | +0.120 | -$1,822 | -$1,174 |
+| W1 (calmest) | -0.117 | +0.017 | +0.134 | -$462 | **+$51** |
+| **Pooled (10)** | **-0.571** | **-0.445** | **+0.126** | **-$19,501** | **-$13,436** |
 
-Trade counts: SHIPPED 26,586, INVERTED 24,181 (9% fewer), OFF 50,767.
+Trade counts: SHIPPED 34,170, INVERTED 30,207 (12% fewer), OFF 64,377. OFF sits between the two
+arms on every window, as it must (it is their union).
 
 ### Screen (W6/W5/W7/W2) -- PASS
 
@@ -76,6 +80,13 @@ Bar stated before grading: cumulative >= 6 of 8, pooled per-trade and total both
 INVERTED traded **more** than SHIPPED (3,015 vs 2,510) and still lost less -- the gain is not an
 artifact of trading less.
 
+### Full (+W4/W1) -- PASS
+
+Bar stated before grading: cumulative >= 8 of 10, pooled per-trade and total both better. Result:
+**10/10**. W1 under INVERTED is +$51.20 -- the first non-negative window of the whole
+investigation, but +$0.017/trade on 2,961 trades is noise around zero, not a profit.
+W11 is not part of the protocol's stages and was not run.
+
 ## Mechanism
 
 Screen windows pooled, by exit reason:
@@ -91,11 +102,15 @@ them go on to the trail. Post-BE behaviour (cap cost per hit) is unchanged.
 
 ## Caveats
 
-- **Still net negative everywhere.** Inversion is the best filter found, not a profitable system.
+- **Still net negative in 9 of 10 windows** (W1 is +$51, i.e. ~zero). Inversion is the best filter
+  found, not a profitable system.
 - **W6 is a tie** (+$0.007). The gain is not uniform; it is largest in winter windows (W10, W8).
+- **The expansion bars (5/6, 6/8, 8/10) were not in the original pre-registration**; each was
+  stated before that stage's numbers were read. It passed every one with no losing window, so the
+  exact bar did not decide anything.
 - **Not tested: which of the 24 hours matter.** Only the pre-registered 11-hour block, flipped.
   Single hours are unstable (session-filter-analysis.md, Finding 4) -- do not hand-pick hours.
-- **Fewer trades** (-9% pooled) accounts for part of the total-loss reduction, but per-trade
+- **Fewer trades** (-12% pooled) accounts for part of the total-loss reduction, but per-trade
   improves in every window, and W12 improves with *more* trades.
 
 ## Side finding: the filter was 2h off in winter
@@ -120,9 +135,11 @@ numbers to the cent.
 | Screen | W6, W5, W7, W2 | PASS (4/4) |
 | Expand 1 | + W10, W8 | PASS (6/6) |
 | Expand 2 | + W9, W12 | PASS (8/8) |
-| Full | + W4, W1 (W3 excluded: hypothesis source) | running |
+| Full | + W4, W1 (W3 excluded: hypothesis source) | PASS (10/10) |
 
 ## Shipping (not done -- user decision)
+
+The DST fix on this branch must merge first (or with it).
 
 Config only, no code: `SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL["EURUSD"] =
 list(range(19, 24)) + list(range(0, 8))`. Depends on the DST fix above being merged first, or the
