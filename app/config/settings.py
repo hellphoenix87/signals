@@ -148,8 +148,9 @@ class Config:
 
     # Backtest found MTF badly underperforms during 08:00-18:59 UTC
     # (London open through the NY session) across two independent
-    # windows -- see docs/test-results/session-filter-analysis.md. No
-    # effect found for single-timeframe, so this is harmless there.
+    # windows -- see docs/test-results/session-filter-analysis.md. For
+    # single-timeframe it is NOT harmless: a W3 full-lifecycle smoke test
+    # found it blocks the better STF trades -- under test as Test M.
     USE_SESSION_FILTER: bool = True
     # Per-symbol blocked-hours windows. EURUSD's 08-18 UTC block does NOT
     # transfer to other pairs -- docs/test-results/session-filter-per-pair-analysis.md
@@ -166,6 +167,14 @@ class Config:
     # deployment machine. Pin an int only for offline/deterministic tests
     # without an MT5 connection.
     SESSION_FILTER_UTC_OFFSET_HOURS = None
+    # IANA zone of the broker server's wall clock. When set (and no offset is
+    # pinned above), the session filter converts every timestamp to UTC with
+    # that date's DST rules, instead of one offset measured at startup -- which
+    # goes 2h stale when the EU clocks change (+5 -> +3 on this machine) and is
+    # wrong for every backtest candle on the other side of a change. Verified
+    # 2026-09-25: the broker follows EU DST (week-close bars shift at 29 Mar,
+    # not the US 8 Mar change) at UTC+2/+3. None falls back to live detection.
+    BROKER_TIMEZONE: str | None = "Europe/Athens"
 
     MAGIC_NUMBER: int = 123456
     MAX_DEVIATION: int = 5

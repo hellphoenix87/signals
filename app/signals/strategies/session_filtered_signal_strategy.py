@@ -1,5 +1,6 @@
 import datetime
 from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo
 from app.signals.strategies.base_signal_strategy import BaseSignalStrategy
 
 
@@ -13,9 +14,10 @@ class SessionFilteredSignalStrategy(BaseSignalStrategy):
     through the NY session) than outside it, reproducibly across two
     independent windows -- likely because its bias/confirm/ADX gating
     gets whipsawed by the faster, choppier moves in the most heavily-
-    traded hours. No such effect was found for the single-timeframe
-    strategy, so this wrapper is a no-op for it in practice, not
-    something that needs separate tuning per strategy.
+    traded hours. For single-timeframe the fixed target/stop proxy found
+    no effect, but the full-lifecycle W3 smoke test found the OPPOSITE:
+    the blocked hours were the better STF trades -- see Test M in
+    docs/test-results/pre-registrations-2026-09-22.md.
     """
 
     def __init__(
@@ -23,12 +25,30 @@ class SessionFilteredSignalStrategy(BaseSignalStrategy):
         strategy: BaseSignalStrategy,
         blocked_hours_utc,
         time_extractor: Callable[[Any], Optional[Any]],
-        utc_offset_hours: int,
+        utc_offset_hours: Optional[int] = None,
+        broker_timezone: Optional[str] = None,
     ):
+        """
+        Args:
+            strategy: The wrapped strategy.
+            blocked_hours_utc: UTC hours (0-23) during which signals are held.
+            time_extractor: Pulls the candle-frame datetime out of `candles`.
+            utc_offset_hours: Fixed candle-frame-minus-UTC offset. Used only
+                when `broker_timezone` is not given.
+            broker_timezone: IANA zone of the broker server's wall clock
+                (e.g. "Europe/Athens"). When given, each timestamp is
+                converted to UTC with that date's DST rules, instead of one
+                offset frozen at startup -- which goes stale across a DST
+                change and is wrong for every backtest candle on the other
+                side of one.
+        """
+        if broker_timezone is None and utc_offset_hours is None:
+            raise ValueError("SessionFilteredSignalStrategy needs utc_offset_hours or broker_timezone")
         self.strategy = strategy
         self.blocked_hours_utc = set(blocked_hours_utc)
         self.time_extractor = time_extractor
-        self.utc_offset_hours = int(utc_offset_hours)
+        self.utc_offset_hours = int(utc_offset_hours) if utc_offset_hours is not None else None
+        self.broker_tz = ZoneInfo(broker_timezone) if broker_timezone else None
 
     def __getattr__(self, name):
         """Forward anything not defined here (e.g. `on_new_tick`,
@@ -85,5 +105,19 @@ class SessionFilteredSignalStrategy(BaseSignalStrategy):
     def _is_blocked(self, current_time: Optional[datetime.datetime]) -> bool:
         if current_time is None:
             return False
-        utc_hour = (current_time.hour - self.utc_offset_hours) % 24
-        return utc_hour in self.blocked_hours_utc
+        return self._utc_hour(current_time) in self.blocked_hours_utc
+
+    def _utc_hour(self, frame_time: datetime.datetime) -> int:
+        """Map a candle-frame datetime to its true UTC hour.
+
+        Candle-frame times are `datetime.fromtimestamp(mt5_epoch)`, and an MT5
+        epoch encodes the broker's *wall clock* as if it were UTC. So
+        `.timestamp()` recovers the epoch, reading it back as UTC gives the
+        broker wall clock, and localising that to the broker's zone gives
+        the real instant.
+        """
+        if self.broker_tz is None:
+            return (frame_time.hour - self.utc_offset_hours) % 24
+        broker_wall = datetime.datetime.fromtimestamp(frame_time.timestamp(), tz=datetime.timezone.utc)
+        real = broker_wall.replace(tzinfo=self.broker_tz).astimezone(datetime.timezone.utc)
+        return real.hour

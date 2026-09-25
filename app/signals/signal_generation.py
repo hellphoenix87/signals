@@ -262,8 +262,11 @@ def strategy_factory(
     if getattr(config, "USE_SESSION_FILTER", False):
         blocked_hours_by_symbol = getattr(config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {})
         blocked_hours = blocked_hours_by_symbol.get(symbol, []) if symbol else []
+        # Precedence: a pinned offset (offline tests) > the broker's zone
+        # (per-timestamp, DST-correct) > a one-off live measurement.
         utc_offset = getattr(config, "SESSION_FILTER_UTC_OFFSET_HOURS", None)
-        if utc_offset is None:
+        broker_timezone = None if utc_offset is not None else getattr(config, "BROKER_TIMEZONE", None)
+        if utc_offset is None and broker_timezone is None:
             utc_offset = get_broker_utc_offset_hours()
         if use_multi:
             entry_tf = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
@@ -272,6 +275,8 @@ def strategy_factory(
             ).get("time")
         else:
             time_extractor = lambda candles: (candles[-1] if candles else {}).get("time")
-        strategy = SessionFilteredSignalStrategy(strategy, blocked_hours, time_extractor, utc_offset)
+        strategy = SessionFilteredSignalStrategy(
+            strategy, blocked_hours, time_extractor, utc_offset, broker_timezone=broker_timezone
+        )
 
     return strategy
