@@ -20,7 +20,13 @@ sequential stages (4 -> 2 -> 4 -> 2 windows), stopping on a failed stage.
 - Pooled: SHIPPED 6,630 tr -$5,272 (-$0.795/tr); TIGHT 439 tr -$91 (-$0.207/tr).
 - Broker spread regime shifts over time: 1.3p (Apr/Jul 2025) -> 0.4p (Jan 2025) -> 0.1p (Oct 2025)
   -> 0.0p (Sep 2026, live today).
-### Phase 3: Stage 2 -- W14, W20 (confirm or decline)
+### Phase 3: Stage 2 -- W14, W20 (confirm or decline) -- PASS, cumulative 6/6 (bar >= 5)
+- W14: TIGHT -$0.567/tr vs SHIPPED -$0.575 (299 vs 1,670 trades) -- essentially a TIE on per-trade;
+  the win is almost all from trading 18% as often (-$170 vs -$960).
+- W20: TIGHT abstains (45 trades, +$2.80) vs SHIPPED 1,497 trades at -$0.697 = -$1,043.
+- Cumulative: SHIPPED 9,797 tr -$7,275 (-$0.743/tr); TIGHT 783 tr -$258 (-$0.329/tr).
+- Reading so far: the gain is mostly ABSTENTION from wide-spread regimes. When TIGHT does trade it is
+  still negative (W13 -$0.15, W14 -$0.57/tr).
 ### Phase 4: Stage 3 -- W15, W17, W21, W23
 ### Phase 5: Stage 4 -- W18, W24; write docs/test-results/tight-spread-gate.md
 
