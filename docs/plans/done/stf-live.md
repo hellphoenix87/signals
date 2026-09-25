@@ -1,6 +1,6 @@
 # Run STF Live (disable MTF gating)
 
-Status: in-progress
+Status: done
 
 ## Goal
 
