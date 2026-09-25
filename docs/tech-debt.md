@@ -79,7 +79,8 @@ actually quotes, and whether that feed is representative of the broker this woul
 for real.
 
 `EXIT_BE_ARMING_TICKS = 30` was **not** exercised: it only engages once a position is open, and
-no signal went actionable during the run. Still unvalidated live.
+no signal went actionable during the run. Still unvalidated live -- as is the staircase trail
+shipped on 2026-09-24, which has never produced a live `staircase_trail_breach`.
 
 ## 7. Exit-strategy coverage dropped during the item-1 cleanup
 
@@ -98,6 +99,17 @@ the "delete obsolete, don't fix" call made during that work:
 
 This is money-moving logic with no safety net. Rebuilding it against the current API is a small,
 self-contained piece of work.
+
+## 9. Post-BE loss cap needs retuning against the staircase trail
+
+`EXIT_POST_BE_LOSS_CAP_MONEY = 1.0` was tuned against the percentage-of-peak trail. The staircase
+trail shipped on 2026-09-24 changes which trades survive to meet the cap, and the cap is where the
+losses concentrate (-$2,787 / -$2,591 across W3/W4 even with the staircase, vs a net-positive
+trail). `scripts/backtest_exit_strategy.py --sweep-staircase-cap` exists for this.
+
+Treat any single-window win with suspicion: widening this cap looked excellent on W1-W2
+(+$1,124 / +$3,209) and reversed hard on W3/W4 (-$595 / -$1,350). See
+[test-results/staircase-trail-w3-w4-confirmation.md](test-results/staircase-trail-w3-w4-confirmation.md).
 
 ## 8. `docs/plans/in-progress/project-refactor-sweep.md` never finished
 

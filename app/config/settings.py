@@ -222,6 +222,27 @@ class Config:
     # docs/test-results/post-breakeven-trail-simulation.md.
     EXIT_TRAIL_GAP_FLOOR_MONEY: float = 2.0
     EXIT_TRAIL_GAP_PCT: float = 0.6
+
+    # Staircase/ratchet post-breakeven trail, replacing the percentage-of-peak
+    # trail above when enabled: as the running peak crosses each
+    # EXIT_STAIRCASE_TIER_WIDTH increment, that tier becomes the new stop, so
+    # giveback is capped at just under one tier however large the peak gets --
+    # unlike the percentage trail, whose giveback grows with the peak (60% of
+    # it). The EXIT_TRAIL_GAP_* settings above are NOT dead: they are what runs
+    # when EXIT_STAIRCASE_TRAIL_ENABLED is False.
+    #
+    # Confirmed on 4/4 windows at the live $1 post-BE cap -- W1/W2 in
+    # docs/test-results/exit-strategy-reactive-and-staircase-investigation.md,
+    # W3/W4 in docs/test-results/staircase-trail-w3-w4-confirmation.md. It
+    # reduces bleed; it does not make the system profitable (every window is
+    # still net negative, and the post-BE cap is where the money goes).
+    EXIT_STAIRCASE_TRAIL_ENABLED: bool = True
+    EXIT_STAIRCASE_TIER_WIDTH: float = 2.0
+    # Activation threshold for the FIRST tier. 0 means "same as tier width"
+    # (tiers at $2/$4/$6...), which is the validated shape. Setting this lower
+    # to engage the trail earlier was tested and was WORSE: first tier at $0.5
+    # gave W1 -$646 -> -$846 and W2 -$630 -> -$789, despite a higher win rate.
+    EXIT_STAIRCASE_FIRST_TIER: float = 0.0
     EXIT_BUFFER_TICK_LIMIT: int = 10
     EXIT_STALE_TICK_LIMIT: int = 20
     EXIT_EXTRA_REVERSAL_GUARD_PIPS: float = 0.5
