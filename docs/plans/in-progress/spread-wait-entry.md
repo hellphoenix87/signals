@@ -168,6 +168,11 @@ total, -$19 (16 trades) vs -$86 (174). Pooled: OLD 14,527 tr -$7,496 (-0.516); T
 hours (the wrapper sits inside the session filter), so it is not the expiry rate; in live hours WAIT
 kept 79-99% of TIGHT's trade count in the three trading windows (W40: 67%).
 
+Stage 2 (W32, W38) -- **PASS, cumulative 6/6** (bar >= 5). W32 (17% of entries <= 1 pt): WAIT -0.161
+vs TIGHT -0.284 $/trade -- with MORE trades (594 vs 574); W38 (2.4%, wide) graded on total, -$5 vs -$32.
+Cumulative pooled: OLD 21,442 tr -$12,012 (-0.560); TIGHT 7,321 tr -$981 (-0.134); WAIT 6,170 tr
+-$415 (-0.067).
+
 #### Subphase 3.3: Write-up
 
 - Change: `docs/test-results/spread-wait-entry.md` (setup, per-stage tables, verdict, caveats:
