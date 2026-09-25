@@ -12,7 +12,14 @@ sequential stages (4 -> 2 -> 4 -> 2 windows), stopping on a failed stage.
 - `scripts/backtest_exit_strategy.py` writes `entry_spread_pips` per trade, so one ungated run per
   window grades any spread threshold. Test N pre-registered before any W13-W24 data was run.
 
-### Phase 2: Stage 1 -- W13, W16, W19, W22 (direction)
+### Phase 2: Stage 1 -- W13, W16, W19, W22 (direction) -- PASS 4/4 (bar >= 3)
+- W13 (median spread 0.1p): TIGHT -$0.152/tr vs SHIPPED -$0.505 (427 vs 2,694 trades), -$65 vs -$1,362.
+- W22 (median 0.4p): TIGHT abstains (10 trades, -$2) vs SHIPPED 3,797 trades at -$0.935 = -$3,551.
+- W16, W19 (median 1.3p): the 1.0p gate ALREADY abstains (44 / 95 trades); TIGHT 1 trade each. Wins on
+  total, but near-trivial -- both arms sat those regimes out.
+- Pooled: SHIPPED 6,630 tr -$5,272 (-$0.795/tr); TIGHT 439 tr -$91 (-$0.207/tr).
+- Broker spread regime shifts over time: 1.3p (Apr/Jul 2025) -> 0.4p (Jan 2025) -> 0.1p (Oct 2025)
+  -> 0.0p (Sep 2026, live today).
 ### Phase 3: Stage 2 -- W14, W20 (confirm or decline)
 ### Phase 4: Stage 3 -- W15, W17, W21, W23
 ### Phase 5: Stage 4 -- W18, W24; write docs/test-results/tight-spread-gate.md
