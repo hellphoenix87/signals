@@ -1,6 +1,6 @@
 # Wait-for-zero-spread entry
 
-Status: in-progress (branch `spread-wait-entry`; PR opened only after Test O; do NOT merge before testing is finished -- user decision 2026-09-25)
+Status: done (branch `spread-wait-entry`; PR open, merge is the user's call after a live demo check)
 
 ## Goal
 
@@ -154,7 +154,7 @@ mechanism check, not a result):
     $/trade, total, mean wait seconds.
 - Acceptance: committed and pushed before the first Stage 1 run starts.
 
-#### Subphase 3.2: Run stages 1-4 sequentially
+#### Subphase 3.2: Run stages 1-4 sequentially -- DONE
 
 - Change: no code. Per stage: run, grade against the pre-registered bar, record in this plan, commit
   + push. Two concurrent MT5 streams maximum.
@@ -178,7 +178,11 @@ WAIT vs TIGHT $/trade: W33 -0.220 vs -0.267; W35 -0.216 vs -0.354 (WAIT 184 trad
 spreads common, zero spreads rare); W39 **+0.014** vs -0.069; W41 -0.004 vs -0.131. Cumulative pooled:
 OLD 35,274 tr -$19,108 (-0.542); TIGHT 12,509 tr -$1,810 (-0.145); WAIT 9,472 tr -$562 (-0.059).
 
-#### Subphase 3.3: Write-up
+Stage 4 (W36, W42) -- **PASS, 12/12** (bar >= 9). W36 WAIT **+0.110** vs TIGHT -0.238 $/trade (176 vs
+1,547 trades); W42 -0.018 vs -0.090. Final pooled: OLD 42,074 tr -$21,889 (-0.520); TIGHT 16,645 tr
+-$2,411 (-0.145); **WAIT 11,408 tr -$573 (-0.050)**. Test O PASSES -> `USE_SPREAD_WAIT_ENTRY` stays ON.
+
+#### Subphase 3.3: Write-up -- DONE (docs/test-results/spread-wait-entry.md)
 
 - Change: `docs/test-results/spread-wait-entry.md` (setup, per-stage tables, verdict, caveats:
   demo-account spreads; wide-regime windows mostly abstain; post-BE cap/trail now carries the result).
