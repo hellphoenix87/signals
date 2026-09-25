@@ -1,6 +1,6 @@
 # Wait-for-zero-spread entry
 
-Status: todo
+Status: done (branch `spread-wait-entry`; PR open, merge is the user's call after a live demo check)
 
 ## Goal
 
@@ -20,7 +20,8 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
 
 - Any change to exits (arming ticks, pre-BE SL, post-BE cap, staircase).
 - Session hours (Test M inversion stays unshipped; the test runs under the live session filter).
-- Shipping: the Config flag lands default **off**; turning it on is a separate user decision.
+- (Changed 2026-09-25: the user decided this PR SHIPS both the 0.1-pip gate and the 15 s spread
+  wait -- see Subphase 1.5. The PR is not merged until Test O is finished.)
 - MTF: the wrapper is built for the STF chain (live since PR #73). MTF compatibility is not tested.
 - Tests: MVP/POC mode -- no pytest added. Acceptance criteria below are manual/smoke checks.
 
@@ -28,7 +29,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
 
 ### Phase 1: Production wrapper
 
-#### Subphase 1.1: Config tunables
+#### Subphase 1.1: Config tunables -- DONE
 
 - Change: `app/config/settings.py` -- add, next to `MAX_SPREAD_POINTS`:
   - `USE_SPREAD_WAIT_ENTRY: bool = False`
@@ -38,7 +39,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   with a comment pointing at this plan and the numbers in Goal.
 - Acceptance: `Config.USE_SPREAD_WAIT_ENTRY is False`; app imports unchanged.
 
-#### Subphase 1.2: `SpreadWaitEntryStrategy` wrapper
+#### Subphase 1.2: `SpreadWaitEntryStrategy` wrapper -- DONE
 
 - Change: new `app/signals/strategies/spread_wait_entry_strategy.py`, class
   `SpreadWaitEntryStrategy(BaseSignalStrategy)`, modelled on `NTickConfirmedSignalStrategy`:
@@ -58,7 +59,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
 - Acceptance (manual, in a REPL with a stub base strategy): a `buy` returns `hold`; ticks with spread
   2, 1, 0 confirm on the 0; a tick past the deadline expires it; `None` spread never confirms.
 
-#### Subphase 1.3: Wire into `strategy_factory`
+#### Subphase 1.3: Wire into `strategy_factory` -- DONE
 
 - Change: `app/signals/signal_generation.py::strategy_factory` -- after the n-tick block and before
   the session filter, wrap with `SpreadWaitEntryStrategy` when `USE_SPREAD_WAIT_ENTRY` is true, using
@@ -70,7 +71,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   StrongSignalStrategy`); with it on, `SessionFilteredSignalStrategy -> SpreadWaitEntryStrategy ->
   StrongSignalStrategy`; both flags on raises.
 
-#### Subphase 1.4: Orchestrator passes real spread and tick time
+#### Subphase 1.4: Orchestrator passes real spread and tick time -- DONE
 
 - Change: `app/services/trade_services.py::SignalOrchestrator._on_tick` -- today it reads
   `getattr(tick, "spread", None)`, which MT5 ticks do not have, so `spread_points` is always `None`.
@@ -84,14 +85,29 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   signal candle and `spread_wait_confirmed` / `spread_wait_expired` within 15 s. With the flag off,
   behaviour is unchanged (n-tick is disabled live, so `on_new_tick` has no other consumer today).
 
+#### Subphase 1.5: Ship it in this PR (user decision) -- DONE
+
+- Change: `app/config/settings.py` -- `MAX_SPREAD_POINTS = 1.5` (from 10; Test N, 12/12) and
+  `USE_SPREAD_WAIT_ENTRY = True` with `SPREAD_WAIT_SECONDS = 15.0`, `SPREAD_WAIT_MAX_POINTS = 0.5`.
+- Acceptance: `strategy_factory(config=Config, symbol="EURUSD")` chain is
+  `SessionFilteredSignalStrategy -> SpreadWaitEntryStrategy -> StrongSignalStrategy`. The PR stays
+  unmerged until Test O's verdict; if Test O fails, flip `USE_SPREAD_WAIT_ENTRY` back to False before
+  merge (the 0.1-pip gate stands on Test N alone).
+
+Phase 1.1-1.4 smoke (REPL, stub base strategy): buy -> hold/`waiting_for_spread`; ticks at spread
+2, 1, None do not confirm; spread 0 at +4 s confirms (`spread_wait_seconds=4.0`); a spread-0 tick at
++16 s expires it; hold passes through. Factory: flag off `Session -> Strong`; on
+`Session -> SpreadWait -> Strong`; with n-tick also on -> ValueError. Orchestrator spread: 1 pt ->
+1.0000000000065 (the float edge the 0.5/1.5 thresholds exist for), 0 pt -> 0.0, no bid/ask -> None.
+
 ### Phase 2: Backtest drives the production wrapper
 
-#### Subphase 2.1: `--spread-wait` in the full-lifecycle backtest
+#### Subphase 2.1: `--spread-wait` in the full-lifecycle backtest -- DONE
 
-- Change: `scripts/backtest_exit_strategy.py` -- add `--spread-wait` (and optional overrides
-  `--spread-wait-max-points`, `--spread-wait-seconds`). When set, force
-  `Config.USE_SPREAD_WAIT_ENTRY = True` for the run so `strategy_factory` builds the **real**
-  wrapper. For each signal the wrapper marks pending, fetch ticks from the candle close (as today),
+- Change: `scripts/backtest_exit_strategy.py` -- add `--spread-wait on|off` (and optional overrides
+  `--spread-wait-max-points`, `--spread-wait-seconds`). It overrides `Config.USE_SPREAD_WAIT_ENTRY`
+  for the run (Config now defaults it ON, so baseline runs must pass `off`), so `strategy_factory`
+  builds -- or omits -- the **real** wrapper. Omitted = Config's own value. For each signal the wrapper marks pending, fetch ticks from the candle close (as today),
   feed them one by one through `strategy.on_new_tick(bid, (ask - bid) / point, tick_time=
   datetime.fromtimestamp(tick.time))` until `get_confirmed_signal()` returns the signal or it
   expires; enter at that tick (ask for buy, bid for sell) and run the existing lifecycle from there.
@@ -104,35 +120,69 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   % of the exploratory estimate (~80% of signals in a tight-spread month). Run printout names the
   effective spread-wait settings alongside the existing exit-config line.
 
+Phase 2 acceptance, W1 2026-08-25..09-22, STF, session filter off, 1.0p gate (spent window --
+mechanism check, not a result):
+- `--spread-wait off`: 6,923 trades, -$411.20 -- byte-for-byte the pre-change W1 run (regression OK).
+- `--spread-wait on`: 6,666 entered (96%), 311 expired; **+$63.20**, win 34.7%; `failed_to_reach_be`
+  0 and pre-BE `profit_drop` 0. Entry spread 0.0 on 6,661 of 6,666 -- the 5 at 0.1 pip are
+  several ticks sharing one millisecond (the simulator takes the first tick at `time_msc >=` the
+  confirming tick's). Wait: median 0.24 s, mean 1.03 s, max 14.99 s.
+- Implementation note: expired signals are counted and printed, not written as CSV rows, so no P&L
+  summary changes. Spread-wait is wired into plain `--full-lifecycle` only; other modes abort unless
+  `--spread-wait off` (Config now defaults it ON).
+
 ### Phase 3: Pre-registered staged test (Test O)
 
-#### Subphase 3.1: Pre-register before any window is run
+#### Subphase 3.1: Pre-register before any window is run -- DONE (Test O in pre-registrations-2026-09-22.md; grading = WAIT vs TIGHT, OLD reported)
 
 - Change: append Test O to `docs/test-results/pre-registrations-2026-09-22.md`:
   - **Arms** (all under the live config: STF, staircase, arm=30, DST-correct session filter ON):
-    SHIPPED = 1.0-pip gate; TIGHT = 1-point gate (Test N); WAIT = `--spread-wait` (15 s, zero spread).
-    SHIPPED and TIGHT are read from one ungated run per window via `entry_spread_pips`; WAIT needs
-    its own run.
-  - **Bar**: WAIT must beat **both** SHIPPED and TIGHT (the simpler alternative). Per-window win =
-    better $/trade; if WAIT or the comparator has < 100 trades, graded on total.
+    TIGHT = 1-point gate (Test N; shipped in this same PR, so it is the baseline to beat);
+    WAIT = `--spread-wait on` (15 s, zero spread). OLD = the 1.0-pip gate, reported, not graded.
+    TIGHT and OLD are read from one `--spread-wait off --max-entry-spread-pips 1.0` run per window
+    via `entry_spread_pips`; WAIT needs its own run.
+  - **Bar**: WAIT must beat TIGHT. Per-window win = better $/trade; if WAIT or TIGHT has < 100
+    trades, graded on total.
   - **Windows** (unseen; ticks verified back to at least 2023-01): W31 2024-05-07, W32 04-09,
     W33 03-12, W34 02-13, W35 01-16, W36 2023-12-19, W37 11-21, W38 10-24, W39 09-26, W40 08-29,
     W41 08-01, W42 07-04 (each start + 28 days). Stage order fixed at pre-registration, spread
     across the year: Stage 1 W31, W34, W37, W40; Stage 2 W32, W38; Stage 3 W33, W35, W39, W41;
     Stage 4 W36, W42.
   - **Cumulative stage bars** (each also needs pooled $/trade better and pooled total no worse, vs
-    each comparator): >= 3/4, >= 5/6, >= 8/10, >= 9/12. Fail at any stage -> stop.
+    TIGHT): >= 3/4, >= 5/6, >= 8/10, >= 9/12. Fail at any stage -> stop.
   - Report per window: spread regime (share of signals at <= 1 pt), trades kept, timeout share,
     $/trade, total, mean wait seconds.
 - Acceptance: committed and pushed before the first Stage 1 run starts.
 
-#### Subphase 3.2: Run stages 1-4 sequentially
+#### Subphase 3.2: Run stages 1-4 sequentially -- DONE
 
 - Change: no code. Per stage: run, grade against the pre-registered bar, record in this plan, commit
   + push. Two concurrent MT5 streams maximum.
 - Acceptance: each stage's verdict recorded here before the next stage starts.
 
-#### Subphase 3.3: Write-up
+Stage 1 (W31, W34, W37, W40) -- **PASS 4/4** (bar >= 3). WAIT vs TIGHT $/trade: W31 -0.130 vs -0.152;
+W37 -0.019 vs -0.044; W40 **+0.005** vs -0.116; W34 (only 4.9% of entries <= 1 pt: wide regime) graded on
+total, -$19 (16 trades) vs -$86 (174). Pooled: OLD 14,527 tr -$7,496 (-0.516); TIGHT 6,661 tr -$786
+(-0.118); WAIT 5,545 tr **-$314 (-0.057)**. WAIT timeouts 0.0% everywhere; mean wait 1.7-2.1 s
+(6.7 s in W34). Note: the printed "expired/vetoed" count includes every signal in session-blocked
+hours (the wrapper sits inside the session filter), so it is not the expiry rate; in live hours WAIT
+kept 79-99% of TIGHT's trade count in the three trading windows (W40: 67%).
+
+Stage 2 (W32, W38) -- **PASS, cumulative 6/6** (bar >= 5). W32 (17% of entries <= 1 pt): WAIT -0.161
+vs TIGHT -0.284 $/trade -- with MORE trades (594 vs 574); W38 (2.4%, wide) graded on total, -$5 vs -$32.
+Cumulative pooled: OLD 21,442 tr -$12,012 (-0.560); TIGHT 7,321 tr -$981 (-0.134); WAIT 6,170 tr
+-$415 (-0.067).
+
+Stage 3 (W33, W35, W39, W41) -- **PASS, cumulative 10/10** (bar >= 8); all four graded per-trade.
+WAIT vs TIGHT $/trade: W33 -0.220 vs -0.267; W35 -0.216 vs -0.354 (WAIT 184 trades vs 780 -- 1-point
+spreads common, zero spreads rare); W39 **+0.014** vs -0.069; W41 -0.004 vs -0.131. Cumulative pooled:
+OLD 35,274 tr -$19,108 (-0.542); TIGHT 12,509 tr -$1,810 (-0.145); WAIT 9,472 tr -$562 (-0.059).
+
+Stage 4 (W36, W42) -- **PASS, 12/12** (bar >= 9). W36 WAIT **+0.110** vs TIGHT -0.238 $/trade (176 vs
+1,547 trades); W42 -0.018 vs -0.090. Final pooled: OLD 42,074 tr -$21,889 (-0.520); TIGHT 16,645 tr
+-$2,411 (-0.145); **WAIT 11,408 tr -$573 (-0.050)**. Test O PASSES -> `USE_SPREAD_WAIT_ENTRY` stays ON.
+
+#### Subphase 3.3: Write-up -- DONE (docs/test-results/spread-wait-entry.md)
 
 - Change: `docs/test-results/spread-wait-entry.md` (setup, per-stage tables, verdict, caveats:
   demo-account spreads; wide-regime windows mostly abstain; post-BE cap/trail now carries the result).
@@ -140,11 +190,8 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
 
 ## Open questions
 
-- **Wait length.** 15 s is picked from the exploratory table (5 s keeps 19.4% of signals, 15 s
-  22.4%, 60 s 28.0%, all 0% timeouts; longer waits drift further from the signal candle). Keep 15 s
-  unless you want a different value fixed before pre-registration -- it cannot be tuned afterwards.
-- **Ordering with Test N.** If the 1-point gate (`MAX_SPREAD_POINTS = 1.5`) is shipped first, it
-  becomes SHIPPED for Test O and the TIGHT arm collapses into it. Decide before Subphase 3.1.
+- RESOLVED 2026-09-25 (user): wait length 15 s; the 0.1-pip gate ships in this PR, so it is Test O's
+  baseline; the PR is not merged until Test O is finished.
 - **Real-account spreads.** On a real account zero-spread ticks may be rare, so WAIT would mostly
   expire. Out of scope here; a demo forward run would be the check.
 

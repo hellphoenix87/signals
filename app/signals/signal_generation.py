@@ -19,6 +19,16 @@ from app.signals.strategies.ntick_confirmed_signal_strategy import (
 from app.signals.strategies.session_filtered_signal_strategy import (
     SessionFilteredSignalStrategy,
 )
+from app.signals.strategies.spread_wait_entry_strategy import SpreadWaitEntryStrategy
+
+# Entry-timeframe lengths, for wrappers that need the candle close from its
+# open time. Kept here rather than imported from scripts/ (app/ must not
+# depend on scripts/).
+TF_SECONDS = {
+    mt5.TIMEFRAME_M1: 60,
+    mt5.TIMEFRAME_M5: 5 * 60,
+    mt5.TIMEFRAME_M15: 15 * 60,
+}
 from app.signals.strategies.ml_signal_strategy import MLSignalStrategy
 from app.signals.strategies.atr_momentum_filtered_signal_strategy import (
     AtrMomentumFilteredSignalStrategy,
@@ -257,6 +267,19 @@ def strategy_factory(
             n_ticks=n_ticks,
             max_spread_points=max_spread_points if max_spread_points > 0 else None,
             config=config,
+        )
+
+    if getattr(config, "USE_SPREAD_WAIT_ENTRY", False):
+        # Both wrappers own the pending-signal lifecycle (hold on the candle,
+        # confirm on a tick); stacking them is not designed or tested.
+        if use_n_tick and n_ticks > 1:
+            raise ValueError("USE_SPREAD_WAIT_ENTRY and n-tick confirmation cannot both be enabled")
+        entry_tf = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+        strategy = SpreadWaitEntryStrategy(
+            strategy,
+            max_spread_points=float(getattr(config, "SPREAD_WAIT_MAX_POINTS", 0.5)),
+            max_wait_seconds=float(getattr(config, "SPREAD_WAIT_SECONDS", 15.0)),
+            entry_tf_seconds=TF_SECONDS.get(entry_tf, 60),
         )
 
     if getattr(config, "USE_SESSION_FILTER", False):
