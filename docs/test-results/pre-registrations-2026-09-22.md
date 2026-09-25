@@ -181,6 +181,37 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   would barely trade -- which would itself say the strategy only survives near-zero spread.
 - Reserve windows W25-W30 (2024-06-04 .. 2024-10-22) stay unseen.
 
+## Test O (2026-09-25, before running) -- wait up to 15 s for zero spread vs the 0.1-pip gate
+
+- **Hypothesis source** (exploratory; all spent windows): a zero-spread entry is born at breakeven,
+  so it cannot hit the 30-tick pre-BE timeout (~90% of net loss). A timeout-proxy over 22 windows
+  showed "wait up to 15 s for zero spread, else skip" keeps as many signals as the 0.1-pip gate in
+  tight-spread months with 0% timeouts. W1 mechanism check through the production wrapper (all
+  hours): 6,666 trades, +$63.20, 0 timeouts vs -$411.20 without the wait. W1 is spent and NOT graded.
+- **Arms** -- production code only, live config (STF, staircase, arm=30, DST-correct session filter
+  ON), two runs per window:
+  - Run A `--spread-wait off --max-entry-spread-pips 1.0` -> **OLD** (1.0-pip gate, all entries) and
+    **TIGHT** (subset with round(entry_spread_pips * 10) <= 1, i.e. the 0.1-pip gate shipped on this
+    branch; trades are independent, so a subset equals a gated run).
+  - Run B `--spread-wait on --max-entry-spread-pips 0.15` -> **WAIT** (15 s, <= 0.5 pt, live gate).
+- **Graded comparison: WAIT vs TIGHT** (TIGHT ships in the same PR and is the simpler alternative).
+  OLD is reported, not graded.
+- **Per-window win**: WAIT $/trade > TIGHT $/trade. If either has < 100 trades, graded on total.
+- **Windows** (unseen for any test; ticks verified back to at least 2023-01), each start + 28 days:
+  W31 2024-05-07, W32 04-09, W33 03-12, W34 02-13, W35 01-16, W36 2023-12-19, W37 11-21,
+  W38 10-24, W39 09-26, W40 08-29, W41 08-01, W42 07-04. **Stage order fixed now, spread across the
+  year, not chosen by spread regime**: Stage 1 W31, W34, W37, W40; Stage 2 W32, W38; Stage 3 W33,
+  W35, W39, W41; Stage 4 W36, W42.
+- **Cumulative stage bars**, each ALSO requiring pooled $/trade better and pooled total no worse
+  (WAIT vs TIGHT): Stage 1 >= 3/4 (direction; fail -> stop), Stage 2 >= 5/6 (fail -> stop),
+  Stage 3 >= 8/10, Stage 4 >= 9/12 -> PASS.
+- **On FAIL**: set `USE_SPREAD_WAIT_ENTRY = False` before the PR merges; the 0.1-pip gate stands on
+  Test N.
+- **Report per window**: spread regime (share of Run A entries at <= 1 pt), trades, timeout share,
+  $/trade, total for OLD / TIGHT / WAIT; WAIT expiries and mean wait.
+- **Known risks**: in wide-spread regimes both TIGHT and WAIT mostly abstain (graded on total, near
+  ties). Demo-account spreads -- on a real account zero-spread ticks may be rare.
+
 ## Testing protocol from 2026-09-24: staged escalation
 
 Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only

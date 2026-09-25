@@ -133,7 +133,7 @@ mechanism check, not a result):
 
 ### Phase 3: Pre-registered staged test (Test O)
 
-#### Subphase 3.1: Pre-register before any window is run
+#### Subphase 3.1: Pre-register before any window is run -- DONE (Test O in pre-registrations-2026-09-22.md; grading = WAIT vs TIGHT, OLD reported)
 
 - Change: append Test O to `docs/test-results/pre-registrations-2026-09-22.md`:
   - **Arms** (all under the live config: STF, staircase, arm=30, DST-correct session filter ON):
