@@ -160,6 +160,14 @@ mechanism check, not a result):
   + push. Two concurrent MT5 streams maximum.
 - Acceptance: each stage's verdict recorded here before the next stage starts.
 
+Stage 1 (W31, W34, W37, W40) -- **PASS 4/4** (bar >= 3). WAIT vs TIGHT $/trade: W31 -0.130 vs -0.152;
+W37 -0.019 vs -0.044; W40 **+0.005** vs -0.116; W34 (only 4.9% of entries <= 1 pt: wide regime) graded on
+total, -$19 (16 trades) vs -$86 (174). Pooled: OLD 14,527 tr -$7,496 (-0.516); TIGHT 6,661 tr -$786
+(-0.118); WAIT 5,545 tr **-$314 (-0.057)**. WAIT timeouts 0.0% everywhere; mean wait 1.7-2.1 s
+(6.7 s in W34). Note: the printed "expired/vetoed" count includes every signal in session-blocked
+hours (the wrapper sits inside the session filter), so it is not the expiry rate; in live hours WAIT
+kept 79-99% of TIGHT's trade count in the three trading windows (W40: 67%).
+
 #### Subphase 3.3: Write-up
 
 - Change: `docs/test-results/spread-wait-entry.md` (setup, per-stage tables, verdict, caveats:
