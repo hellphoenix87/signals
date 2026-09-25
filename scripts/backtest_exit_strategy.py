@@ -279,6 +279,34 @@ def _confirm_entry_tick(
     return None
 
 
+def _drive_spread_wait(strategy, symbol: str, candle_close: datetime.datetime, point_size: float, wait_seconds: float):
+    """Feed the real ticks after `candle_close` through the PRODUCTION
+    `SpreadWaitEntryStrategy` (via whatever wrapper chain `strategy_factory`
+    built, so the session filter's tick-time veto applies exactly as live),
+    until it confirms or the wait expires.
+
+    Returns `(signal, entry_time_msc, spread_wait_seconds)` or None. Tick time is
+    passed at millisecond resolution; live passes whole seconds (`tick.time`),
+    which only matters for a tick within 1 s of the deadline.
+    """
+    ticks = mt5.copy_ticks_range(
+        symbol, candle_close, candle_close + datetime.timedelta(seconds=wait_seconds + 2), mt5.COPY_TICKS_ALL
+    )
+    for t in ticks if ticks is not None else []:
+        tick_time = datetime.datetime.fromtimestamp(float(t["time_msc"]) / 1000.0)
+        bid, ask = float(t["bid"]), float(t["ask"])
+        strategy.on_new_tick(bid, (ask - bid) / point_size, tick_time=tick_time)
+        sig = strategy.get_confirmed_signal(tick_time)
+        if sig and (sig.get("final_signal") or "").lower() in ("buy", "sell"):
+            return sig, int(t["time_msc"]), sig.get("spread_wait_seconds")
+        if not getattr(strategy, "is_waiting", False):
+            return None  # expired, or vetoed by the session filter
+    # No tick past the deadline in the fetched range: expire explicitly so a
+    # stale pending signal cannot confirm on a later candle's ticks.
+    strategy.on_new_tick(None, None, tick_time=candle_close + datetime.timedelta(seconds=wait_seconds + 60))
+    return None
+
+
 def _parse_dt(value: Optional[str]) -> Optional[datetime.datetime]:
     """Parse a --start-date/--end-date value; None passes through."""
     if not value:
@@ -456,6 +484,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Replace the real post-BE two-manager sequence (loss-manager cap, then -- only while profit stays positive -- the profit-manager trail) with a single combined stop (trigger = peak - max(--trail-gap-floor-money, --trail-gap-pct * peak)) checked every tick regardless of sign. Tests whether the real trail's '0 < profit' gate is what lets fast reversals skip past it into the separate, much looser loss cap. Pre-BE phase (arming/soft-SL/timeout) is the real, unchanged LossExitManager. Mutually exclusive with --full-lifecycle's own post-BE logic (this replaces it) and with --sweep-post-be-cap/--sweep-pre-be-threshold.",
     )
+    parser.add_argument(
+        "--spread-wait",
+        choices=["on", "off"],
+        default=None,
+        help="Toggle the REAL SpreadWaitEntryStrategy (Config.USE_SPREAD_WAIT_ENTRY) for this run: hold each signal up to SPREAD_WAIT_SECONDS after the candle closes and enter on the first tick whose spread is <= SPREAD_WAIT_MAX_POINTS, else skip. The backtest feeds real ticks through the production wrapper -- no script-side copy of the logic. Config defaults it ON, so baseline runs must pass 'off'. Plain --full-lifecycle only.",
+    )
+    parser.add_argument("--spread-wait-max-points", type=float, default=None, help="Override Config.SPREAD_WAIT_MAX_POINTS (MT5 points) for this run.")
+    parser.add_argument("--spread-wait-seconds", type=float, default=None, help="Override Config.SPREAD_WAIT_SECONDS for this run.")
     parser.add_argument(
         "--exit-staircase",
         choices=["on", "off"],
@@ -1102,6 +1138,7 @@ def simulate_full_lifecycle(
     n_tick_confirmation: Optional[int] = None,
     candle_close_price: float = 0.0,
     pip_size: float = 0.0001,
+    entry_time_msc: Optional[int] = None,
 ) -> dict:
     """Open a simulated position and replay real historical ticks through
     the actual, complete `ExitTrade` -- `exit_trade._loss_manager` THEN (if
@@ -1113,8 +1150,15 @@ def simulate_full_lifecycle(
 
     Returns `{"outcome": <real exit reason, or "exhausted"/"no_ticks">,
     "profit", "ticks_used", "entry_price"}`.
+
+    `entry_time_msc` enters on the exact tick a spread-wait confirmation
+    landed on: `copy_ticks_from` resolves only to the second, so without it
+    the first tick of that second (possibly still at a wider spread) would be
+    taken instead.
     """
     ticks = mt5.copy_ticks_from(symbol, entry_time, max_ticks, mt5.COPY_TICKS_ALL)
+    if ticks is not None and entry_time_msc is not None:
+        ticks = ticks[ticks["time_msc"] >= entry_time_msc]
     if ticks is None or len(ticks) == 0:
         return {"outcome": "no_ticks", "profit": None, "ticks_used": 0, "entry_price": None}
 
@@ -2391,6 +2435,9 @@ def run(
     sweep_staircase_cap: bool = False,
     start_date: Optional[datetime.datetime] = None,
     end_date: Optional[datetime.datetime] = None,
+    spread_wait: Optional[str] = None,
+    spread_wait_max_points: Optional[float] = None,
+    spread_wait_seconds_override: Optional[float] = None,
 ) -> None:
     # One terminal serves every process, and a batch of parallel backtests can
     # exhaust its connection slots -- which used to abort the run outright and
@@ -2477,6 +2524,25 @@ def run(
         if single_timeframe and indicator_names
         else None
     )
+    if spread_wait is not None or spread_wait_max_points is not None or spread_wait_seconds_override is not None:
+        # Toggle/tune the REAL SpreadWaitEntryStrategy via Config, so both arms
+        # of an A/B run the production wrapper (Config now defaults it ON).
+        _sw: dict[str, Any] = {}
+        if spread_wait is not None:
+            _sw["USE_SPREAD_WAIT_ENTRY"] = spread_wait == "on"
+        if spread_wait_max_points is not None:
+            _sw["SPREAD_WAIT_MAX_POINTS"] = spread_wait_max_points
+        if spread_wait_seconds_override is not None:
+            _sw["SPREAD_WAIT_SECONDS"] = spread_wait_seconds_override
+        config = type("SpreadWaitOverride", (config,), _sw)
+    spread_wait_active = bool(getattr(config, "USE_SPREAD_WAIT_ENTRY", False))
+    spread_wait_window = float(getattr(config, "SPREAD_WAIT_SECONDS", 15.0))
+    spread_wait_expired = 0
+    point_size = float(broker.get_point_size(symbol) or 0.00001)
+    if spread_wait_active and (not full_lifecycle or sweep_post_be_cap or sweep_staircase_cap or chain_on_cap or hedge_on_cap or staircase_trail or sweep_staircase_tiers or sweep_pre_be_threshold):
+        print("Spread-wait entry (Config.USE_SPREAD_WAIT_ENTRY) is only wired into plain --full-lifecycle runs. "
+              "Pass --spread-wait off for this mode. Aborting.")
+        return
     strategy = strategy_factory(
         config=config, indicators=indicators, use_multi=not single_timeframe, symbol=symbol
     )
@@ -2522,7 +2588,8 @@ def run(
         f"staircase={'on ${} tiers'.format(_eff.staircase_tier_width) if _eff.staircase_trail_enabled else 'off'} "
         f"| entry_spread_gate={'off' if max_entry_spread_pips is None else str(max_entry_spread_pips)+'p'} "
         f"n_tick={n_tick_confirmation or 1} "
-        f"| strategy={'single-timeframe' if single_timeframe else 'MTF'}"
+        f"| strategy={'single-timeframe' if single_timeframe else 'MTF'} "
+        f"| spread_wait={'on <=' + str(getattr(config, 'SPREAD_WAIT_MAX_POINTS', None)) + 'pt ' + str(spread_wait_window) + 's' if spread_wait_active else 'off'}"
     )
 
 
@@ -2580,6 +2647,16 @@ def run(
                     }
                     signal = strategy.generate_signal(candles_by_tf)
                 final_signal = (signal.get("final_signal") or "hold").lower()
+                entry_time_msc = None
+                spread_wait_seconds = None
+                if spread_wait_active and getattr(strategy, "is_waiting", False):
+                    confirmed = _drive_spread_wait(strategy, symbol, closed_by, point_size, spread_wait_window)
+                    if confirmed is None:
+                        spread_wait_expired += 1
+                        continue
+                    signal, entry_time_msc, spread_wait_seconds = confirmed
+                    final_signal = signal["final_signal"].lower()
+                    closed_by = datetime.datetime.fromtimestamp(entry_time_msc // 1000)
                 if final_signal not in ("buy", "sell"):
                     continue
                 if invert_signal:
@@ -2722,7 +2799,10 @@ def run(
                         pip_size=pip_size,
                         n_tick_confirmation=n_tick_confirmation,
                         candle_close_price=float(m1_candle.get("close") or 0.0),
+                        entry_time_msc=entry_time_msc,
                     )
+                    if spread_wait_seconds is not None:
+                        sim["spread_wait_seconds"] = spread_wait_seconds
                 elif do_measure_entry_excursion:
                     sim = measure_entry_excursion(
                         symbol=symbol,
@@ -2784,6 +2864,11 @@ def run(
                 )
     finally:
         logging.disable(logging.NOTSET)
+
+    if spread_wait_active:
+        _entered = sum(1 for r in results if r.get("spread_wait_seconds") is not None)
+        print(f"[{symbol}] spread wait: {_entered} signals confirmed and entered, "
+              f"{spread_wait_expired} expired/vetoed without a tight-enough tick")
 
     if full_lifecycle and sweep_staircase_cap:
         write_staircase_cap_sweep_csv(results, symbol)
@@ -2995,7 +3080,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
         "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
-        "outcome", "profit", "ticks_used", "entry_price", "entry_spread_pips", "post_be_peak_profit", "be_arm_ticks",
+        "outcome", "profit", "ticks_used", "entry_price", "entry_spread_pips", "spread_wait_seconds", "post_be_peak_profit", "be_arm_ticks",
         "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
         "cf_recovered_to_neg1", "cf_ticks_to_recover_neg1",
         "cf_post_recovery_peak", "cf_reversed_after_recovery", "cf_ticks_to_reversal_after_recovery",
@@ -3506,6 +3591,9 @@ def main() -> None:
         sweep_staircase_cap=args.sweep_staircase_cap,
         start_date=_parse_dt(args.start_date),
         end_date=_parse_dt(args.end_date),
+        spread_wait=args.spread_wait,
+        spread_wait_max_points=args.spread_wait_max_points,
+        spread_wait_seconds_override=args.spread_wait_seconds,
     )
 
 

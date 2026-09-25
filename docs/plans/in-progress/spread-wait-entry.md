@@ -85,7 +85,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   signal candle and `spread_wait_confirmed` / `spread_wait_expired` within 15 s. With the flag off,
   behaviour is unchanged (n-tick is disabled live, so `on_new_tick` has no other consumer today).
 
-#### Subphase 1.5: Ship it in this PR (user decision)
+#### Subphase 1.5: Ship it in this PR (user decision) -- DONE
 
 - Change: `app/config/settings.py` -- `MAX_SPREAD_POINTS = 1.5` (from 10; Test N, 12/12) and
   `USE_SPREAD_WAIT_ENTRY = True` with `SPREAD_WAIT_SECONDS = 15.0`, `SPREAD_WAIT_MAX_POINTS = 0.5`.
@@ -102,7 +102,7 @@ Phase 1.1-1.4 smoke (REPL, stub base strategy): buy -> hold/`waiting_for_spread`
 
 ### Phase 2: Backtest drives the production wrapper
 
-#### Subphase 2.1: `--spread-wait` in the full-lifecycle backtest
+#### Subphase 2.1: `--spread-wait` in the full-lifecycle backtest -- DONE
 
 - Change: `scripts/backtest_exit_strategy.py` -- add `--spread-wait on|off` (and optional overrides
   `--spread-wait-max-points`, `--spread-wait-seconds`). It overrides `Config.USE_SPREAD_WAIT_ENTRY`
@@ -119,6 +119,17 @@ Phase 1.1-1.4 smoke (REPL, stub base strategy): buy -> hold/`waiting_for_spread`
   `entry_spread_pips == 0`, `failed_to_reach_be` count is 0, and entered-trade count is within a few
   % of the exploratory estimate (~80% of signals in a tight-spread month). Run printout names the
   effective spread-wait settings alongside the existing exit-config line.
+
+Phase 2 acceptance, W1 2026-08-25..09-22, STF, session filter off, 1.0p gate (spent window --
+mechanism check, not a result):
+- `--spread-wait off`: 6,923 trades, -$411.20 -- byte-for-byte the pre-change W1 run (regression OK).
+- `--spread-wait on`: 6,666 entered (96%), 311 expired; **+$63.20**, win 34.7%; `failed_to_reach_be`
+  0 and pre-BE `profit_drop` 0. Entry spread 0.0 on 6,661 of 6,666 -- the 5 at 0.1 pip are
+  several ticks sharing one millisecond (the simulator takes the first tick at `time_msc >=` the
+  confirming tick's). Wait: median 0.24 s, mean 1.03 s, max 14.99 s.
+- Implementation note: expired signals are counted and printed, not written as CSV rows, so no P&L
+  summary changes. Spread-wait is wired into plain `--full-lifecycle` only; other modes abort unless
+  `--spread-wait off` (Config now defaults it ON).
 
 ### Phase 3: Pre-registered staged test (Test O)
 

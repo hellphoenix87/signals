@@ -95,7 +95,14 @@ class Config:
     # motivated the gate; they differ only on moderate spreads, worth ~$0.026
     # per trade.
     # See docs/test-results/pre-be-phase-and-entry-signal-investigation.md
-    MAX_SPREAD_POINTS: float = 10
+    #
+    # 2026-09-25: tightened 10 -> 1.5 (= at most 1 point, 0.1 pip). Test N,
+    # 12/12 unseen windows (docs/test-results/tight-spread-gate.md): pooled
+    # -$16,893 -> -$496. Mostly abstention -- the broker's spread sat at
+    # 0.2-1.3 pip for months, and 10 let the bot trade straight through a
+    # 0.4-pip month. 1.5 rather than 1: _spread_ok compares floats, and a
+    # 1-point spread computes as 1.0000000000065.
+    MAX_SPREAD_POINTS: float = 1.5
 
     # Wait-for-zero-spread entry (docs/plans/in-progress/spread-wait-entry.md).
     # A zero-spread entry is born at breakeven, so it cannot hit the 30-tick
@@ -106,7 +113,9 @@ class Config:
     # tight-spread months with 0% timeouts and a slightly better entry price.
     # 0.5 = "zero spread only": spreads are whole points, and 0.5 keeps a float
     # compare from rejecting a 0-point spread computed as 1e-12.
-    USE_SPREAD_WAIT_ENTRY: bool = False
+    # ON as of this branch, which must not merge until Test O finishes; if it
+    # fails, set this back to False before merging.
+    USE_SPREAD_WAIT_ENTRY: bool = True
     SPREAD_WAIT_MAX_POINTS: float = 0.5
     SPREAD_WAIT_SECONDS: float = 15.0
 
