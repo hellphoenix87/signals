@@ -113,6 +113,31 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   pre-BE stops, but was -$16 ex-exhausted. Motivation, not evidence.
 - Two concurrent streams maximum (three exhaust the MT5 terminal's connection slots).
 
+## Test M (2026-09-25, before running) -- STF session-filter INVERSION
+
+- **Hypothesis source**: W3 smoke test, production code (STF, staircase on, arm=30, 1.0p entry
+  spread gate), filter on vs off. The live 08-18 UTC block (derived for MTF) removes the BETTER
+  STF trades: blocked hours -$0.097/trade (n=3,050) vs traded hours -$0.204/trade (n=3,550),
+  t=2.7, blocked better on 14/20 days. The filter-on run equalled the open-hours subset of the
+  filter-off run trade-for-trade, so one unfiltered run per window yields every arm.
+  **W3 generated the hypothesis and is excluded from grading.**
+- **Arms** (all read from ONE unfiltered production run per window, tagged by true UTC hour):
+  - SHIPPED: trade 19:00-07:59 UTC (block 08-18) -- the live config.
+  - INVERTED: trade 08:00-18:59 UTC only (block 19-07). Same 11-hour block, flipped. No other
+    hour selection -- single hours are unstable (session-filter-analysis.md, Finding 4).
+  - OFF: all hours. Reported for reference, not graded.
+- **UTC tagging**: candle frame = UTC + 3 before 2026-03-29, UTC + 5 from 2026-03-29 (broker
+  follows EU DST; verified from week-close bars shifting Sat 00:59 -> 01:59 at 29 Mar, and the
+  spread-gated rollover landing at 21:00 UTC = 17:00 NY under +5). Only W7 straddles the change.
+- **Screen windows**: W6, W5, W7, W2 (protocol below).
+- **PASS (screen)** requires ALL of:
+  (a) INVERTED per-trade expectancy beats SHIPPED in >= 3 of 4 windows,
+  (b) pooled per-trade expectancy improves, AND
+  (c) pooled TOTAL loss is no worse than SHIPPED (inversion trades a different, not larger,
+      population -- it must not buy a better average with more absolute loss).
+- On PASS: expand to W10/W8 without looking at them first. On FAIL: stop; the W3 split was noise.
+- Report per window: trades, total, per-trade, win rate for all three arms.
+
 ## Testing protocol from 2026-09-24: staged escalation
 
 Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only
