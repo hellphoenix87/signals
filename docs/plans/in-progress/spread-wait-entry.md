@@ -29,7 +29,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
 
 ### Phase 1: Production wrapper
 
-#### Subphase 1.1: Config tunables
+#### Subphase 1.1: Config tunables -- DONE
 
 - Change: `app/config/settings.py` -- add, next to `MAX_SPREAD_POINTS`:
   - `USE_SPREAD_WAIT_ENTRY: bool = False`
@@ -39,7 +39,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   with a comment pointing at this plan and the numbers in Goal.
 - Acceptance: `Config.USE_SPREAD_WAIT_ENTRY is False`; app imports unchanged.
 
-#### Subphase 1.2: `SpreadWaitEntryStrategy` wrapper
+#### Subphase 1.2: `SpreadWaitEntryStrategy` wrapper -- DONE
 
 - Change: new `app/signals/strategies/spread_wait_entry_strategy.py`, class
   `SpreadWaitEntryStrategy(BaseSignalStrategy)`, modelled on `NTickConfirmedSignalStrategy`:
@@ -59,7 +59,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
 - Acceptance (manual, in a REPL with a stub base strategy): a `buy` returns `hold`; ticks with spread
   2, 1, 0 confirm on the 0; a tick past the deadline expires it; `None` spread never confirms.
 
-#### Subphase 1.3: Wire into `strategy_factory`
+#### Subphase 1.3: Wire into `strategy_factory` -- DONE
 
 - Change: `app/signals/signal_generation.py::strategy_factory` -- after the n-tick block and before
   the session filter, wrap with `SpreadWaitEntryStrategy` when `USE_SPREAD_WAIT_ENTRY` is true, using
@@ -71,7 +71,7 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   StrongSignalStrategy`); with it on, `SessionFilteredSignalStrategy -> SpreadWaitEntryStrategy ->
   StrongSignalStrategy`; both flags on raises.
 
-#### Subphase 1.4: Orchestrator passes real spread and tick time
+#### Subphase 1.4: Orchestrator passes real spread and tick time -- DONE
 
 - Change: `app/services/trade_services.py::SignalOrchestrator._on_tick` -- today it reads
   `getattr(tick, "spread", None)`, which MT5 ticks do not have, so `spread_points` is always `None`.
@@ -93,6 +93,12 @@ Success means "less negative than the 0.1-pip gate", not "profitable".
   `SessionFilteredSignalStrategy -> SpreadWaitEntryStrategy -> StrongSignalStrategy`. The PR stays
   unmerged until Test O's verdict; if Test O fails, flip `USE_SPREAD_WAIT_ENTRY` back to False before
   merge (the 0.1-pip gate stands on Test N alone).
+
+Phase 1.1-1.4 smoke (REPL, stub base strategy): buy -> hold/`waiting_for_spread`; ticks at spread
+2, 1, None do not confirm; spread 0 at +4 s confirms (`spread_wait_seconds=4.0`); a spread-0 tick at
++16 s expires it; hold passes through. Factory: flag off `Session -> Strong`; on
+`Session -> SpreadWait -> Strong`; with n-tick also on -> ValueError. Orchestrator spread: 1 pt ->
+1.0000000000065 (the float edge the 0.5/1.5 thresholds exist for), 0 pt -> 0.0, no bid/ask -> None.
 
 ### Phase 2: Backtest drives the production wrapper
 

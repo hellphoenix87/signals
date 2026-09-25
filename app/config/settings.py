@@ -97,6 +97,19 @@ class Config:
     # See docs/test-results/pre-be-phase-and-entry-signal-investigation.md
     MAX_SPREAD_POINTS: float = 10
 
+    # Wait-for-zero-spread entry (docs/plans/in-progress/spread-wait-entry.md).
+    # A zero-spread entry is born at breakeven, so it cannot hit the 30-tick
+    # pre-BE timeout -- ~90% of net loss. Instead of entering (or skipping) at
+    # the signal candle's close, hold the signal up to SPREAD_WAIT_SECONDS and
+    # enter on the first tick whose spread is <= SPREAD_WAIT_MAX_POINTS; expire
+    # it otherwise. Exploratory, 22 windows: keeps ~80% of signals in
+    # tight-spread months with 0% timeouts and a slightly better entry price.
+    # 0.5 = "zero spread only": spreads are whole points, and 0.5 keeps a float
+    # compare from rejecting a 0-point spread computed as 1e-12.
+    USE_SPREAD_WAIT_ENTRY: bool = False
+    SPREAD_WAIT_MAX_POINTS: float = 0.5
+    SPREAD_WAIT_SECONDS: float = 15.0
+
     # STF (False) vs MTF gating (True). Set to False on 2026-09-25: research
     # moved to single-timeframe long ago -- MTF gating "costs 30x the sample
     # size and picks worse trades" in 10 of 12 windows, and "its smaller total

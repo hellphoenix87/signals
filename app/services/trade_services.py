@@ -109,6 +109,29 @@ class SignalOrchestrator:
             self.tick_collector.stop()
         self.collector.stop()
 
+    def _tick_spread_points(self, tick: Any) -> Optional[float]:
+        """Spread of `tick` in MT5 points, or None if it can't be determined.
+
+        MT5 ticks carry bid/ask but no `spread` field, so reading
+        `tick.spread` always gave None. The point size comes from the same
+        broker `TradeExecutor._spread_ok` uses.
+        """
+        explicit = getattr(tick, "spread", None)
+        if explicit is not None:
+            return float(explicit)
+        bid, ask = getattr(tick, "bid", None), getattr(tick, "ask", None)
+        if not bid or not ask:
+            return None
+        broker = getattr(self.trade_executor, "broker", None)
+        symbol = getattr(self.collector, "symbol", None)
+        try:
+            point = float(broker.get_point_size(symbol)) if broker is not None and symbol else 0.0
+        except Exception:
+            point = 0.0
+        if point <= 0:
+            return None
+        return (float(ask) - float(bid)) / point
+
     def _on_tick(self, tick: Any) -> None:
         """Run protective exits, forward the tick to n-tick confirmation logic
         (if the signal generator supports it), and execute any confirmed signal."""
@@ -123,22 +146,26 @@ class SignalOrchestrator:
             if actions:
                 self._execute_exit_actions(actions)
 
+        tick_epoch = getattr(tick, "time", None)
+        try:
+            candle_frame_time = datetime.fromtimestamp(tick_epoch) if tick_epoch else None
+        except Exception:
+            candle_frame_time = None
+
         if hasattr(self.signal_generator, "on_new_tick"):
             try:
                 price = getattr(tick, "bid", None) or getattr(tick, "last", None)
-                spread_points = getattr(tick, "spread", None)
-                self.signal_generator.on_new_tick(price, spread_points)
+                spread_points = self._tick_spread_points(tick)
+                try:
+                    self.signal_generator.on_new_tick(price, spread_points, tick_time=candle_frame_time)
+                except TypeError:
+                    self.signal_generator.on_new_tick(price, spread_points)
             except Exception as exc:
                 self._log_exception(
                     f"[Orchestrator] signal_generator.on_new_tick error: {exc!r}"
                 )
 
         if hasattr(self.signal_generator, "get_confirmed_signal"):
-            tick_epoch = getattr(tick, "time", None)
-            try:
-                candle_frame_time = datetime.fromtimestamp(tick_epoch) if tick_epoch else None
-            except Exception:
-                candle_frame_time = None
             try:
                 sig = self.signal_generator.get_confirmed_signal(candle_frame_time)
             except TypeError:
