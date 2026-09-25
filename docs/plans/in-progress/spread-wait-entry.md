@@ -173,6 +173,11 @@ vs TIGHT -0.284 $/trade -- with MORE trades (594 vs 574); W38 (2.4%, wide) grade
 Cumulative pooled: OLD 21,442 tr -$12,012 (-0.560); TIGHT 7,321 tr -$981 (-0.134); WAIT 6,170 tr
 -$415 (-0.067).
 
+Stage 3 (W33, W35, W39, W41) -- **PASS, cumulative 10/10** (bar >= 8); all four graded per-trade.
+WAIT vs TIGHT $/trade: W33 -0.220 vs -0.267; W35 -0.216 vs -0.354 (WAIT 184 trades vs 780 -- 1-point
+spreads common, zero spreads rare); W39 **+0.014** vs -0.069; W41 -0.004 vs -0.131. Cumulative pooled:
+OLD 35,274 tr -$19,108 (-0.542); TIGHT 12,509 tr -$1,810 (-0.145); WAIT 9,472 tr -$562 (-0.059).
+
 #### Subphase 3.3: Write-up
 
 - Change: `docs/test-results/spread-wait-entry.md` (setup, per-stage tables, verdict, caveats:
