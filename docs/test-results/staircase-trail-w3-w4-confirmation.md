@@ -20,6 +20,38 @@ That gate mattered. In the same investigation the wide/disabled post-BE cap look
 W1-W2 (+$1,124 / +$3,209) and reversed hard on exactly W3/W4 (-$595 / -$1,350). Confirming before
 shipping was the whole point.
 
+## Re-run on production code (2026-09-25)
+
+**The original runs below were methodologically wrong, and were re-run.** The baseline arm used
+`--full-lifecycle`, which drives the real `ExitTrade`; the staircase arm used `--staircase-trail`,
+which branches into `simulate_full_lifecycle_staircase_trail` -- a **separate reimplementation** of
+the ratchet inside the script. So the A/B compared production code against a script copy, and the
+copy was then ported into production.
+
+Re-run with `--exit-staircase off|on`, which toggles the real
+`Config.EXIT_STAIRCASE_TRAIL_ENABLED` so **both arms drive the production `ProfitExitManager`**.
+Every figure reproduced **exactly**:
+
+| Arm | Original | Production-code re-run |
+|---|---|---|
+| W3 baseline | -$1,499.40 / 27.5% | **-$1,499.40 / 27.5%** |
+| W3 staircase | -$1,118.60 / 29.6% | **-$1,118.60 / 29.6%** |
+| W4 baseline | -$3,023.40 / 20.7% | **-$3,023.40 / 20.7%** |
+| W4 staircase | -$2,783.80 / 22.7% | **-$2,783.80 / 22.7%** |
+
+The `exhausted` bucket disappearing is also confirmed genuine rather than a difference between the
+two loops: on production code W4 baseline has 15 exhausted trades (+$363.80) and W4 staircase has
+**zero**. The like-for-like adjustments below stand.
+
+So the conclusion held, but it was reached by the wrong method. Use `--exit-staircase` for any
+future comparison; `--staircase-trail` is deprecated and kept only to reproduce pre-2026-09-25
+results.
+
+**One further caveat that applied when this was first written**: all of these windows are
+`--single-timeframe`, while live ran MTF (`USE_MULTI_TIMEFRAME_SIGNALS = True`) until 2026-09-25.
+The staircase shipped in PR #72 was therefore never measured on the strategy then executing. Live
+was switched to STF on 2026-09-25, so these windows now describe live wiring.
+
 ## Setup
 
 `scripts/backtest_exit_strategy.py --full-lifecycle --single-timeframe

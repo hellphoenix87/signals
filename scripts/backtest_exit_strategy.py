@@ -457,9 +457,15 @@ def parse_args() -> argparse.Namespace:
         help="Replace the real post-BE two-manager sequence (loss-manager cap, then -- only while profit stays positive -- the profit-manager trail) with a single combined stop (trigger = peak - max(--trail-gap-floor-money, --trail-gap-pct * peak)) checked every tick regardless of sign. Tests whether the real trail's '0 < profit' gate is what lets fast reversals skip past it into the separate, much looser loss cap. Pre-BE phase (arming/soft-SL/timeout) is the real, unchanged LossExitManager. Mutually exclusive with --full-lifecycle's own post-BE logic (this replaces it) and with --sweep-post-be-cap/--sweep-pre-be-threshold.",
     )
     parser.add_argument(
+        "--exit-staircase",
+        choices=["on", "off"],
+        default=None,
+        help="Toggle the REAL ProfitExitManager staircase trail (Config.EXIT_STAIRCASE_TRAIL_ENABLED) for this run. Use this -- not --staircase-trail -- for any staircase-vs-percentage comparison: it drives the actual production exit code on both arms, whereas --staircase-trail branches into this script's own reimplementation of the ratchet. Defaults to whatever Config says.",
+    )
+    parser.add_argument(
         "--staircase-trail",
         action="store_true",
-        help="Only with --full-lifecycle: replace ProfitExitManager's percentage-of-peak trail with a staircase/ratchet trail -- as the running peak crosses each --staircase-tier-width increment, that tier level becomes the new stop; if profit falls back to or through the highest tier fully crossed, exit. Giveback is capped at just under one tier width regardless of how large the peak gets, unlike the real trail's ~60%%-of-peak (unbounded) giveback. Pre-BE phase and the post-BE loss cap are the real, unchanged LossExitManager. Mutually exclusive with --unified-post-be-stop/--chain-on-cap/--hedge-on-cap.",
+        help="DEPRECATED -- prefer --exit-staircase on. The staircase now exists in production code; this flag runs a separate reimplementation of it, so an A/B using it compares real code against a script copy. Kept only to reproduce pre-2026-09-25 results. Only with --full-lifecycle: replace ProfitExitManager's percentage-of-peak trail with a staircase/ratchet trail -- as the running peak crosses each --staircase-tier-width increment, that tier level becomes the new stop; if profit falls back to or through the highest tier fully crossed, exit. Giveback is capped at just under one tier width regardless of how large the peak gets, unlike the real trail's ~60%%-of-peak (unbounded) giveback. Pre-BE phase and the post-BE loss cap are the real, unchanged LossExitManager. Mutually exclusive with --unified-post-be-stop/--chain-on-cap/--hedge-on-cap.",
     )
     parser.add_argument(
         "--staircase-tier-width",
@@ -2377,6 +2383,7 @@ def run(
     staircase_trail: bool = False,
     staircase_tier_width: float = 1.0,
     staircase_first_tier: Optional[float] = None,
+    exit_staircase: Optional[str] = None,
     sweep_staircase_tiers: bool = False,
     sweep_staircase_cap: bool = False,
     start_date: Optional[datetime.datetime] = None,
@@ -2483,6 +2490,12 @@ def run(
         exit_overrides["max_loss_money"] = pre_be_loss_threshold
     if be_arming_ticks is not None:
         exit_overrides["be_arming_ticks"] = be_arming_ticks
+    if exit_staircase is not None:
+        # Toggles the REAL ProfitExitManager staircase
+        # (Config.EXIT_STAIRCASE_TRAIL_ENABLED) rather than branching into this
+        # script's own --staircase-trail reimplementation, so both arms of an
+        # A/B run production code. Prefer this over --staircase-trail.
+        exit_overrides["staircase_trail_enabled"] = exit_staircase == "on"
     _scaled_exit_trade_cache: dict[float, Any] = {}
     exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
     resolved_trail_gap_pct = (
@@ -2503,6 +2516,7 @@ def run(
         f"[{symbol}] exit config: be_arming_ticks={_eff.be_arming_ticks} "
         f"max_loss_money=${_eff.max_loss_money} post_be_cap=${_eff.post_be_loss_cap_money} "
         f"trail={_eff.trail_gap_pct:.0%}/${_eff.trail_gap_floor_money} "
+        f"staircase={'on ${} tiers'.format(_eff.staircase_tier_width) if _eff.staircase_trail_enabled else 'off'} "
         f"| entry_spread_gate={'off' if max_entry_spread_pips is None else str(max_entry_spread_pips)+'p'} "
         f"n_tick={n_tick_confirmation or 1} "
         f"| strategy={'single-timeframe' if single_timeframe else 'MTF'}"
@@ -3482,6 +3496,7 @@ def main() -> None:
             else None
         ),
         staircase_trail=args.staircase_trail,
+        exit_staircase=args.exit_staircase,
         staircase_tier_width=args.staircase_tier_width,
         staircase_first_tier=args.staircase_first_tier,
         sweep_staircase_tiers=args.sweep_staircase_tiers,

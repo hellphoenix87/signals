@@ -84,6 +84,23 @@ moment per-trade expectancy is the thing being optimised.
 - Acceptance criteria: a reader of either doc can see which strategy the live bot runs and which
   strategy a given result was measured on, without having to read `settings.py`.
 
+### Phase 3: Make the backtest run live code, not a reimplementation
+
+Added after the user's standing instruction: *"when backtesting, it should be done on live code,
+not on isolated scripts. Isolated scripts are ok for smoke test to check and confirm concepts and
+ideas."*
+
+- Change: add `--exit-staircase {on,off}` to `scripts/backtest_exit_strategy.py`, toggling the real
+  `Config.EXIT_STAIRCASE_TRAIL_ENABLED` through the existing `exit_overrides` ->
+  `ExitTradeConfig` -> `create_exit_trade` path, so both arms of a staircase A/B drive the
+  production `ProfitExitManager`. Mark `--staircase-trail` DEPRECATED in its own help text, stating
+  that it runs a reimplementation. Print the effective staircase setting in the run banner
+  alongside the other effective exit config.
+- Acceptance criteria: `--exit-staircase on|off` visibly changes the banner and the exit-reason
+  mix, and re-running W3/W4 through it reproduces the PR #72 numbers. **Done -- reproduced exactly
+  on all four arms** (W3 -$1,499.40 / -$1,118.60, W4 -$3,023.40 / -$2,783.80), confirming the port
+  is faithful and that the `exhausted`-bucket effect is real rather than a script artifact.
+
 ## Open questions
 
 - `USE_SESSION_FILTER` (above) -- keep blocking 11 hours a day under STF, or not?
