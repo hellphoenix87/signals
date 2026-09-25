@@ -27,7 +27,10 @@ sequential stages (4 -> 2 -> 4 -> 2 windows), stopping on a failed stage.
 - Cumulative: SHIPPED 9,797 tr -$7,275 (-$0.743/tr); TIGHT 783 tr -$258 (-$0.329/tr).
 - Reading so far: the gain is mostly ABSTENTION from wide-spread regimes. When TIGHT does trade it is
   still negative (W13 -$0.15, W14 -$0.57/tr).
-### Phase 4: Stage 3 -- W15, W17, W21, W23
+### Phase 4: Stage 3 -- W15, W17, W21, W23 -- PASS, cumulative 10/10 (bar >= 8)
+- All four graded on total: TIGHT made 63 / 1 / 55 / 14 trades (0-14% kept) vs SHIPPED 457 / 55 /
+  3,488 / 3,350. SHIPPED lost -$338 / -$132 / -$2,527 / -$2,938; TIGHT -$9 / -$1 / -$20 / -$12.
+- Cumulative: SHIPPED 17,147 tr -$13,209 (-$0.770/tr); TIGHT 916 tr -$300 (-$0.328/tr).
 ### Phase 5: Stage 4 -- W18, W24; write docs/test-results/tight-spread-gate.md
 
 Each stage: one unfiltered run per window, grade against the pre-registered cumulative bar,
