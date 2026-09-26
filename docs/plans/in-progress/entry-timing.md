@@ -193,6 +193,9 @@ time: 45 trades (7 skipped), 62.2%, +$107.80. Exits `fixed_target` avg +$10.19, 
   stages 8 -> 4 -> 8 -> 4 with early stop on negative pooled $/trade; PASS = pooled $/trade > 0,
   t >= 2, and total better than the live config. Pre-registered as Test P2.
 
+Stage 1 (W49, W52, W55, W58, W61, W64, W67, W70) RSI arm: 312 trades, 51.6% win, **+$0.283/trade**,
++$88.20, t = 0.49 -> no early stop. Per window -$133 (W61) .. +$90 (W67). LIVE arm pending.
+
 ### Phase 4: Write-up and PR (not merged until the user decides)
 
 ## Open questions
