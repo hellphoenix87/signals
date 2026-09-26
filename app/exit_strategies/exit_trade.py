@@ -18,6 +18,18 @@ from app.exit_strategies.managers.profit import ProfitExitManager
 from app.exit_strategies.managers.loss import LossExitManager
 
 
+def _config_or_default(name: str, default: Any) -> Any:
+    """`Config.<name>`, falling back to `default` only when the setting is
+    missing or None -- NOT when it is 0. `getattr(...) or default` silently
+    turned a deliberate 0 into the default for settings where 0 is meaningful:
+    a $0 post-BE cap (exit at breakeven) became $5, `be_arming_ticks = 0`
+    (timeout disabled, per LossExitManager) became 20, and a $0 trail floor
+    became $2.
+    """
+    value = getattr(Config, name, None)
+    return default if value is None else value
+
+
 def create_exit_trade(
     broker: Any, risk_manager: Any, config: Optional["ExitTradeConfig"] = None
 ) -> "ExitTrade":
@@ -50,9 +62,7 @@ class ExitTradeConfig:
     buffer_start_tick: int = int(getattr(Config, "EXIT_BUFFER_START_TICK", 3) or 3)
     buffer_start_candle: int = int(getattr(Config, "EXIT_BUFFER_START_CANDLE", 2) or 2)
 
-    trail_gap_floor_money: float = float(
-        getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0
-    )
+    trail_gap_floor_money: float = float(_config_or_default("EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0))
     trail_gap_pct: float = float(getattr(Config, "EXIT_TRAIL_GAP_PCT", 0.6) or 0.6)
 
     staircase_trail_enabled: bool = bool(
@@ -86,9 +96,7 @@ class ExitTradeConfig:
     max_loss_price: float = float(getattr(Config, "EXIT_MAX_LOSS_PRICE", 0.0) or 0.0)
     max_loss_pips: float = float(getattr(Config, "EXIT_MAX_LOSS_PIPS", 0.0) or 0.0)
 
-    post_be_loss_cap_money: float = float(
-        getattr(Config, "EXIT_POST_BE_LOSS_CAP_MONEY", 5.0) or 5.0
-    )
+    post_be_loss_cap_money: float = float(_config_or_default("EXIT_POST_BE_LOSS_CAP_MONEY", 5.0))
 
     min_profit_pips: float = float(getattr(Config, "EXIT_MIN_PROFIT_PIPS", 0.0) or 0.0)
 
@@ -102,7 +110,7 @@ class ExitTradeConfig:
         getattr(Config, "EXIT_SOFT_SL_MONEY_GRACE_TICKS", 0) or 0
     )
 
-    be_arming_ticks: int = int(getattr(Config, "EXIT_BE_ARMING_TICKS", 20) or 20)
+    be_arming_ticks: int = int(_config_or_default("EXIT_BE_ARMING_TICKS", 20))
 
     htf_filter_enabled: bool = bool(getattr(Config, "EXIT_HTF_FILTER_ENABLED", False))
     htf_stale_seconds: int = int(getattr(Config, "EXIT_HTF_STALE_SECONDS", 180) or 180)
