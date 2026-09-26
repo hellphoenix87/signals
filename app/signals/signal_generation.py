@@ -20,6 +20,7 @@ from app.signals.strategies.session_filtered_signal_strategy import (
     SessionFilteredSignalStrategy,
 )
 from app.signals.strategies.spread_wait_entry_strategy import SpreadWaitEntryStrategy
+from app.signals.strategies.rsi_fade_signal_strategy import RsiFadeSignalStrategy
 
 # Entry-timeframe lengths, for wrappers that need the candle close from its
 # open time. Kept here rather than imported from scripts/ (app/ must not
@@ -172,6 +173,20 @@ def strategy_factory(
         # predicts from a model trained on the same indicators instead of
         # hand-picked thresholds/weights (see docs/test-results/ml-entry-model-comparison.md).
         base = MLSignalStrategy(config=config, logger=logger)
+    elif (
+        getattr(config, "ENTRY_STRATEGY", "macd_vote") == "rsi_fade"
+        and indicators is None
+        and not use_multi
+    ):
+        # M5 RSI-fade system (docs/plans/in-progress/entry-timing.md): replaces
+        # the MACD vote as the single-timeframe base; spread wait and session
+        # filter still wrap it below.
+        base = RsiFadeSignalStrategy(
+            period=int(getattr(config, "RSI_FADE_PERIOD", 14)),
+            low=float(getattr(config, "RSI_FADE_LOW", 30.0)),
+            high=float(getattr(config, "RSI_FADE_HIGH", 70.0)),
+            logger=logger,
+        )
     else:
         if indicators is None:
             if use_multi:

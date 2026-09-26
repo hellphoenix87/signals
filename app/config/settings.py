@@ -119,6 +119,22 @@ class Config:
     SPREAD_WAIT_MAX_POINTS: float = 0.5
     SPREAD_WAIT_SECONDS: float = 15.0
 
+    # M5 RSI-fade system (docs/plans/in-progress/entry-timing.md). At M1 every
+    # tested signal's edge (~0.02-0.03 pip) is smaller than friction (~0.1
+    # pip); reversion signals' edge grows with horizon faster than friction.
+    # Lab screen on unseen 2023 H1 (Test P1b): RSI(14) fade on M5, first entry
+    # per episode, fixed +/-5 pips: +0.275 pip/trade net, 4/6 windows -- a weak
+    # pass that licenses a full production test, not a live switch. ALL OFF by
+    # default; running the mode also needs TF_ENTRY = M5.
+    ENTRY_STRATEGY: str = "macd_vote"          # or "rsi_fade"
+    RSI_FADE_PERIOD: int = 14
+    RSI_FADE_LOW: float = 30.0
+    RSI_FADE_HIGH: float = 70.0
+    EXIT_FIXED_PIPS_ENABLED: bool = False      # fixed target/stop instead of BE arming + cap + staircase
+    EXIT_FIXED_TARGET_PIPS: float = 5.0
+    EXIT_FIXED_STOP_PIPS: float = 5.0
+    MAX_OPEN_POSITIONS_PER_SYMBOL = None       # None = unlimited (current behaviour)
+
     # STF (False) vs MTF gating (True). Set to False on 2026-09-25: research
     # moved to single-timeframe long ago -- MTF gating "costs 30x the sample
     # size and picks worse trades" in 10 of 12 windows, and "its smaller total
