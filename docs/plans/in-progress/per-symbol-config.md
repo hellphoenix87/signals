@@ -70,3 +70,9 @@ pairs start as a copy of EURUSD (the template) and change only what they need. F
 ### Phase 5: Write-up and PR (the user merges; adding USDJPY to `SYMBOLS` is the user's call)
 
 ## QA
+
+- Phase 1: EURUSD full-lifecycle backtest on 2026-08-25 (live config, single-timeframe) before vs after the
+  change: 3,716 vs 3,716 trades, P&L -$69.60 vs -$69.60, trade lists identical (time, direction, outcome,
+  profit, entry price). EURUSD behaviour unchanged.
+- Phase 2: USDJPY config prints blocked hours 19-07 UTC and the template exits; lot sizing check at live
+  prices: EURUSD 0.2 lot (unchanged), USDJPY 0.31 lot at 157.28 (was clamped to 0.01 before the fix).
