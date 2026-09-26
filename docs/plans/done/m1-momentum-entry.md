@@ -1,6 +1,6 @@
 # M1 momentum entry: trigger + strength filter + context
 
-Status: todo (branch `m1-momentum-entry`; written 2026-09-26, to be started in a new session)
+Status: done 2026-09-26 -- nothing passed Phase 3; Phase 4 not started (branch `m1-momentum-entry`)
 
 ## Goal
 
@@ -125,4 +125,13 @@ Standard parameters, fixed:
 - Pre-2021 tick availability and spread regime -- check at the start of Phase 4, not before.
 
 ## QA
+
+- Phase 1: lab restored; the live-hours table reproduces the known numbers (boll_fade +1.80, Donchian-60
+  follow -1.37). Production MACD computed per candle: +1.33 pp live (recorded run: +1.32), -0.16 pp ldn_ny.
+- Phase 2: indicators checked on a synthetic up/flat/down series (they point the right way, flips and
+  crosses fire only at turns) and for lookahead (0 mismatches when the series is cut at i).
+- Phase 3: no configuration passes. The best is KAMA slope + vol expansion in ldn_ny at +1.14 pp (11/13),
+  with win 33.81% < 34.8% break-even. Every trigger is negative in live hours. Full tables:
+  docs/test-results/m1-momentum-entry-screen.md.
+- Phase 4: skipped, as the plan says to when nothing passes.
 
