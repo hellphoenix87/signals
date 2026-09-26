@@ -35,11 +35,13 @@ from app.config.settings import Config
 from app.data.market_data import MarketData
 from app.signals.strategies.session_filtered_signal_strategy import SessionFilteredSignalStrategy
 
-PIP = 0.0001
+# --symbol=<MT5 symbol> (default EURUSD). JPY quotes: pip 0.01, point 0.001.
+SYMBOL = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--symbol=")), None) or "EURUSD"
+PIP = 0.01 if SYMBOL.endswith("JPY") else 0.0001
 UP, DN = 1.0 * PIP, 0.5 * PIP          # staircase first tier ($2) / post-BE cap ($1) at 0.2 lots
 WIN_PAYOFF, LOSS_PAYOFF = 2.216, 1.184  # measured average live fills (14 windows)
 BREAKEVEN = LOSS_PAYOFF / (WIN_PAYOFF + LOSS_PAYOFF)
-POINT = 0.00001
+POINT = PIP / 10
 CHUNKS = (400, 4000, 40000, 200000)     # scan lengths for the first-passage search
 # --geometry mode: (target pips, stop pips). Fill slippage measured on live runs: stops fill
 # ~0.09 pip past the level (cap -$1.18 vs -$1.00), targets ~0.04 pip short ($2 tier fills +$1.92).
@@ -54,11 +56,19 @@ WINDOWS = {  # spent windows only -- never screen on the unseen ones reserved fo
     "W39": "2023-09-26", "W40": "2023-08-29", "W41": "2023-08-01", "W42": "2023-07-04",
 }
 
+JPY_WINDOWS = {f"J{i + 1}": d for i, d in enumerate([
+    "2021-04-06", "2021-10-05", "2022-04-05", "2022-10-04", "2023-04-04", "2023-10-03",
+    "2024-04-02", "2024-10-01", "2025-04-01", "2025-10-07", "2026-04-07", "2026-08-04"])}
+if next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--windows=")), None) == "jpy":
+    WINDOWS = JPY_WINDOWS
+
 _SESSION = SessionFilteredSignalStrategy(None, [], lambda c: None,
                                          broker_timezone=getattr(Config, "BROKER_TIMEZONE", "Europe/Athens"))
-BLOCKED = set(getattr(Config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {}).get("EURUSD", []))
+BLOCKED = set(getattr(Config, "SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL", {}).get(SYMBOL, []))
 WAIT_S = float(getattr(Config, "SPREAD_WAIT_SECONDS", 15.0))
 WAIT_MAX_PTS = float(getattr(Config, "SPREAD_WAIT_MAX_POINTS", 0.5))
+if next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--gate-points=")), None) is not None:  # --gate-points=<points>: spread-wait gate for this run
+    WAIT_MAX_PTS = float(next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--gate-points=")), None))
 
 # --hours=<set>: which UTC hours get entries. `live` = the hours the live session filter allows
 # (19-07 UTC today), `ldn_ny` = 08-18 UTC (the hours it blocks), `all` = every hour.
@@ -78,7 +88,7 @@ def _ticks(start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
     chunks, t = [], start
     while t < end:
         e = min(t + dt.timedelta(days=1), end)
-        k = mt5.copy_ticks_range("EURUSD", t, e, mt5.COPY_TICKS_ALL)
+        k = mt5.copy_ticks_range(SYMBOL, t, e, mt5.COPY_TICKS_ALL)
         if k is not None and len(k):
             chunks.append(pd.DataFrame(k)[["time_msc", "bid", "ask"]])
         t = e
@@ -112,7 +122,7 @@ def build_window(md: MarketData, name: str, start_s: str, tf: int = mt5.TIMEFRAM
     """Per candle in the chosen hour set: OHLC history for rules + both-direction barrier outcomes."""
     start = dt.datetime.fromisoformat(start_s)
     end = start + dt.timedelta(days=28)
-    candles = pd.DataFrame(md.get_candles_range("EURUSD", tf, start - dt.timedelta(days=3 if tf == mt5.TIMEFRAME_M1 else 10), end))
+    candles = pd.DataFrame(md.get_candles_range(SYMBOL, tf, start - dt.timedelta(days=3 if tf == mt5.TIMEFRAME_M1 else 10), end))
     candles = candles.set_index("time").sort_index()
     k = _ticks(start, end + dt.timedelta(days=1))
     tm, bid, ask = k.time_msc.to_numpy(), k.bid.to_numpy(), k.ask.to_numpy()
@@ -347,9 +357,9 @@ def production_macd_directions(c: pd.DataFrame) -> pd.Series:
     from app.signals.signal_generation import strategy_factory
     cfg = type("LabCfg", (Config,), {"USE_SESSION_FILTER": False, "USE_SPREAD_WAIT_ENTRY": False,
                                      "USE_MULTI_TIMEFRAME_SIGNALS": False})
-    strat = strategy_factory(config=cfg, symbol="EURUSD", use_multi=False)
+    strat = strategy_factory(config=cfg, symbol=SYMBOL, use_multi=False)
     recs = [{"time": t, "open": r.open, "high": r.high, "low": r.low, "close": r.close,
-             "tick_volume": getattr(r, "tick_volume", 0), "symbol": "EURUSD"} for t, r in c.iterrows()]
+             "tick_volume": getattr(r, "tick_volume", 0), "symbol": SYMBOL} for t, r in c.iterrows()]
     out = np.zeros(len(recs), dtype=int)
     import logging, contextlib, io
     logging.disable(logging.CRITICAL)
@@ -431,7 +441,7 @@ def geometry_table(frames: list, cand: dict) -> None:
 def load_frames(md: MarketData | None) -> list:
     """Per-window frames for HOURS: from the cache when --cached and present, else built from MT5
     (and cached). Returns frames in WINDOWS order."""
-    path = Path(__file__).resolve().parent.parent / "backtest_results" / f"signal_lab_frames_{HOURS}.pkl"
+    path = Path(__file__).resolve().parent.parent / "backtest_results" / f"signal_lab_frames_{_cache_tag()}{HOURS}.pkl"
     if CACHE_MODE and path.exists():
         allc = pd.read_pickle(path)
         return [allc[allc.w == name] for name in WINDOWS if (allc.w == name).any()]
@@ -444,6 +454,82 @@ def load_frames(md: MarketData | None) -> list:
               f"({time.time() - t0:.0f}s)", flush=True)
     pd.concat(frames).to_pickle(path)
     return frames
+
+
+def _cache_tag() -> str:
+    return "" if SYMBOL == "EURUSD" else f"{SYMBOL}_g{WAIT_MAX_PTS:g}_"
+
+
+HYPOTHESES_MODE = "--hypotheses" in sys.argv
+HYP_MIN_TRADES = 50
+
+
+def _hyp_row(label: str, frames: list, parts: list, tp: float, sl: float, rnd: bool = False) -> dict:
+    """Net pips/trade (after slippage) of a direction series at one fixed exit, per window and pooled."""
+    per, allx = [], []
+    for f, d in zip(frames, parts):
+        b, s_ = f[f"win_buy_{tp}_{sl}"], f[f"win_sell_{tp}_{sl}"]
+        q = f.assign(d=d.reindex(f.index).fillna(0).astype(int), wb=b, ws=s_)
+        valid = (q.d != 0) & (q.entry_idx >= 0)
+        unres = int((valid & (q.wb.isna() | q.ws.isna())).sum())
+        q = q[valid & q.wb.notna() & q.ws.notna()]
+        rw = (q.wb + q.ws) / 2
+        w = rw if rnd else pd.Series(np.where(q.d > 0, q.wb, q.ws), index=q.index)
+        net = w * (tp - SLIP_TARGET) - (1 - w) * (sl + SLIP_STOP)
+        rnet = rw * (tp - SLIP_TARGET) - (1 - rw) * (sl + SLIP_STOP)
+        allx.append(pd.DataFrame({"net": net, "rnet": rnet, "win": w}))
+        per.append({"hyp": label, "window": f.w.iloc[0], "trades": len(q), "unresolved": unres,
+                    "win%": round(100 * w.mean(), 1) if len(q) else None,
+                    "net pip/tr": round(net.mean(), 3) if len(q) else None})
+    x = pd.concat(allx)
+    pw = pd.DataFrame(per)
+    counted = pw[pw.trades >= HYP_MIN_TRADES]
+    pos = int((counted["net pip/tr"] > 0).sum())
+    net, edge = x.net.mean(), x.net.mean() - x.rnet.mean()
+    se = x.net.std() / np.sqrt(len(x)) if len(x) > 1 else np.nan
+    verdict = "" if rnd else ("PASS" if (net > 0 and edge > 0 and len(counted) and pos >= 2 / 3 * len(counted)) else "FAIL")
+    return {"per": pw, "pooled": {"hyp": label, "trades": len(x), "win%": round(100 * x.win.mean(), 2),
+                                  "net pip/tr": round(net, 4), "(naive se)": round(se, 4),
+                                  "edge vs random": round(edge, 4), "$/tr @0.2lot": None,
+                                  "windows net+": f"{pos}/{len(counted)}", "verdict": verdict}}
+
+
+def hypotheses(md: MarketData) -> None:
+    """The pre-registered USDJPY hypotheses H1-H3 (docs/plans/in-progress/usdjpy-test.md), judged once."""
+    def frames_for(tf: int, geom: tuple) -> list:
+        name = {mt5.TIMEFRAME_M1: "M1", mt5.TIMEFRAME_M5: "M5"}[tf]
+        path = Path(__file__).resolve().parent.parent / "backtest_results" / f"signal_lab_hyp_{_cache_tag()}{name}_{HOURS}.pkl"
+        if CACHE_MODE and path.exists():
+            allc = pd.read_pickle(path)
+            return [allc[allc.w == n] for n in WINDOWS if (allc.w == n).any()]
+        out = []
+        for n, st in WINDOWS.items():
+            t0 = time.time()
+            out.append(build_window(md, n, st, tf, [geom], hours=HOURS))
+            print(f"{name} {n}: {int((out[-1].entry_idx >= 0).sum())} entries ({time.time() - t0:.0f}s)", flush=True)
+        pd.concat(out).to_pickle(path)
+        return out
+
+    m1 = frames_for(mt5.TIMEFRAME_M1, (3.0, 3.0))
+    m5 = frames_for(mt5.TIMEFRAME_M5, (5.0, 5.0))
+    mt5.shutdown()
+
+    def kama_vx(frames: list) -> list:
+        return [momentum_triggers(f)["kama_slope"].where(strength_filters(f)["volexp1.3"], 0) for f in frames]
+
+    rows = [
+        _hyp_row("H1 MACD_prod M1 +3/-3", m1, [production_macd_directions(f) for f in m1], 3.0, 3.0),
+        _hyp_row("   random, same M1 ticks", m1, [pd.Series(1, index=f.index) for f in m1], 3.0, 3.0, rnd=True),
+        _hyp_row("H2 KAMA+volexp M1 +3/-3", m1, kama_vx(m1), 3.0, 3.0),
+        _hyp_row("H3 KAMA+volexp M5 +5/-5", m5, kama_vx(m5), 5.0, 5.0),
+        _hyp_row("   random, same M5 ticks", m5, [pd.Series(1, index=f.index) for f in m5], 5.0, 5.0, rnd=True),
+    ]
+    pd.set_option("display.width", 250)
+    print(f"\n{SYMBOL} hours={HOURS} gate<={WAIT_MAX_PTS:g} points; slippage stops {SLIP_STOP} / targets {SLIP_TARGET} pip")
+    print(pd.concat([r["per"] for r in rows]).set_index(["hyp", "window"]).to_string())
+    pooled = pd.DataFrame([r["pooled"] for r in rows]).drop(columns=["$/tr @0.2lot"]).set_index("hyp")
+    print("\nPOOLED (bar: net > 0, edge > 0, net+ in >= 2/3 of windows with >= 50 trades)")
+    print(pooled.to_string())
 
 
 MOMENTUM_MODE = "--momentum" in sys.argv
@@ -585,7 +671,7 @@ def _exit_stats(frames: list, parts: list, key: str, windows: tuple, rnd: bool) 
 
 def exit_grid(md: MarketData) -> None:
     """Momentum candidates x fixed/trailing exits; exits tuned on TUNE_WINDOWS, reported on the rest."""
-    path = Path(__file__).resolve().parent.parent / "backtest_results" / f"signal_lab_exitgrid_{HOURS}.pkl"
+    path = Path(__file__).resolve().parent.parent / "backtest_results" / f"signal_lab_exitgrid_{_cache_tag()}{HOURS}.pkl"
     if CACHE_MODE and path.exists():
         allc = pd.read_pickle(path)
         frames = [allc[allc.w == name] for name in WINDOWS if (allc.w == name).any()]
@@ -663,6 +749,9 @@ def main() -> None:
         return
     if EXIT_GRID_MODE:
         exit_grid(md)
+        return
+    if HYPOTHESES_MODE:
+        hypotheses(md)
         return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if SCALE_MODE:
