@@ -259,6 +259,11 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   (2022-01-18 .. 2022-12-20 window starts), which stay unseen until then; 2021 in reserve.
   **On FAIL**: stop this line.
 - Command: `PYTHONPATH=. pipenv run python scripts/signal_lab.py --p1b-screen`
+- **RESULT (2026-09-26): PASS (weak).** +/-5 pip graded: 281 trades, win 53.4%, edge +4.45 pp over
+  same-tick random, net +0.275 pip/trade (~+$0.55 at 0.2 lots), 4/6 windows net-positive (W43 +1.06,
+  W44 -0.14, W45 +0.18, W46 -0.43, W47 +0.29, W48 +1.07). +/-3 secondary: +3.0 pp, +0.075 pip, 3/6.
+  Shrank from the spent-window +7.9 pp / +0.51 pip; ~1.5 standard errors from zero. A screen pass
+  licenses the production build, not a claim of edge.
 
 ## Testing protocol from 2026-09-24: staged escalation
 

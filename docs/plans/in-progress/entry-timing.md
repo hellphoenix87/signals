@@ -141,6 +141,11 @@ production test.
 - Change: write down the one or two candidate rules with the strongest, most consistent effect on
   reach %, and their expected trade-count cost. Recorded here; user picks before Phase 2.
 
+Screens: Test P1 (W25-W30) INCONCLUSIVE -- wide-spread period, 51 trades in 1 window. Test P1b
+(W43-W48, tight spreads) **PASS (weak)**: 281 trades, 53.4% win, +4.45 pp, net +0.275 pip/trade,
+4/6 windows. ~1.5 SE; ~+$26 expected per 4-week window at 0.2 lots vs ~$10 risk per trade.
+Unseen and tight-spread for the production test: W49-W60 (2022). Reserve: 2021.
+
 ### Phase 2: Implement the chosen rule in production
 
 - To be specified after 1.3. Default shape for an entry-timing rule: a condition inside
