@@ -196,6 +196,9 @@ time: 45 trades (7 skipped), 62.2%, +$107.80. Exits `fixed_target` avg +$10.19, 
 Stage 1 (W49, W52, W55, W58, W61, W64, W67, W70) RSI arm: 312 trades, 51.6% win, **+$0.283/trade**,
 +$88.20, t = 0.49 -> no early stop. Per window -$133 (W61) .. +$90 (W67). LIVE arm pending.
 
+Stage 2 (+W50, W56, W62, W68) RSI arm, cumulative 12 windows: 446 trades, 52.9% win,
+**+$0.563/trade**, +$251.00, t = 1.17 -> continue.
+
 ### Phase 4: Write-up and PR (not merged until the user decides)
 
 ## Open questions
