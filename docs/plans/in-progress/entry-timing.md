@@ -27,7 +27,7 @@ A candidate must raise reach % AND improve $/trade; total must not get worse.
 
 ### Phase 1: Exploration on spent windows (no code in app/)
 
-#### Subphase 1.1: Entry-state features for live-config trades
+#### Subphase 1.1: Entry-state features for live-config trades -- DONE
 
 - Change: scratch analysis only. For the 14 live-config runs (Test O WAIT arm W31-W42 + W1/W2 base,
   `post_be_peak_profit` logged), reconstruct each trade's actual entry tick (signal candle close +
@@ -39,6 +39,30 @@ A candidate must raise reach % AND improve $/trade; total must not get worse.
 - Acceptance: a table per feature of reach % / dud % / $/trade by quintile and the number of
   windows that agree on direction; reconstructed entry price matches the logged one on >= 99% of
   trades.
+
+Result 1.1 (18,744 live-config trades, 14 spent windows; entry tick reconstructed, price match
+99.5-100%): **nothing observable at the zero-spread entry predicts reaching the staircase.** All 22
+features AUC 0.49-0.51 (price path during the wait / 5 ticks / 60 s / 5 min, signal-candle shape,
+prior 3 candles, tick activity, flat ticks, ATR, 1h range/position/trend, MACD histogram, signal
+freshness/run length, wait seconds, hour). Combined model, leave-one-window-out: AUC 0.512; keeping its
+top 60% moves reach 33.6% -> 34.2%. The earlier "don't chase" / "quiet market" effects (AUC 0.53-0.56)
+were about winning back the spread and vanish at a zero-spread entry.
+
+Why: the exit geometry is a barrier game. At 0.2 lots 1 pip = $2, so reaching the staircase = +1 pip
+before the -0.5 pip ($1) cap. A driftless random walk wins that 0.5/1.5 = **33.3%**; the live config
+reaches **33.5%**. Played at every real entry tick (tick data, 95.8% agreement with the backtest):
+
+| Direction at the same entry tick | +1 pip before -0.5 pip |
+|---|---|
+| Signal | **33.2%** |
+| Opposite | 30.6% |
+| Random walk | 33.3% |
+| Break-even with live fills | 34.8% |
+
+The signal beats the opposite side by +2.6 pp pooled (std error ~0.34 pp), but only in 7 of 12
+windows (W1/W2 +4-5 pp; several 2023-24 windows negative). Relative to a random direction (the
+average of both sides, ~31.9%) the signal adds ~+1.3 pp; break-even needs ~+2.9 pp. Both sides sit
+below the random walk: EURUSD is mean-reverting at the half-pip scale, which penalises any entry.
 
 #### Subphase 1.2: Size the directional edge under live exits (E3)
 
