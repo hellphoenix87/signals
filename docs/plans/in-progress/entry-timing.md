@@ -100,6 +100,21 @@ Reading: simple directional rules top out around +2 pp; the edge that exists is 
 +1 / -0.5 pip exit geometry asks for continuation. Next question (user decides): exit geometry for a
 reversion signal.
 
+User choice (2026-09-26): **geometry scan** -- `scripts/signal_lab.py --geometry`, live MACD + the
+3 best reversion rules + random, target/stop +1/-0.5, +0.5/-0.5, +0.5/-1, +0.75/-0.75, +1/-1 pip;
+net = after measured fill slippage (stops -0.09 pip, targets -0.04 pip). Bar fixed before running:
+net > 0 pooled and positive in >= 10/12 windows.
+
+Result: **no combination passes** -- all 20 net negative pooled, none positive in more than 2 windows.
+Gross EV is ~0 (+/-0.01 pip) for every signal in every geometry. Correction to the reading above: a
+random direction misses random-walk break-even in EVERY geometry by 1.3-2.6 pp (gross -0.018 to
+-0.038 pip), including +0.5/-1, so it is not reversion favouring one shape -- it is a fixed entry
+handicap (zero-spread entry, spread reopens next tick). The signals' direction is worth ~+0.02-0.03
+pip/trade, just offsetting that; fill slippage (~0.07-0.09 pip) is 3-4x the edge. (Proxy is
+pessimistic in absolute terms -- it ignores staircase tiers above $2; compare rows, not live P&L.)
+Only remaining lever on this evidence: SCALE (larger targets/stops, M5/M15 entries), where fixed pip
+frictions shrink relative to the move -- if the edge grows with horizon.
+
 - Change: write down the one or two candidate rules with the strongest, most consistent effect on
   reach %, and their expected trade-count cost. Recorded here; user picks before Phase 2.
 

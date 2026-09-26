@@ -41,6 +41,11 @@ WIN_PAYOFF, LOSS_PAYOFF = 2.216, 1.184  # measured average live fills (14 window
 BREAKEVEN = LOSS_PAYOFF / (WIN_PAYOFF + LOSS_PAYOFF)
 POINT = 0.00001
 CHUNKS = (400, 4000, 40000)             # scan lengths for the first-passage search
+# --geometry mode: (target pips, stop pips). Fill slippage measured on live runs: stops fill
+# ~0.09 pip past the level (cap -$1.18 vs -$1.00), targets ~0.04 pip short ($2 tier fills +$1.92).
+GEOMETRIES = [(1.0, 0.5), (0.5, 0.5), (0.5, 1.0), (0.75, 0.75), (1.0, 1.0)]
+SLIP_STOP, SLIP_TARGET = 0.09, 0.04
+GEOMETRY_SIGNALS = ["LIVE_macd", "boll_fade", "rsi_fade", "LIVE_against_trend240", "RANDOM"]
 
 WINDOWS = {  # spent windows only -- never screen on the unseen ones reserved for Test P
     "W1": "2026-08-25", "W2": "2026-07-28",
@@ -67,9 +72,10 @@ def _ticks(start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
     return pd.concat(chunks).drop_duplicates().sort_values("time_msc").reset_index(drop=True)
 
 
-def _first_passage(px: np.ndarray, start: int, entry: float, side: int) -> float:
-    """1.0 if price reaches entry+UP (in trade direction) before entry-DN, 0.0 if the reverse,
+def _first_passage(px: np.ndarray, start: int, entry: float, side: int, up_pips: float = 1.0, dn_pips: float = 0.5) -> float:
+    """1.0 if price reaches entry+up (in trade direction) before entry-dn, 0.0 if the reverse,
     NaN if neither within the longest chunk."""
+    UP, DN = up_pips * PIP, dn_pips * PIP
     for n in CHUNKS:
         seg = (px[start:start + n] - entry) * side
         up = np.flatnonzero(seg >= UP - 1e-9)
@@ -108,13 +114,16 @@ def build_window(md: MarketData, name: str, start_s: str) -> pd.DataFrame:
             entry_idx[n] = a[n] + hit[0]
     c["entry_idx"] = entry_idx
     ok = entry_idx >= 0
-    buy = np.full(len(c), np.nan)
-    sell = np.full(len(c), np.nan)
-    for n in np.flatnonzero(ok):
-        i = entry_idx[n]
-        buy[n] = _first_passage(bid, i, ask[i], +1)
-        sell[n] = _first_passage(ask, i, bid[i], -1)
-    c["win_buy"], c["win_sell"] = buy, sell
+    for (tp, sl) in (GEOMETRIES if GEOMETRY_MODE else [(1.0, 0.5)]):
+        buy = np.full(len(c), np.nan)
+        sell = np.full(len(c), np.nan)
+        for n in np.flatnonzero(ok):
+            i = entry_idx[n]
+            buy[n] = _first_passage(bid, i, ask[i], +1, tp, sl)
+            sell[n] = _first_passage(ask, i, bid[i], -1, tp, sl)
+        if (tp, sl) == (1.0, 0.5):
+            c["win_buy"], c["win_sell"] = buy, sell
+        c[f"win_buy_{tp}_{sl}"], c[f"win_sell_{tp}_{sl}"] = buy, sell
     c["w"] = name
     return c
 
@@ -161,6 +170,42 @@ def score(frame: pd.DataFrame, direction: pd.Series) -> pd.DataFrame:
     return x
 
 
+GEOMETRY_MODE = "--geometry" in sys.argv
+
+
+def geometry_table(frames: list, cand: dict) -> None:
+    """Score the chosen signals under each (target, stop) pair: win rate, same-tick random rate,
+    gross and net pips per trade, windows with positive net."""
+    rows = []
+    for k in GEOMETRY_SIGNALS:
+        parts = cand.get(k) if k != "RANDOM" else [pd.Series(1, index=f.index) for f in frames]
+        if parts is None:
+            continue
+        for tp, sl in GEOMETRIES:
+            xs = []
+            for f, v in zip(frames, parts):
+                b, s_ = f[f"win_buy_{tp}_{sl}"], f[f"win_sell_{tp}_{sl}"]
+                x = f.assign(dirn=v.reindex(f.index).fillna(0).astype(int), wb=b, ws=s_)
+                x = x[(x.dirn != 0) & x.wb.notna() & x.ws.notna()]
+                win = np.where(x.dirn > 0, x.wb, x.ws) if k != "RANDOM" else (x.wb + x.ws) / 2
+                xs.append(pd.DataFrame({"w": x.w, "win": win, "rand": (x.wb + x.ws) / 2}))
+            xs = pd.concat(xs)
+            net = xs.win * (tp - SLIP_TARGET) - (1 - xs.win) * (sl + SLIP_STOP)
+            per = xs.assign(net=net).groupby("w").agg(n=("net", "size"), net=("net", "mean"))
+            big = per[per.n >= 100]
+            p = xs.win.mean()
+            rows.append({"signal": k, "target/stop pips": f"+{tp}/-{sl}", "trades": len(xs),
+                         "win%": round(100 * p, 2), "rw break-even%": round(100 * sl / (tp + sl), 2),
+                         "edge vs same-tick random pp": round(100 * (p - xs.rand.mean()), 2),
+                         "gross pips/tr": round(p * tp - (1 - p) * sl, 4),
+                         "net pips/tr": round(net.mean(), 4), "net $/tr (0.2 lot)": round(2 * net.mean(), 3),
+                         "windows net+": f"{int((big.net > 0).sum())}/{len(big)}"})
+    t = pd.DataFrame(rows).set_index(["signal", "target/stop pips"])
+    pd.set_option("display.width", 250)
+    print(f"\nGEOMETRY SCAN (slippage: stops -{SLIP_STOP} pip, targets -{SLIP_TARGET} pip)")
+    print(t.to_string())
+
+
 def main() -> None:
     for _ in range(10):
         if mt5.initialize():
@@ -169,7 +214,8 @@ def main() -> None:
     else:
         sys.exit("MT5 initialization failed")
     md = MarketData()
-    live = pd.read_pickle(Path(sys.argv[1])) if len(sys.argv) > 1 else None  # optional live-signal (w, time, direction)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    live = pd.read_pickle(Path(args[0])) if args else None  # optional live-signal (w, time, direction)
     frames = []
     for name, s in WINDOWS.items():
         t0 = time.time()
@@ -214,6 +260,9 @@ def main() -> None:
             "windows +": f"{int((big.edge > 0).sum())}/{len(big)}",
             "est $/tr": round(p * WIN_PAYOFF - (1 - p) * LOSS_PAYOFF, 3),
         })
+    if GEOMETRY_MODE:
+        geometry_table(frames, cand)
+        return
     t = pd.DataFrame(results).set_index("rule").sort_values("edge pp", ascending=False)
     pd.set_option("display.width", 200)
     print(f"\nbarrier +1 pip / -0.5 pip; random walk 33.33%; break-even with live fills {100 * BREAKEVEN:.1f}%")
