@@ -64,11 +64,25 @@ windows (W1/W2 +4-5 pp; several 2023-24 windows negative). Relative to a random 
 average of both sides, ~31.9%) the signal adds ~+1.3 pp; break-even needs ~+2.9 pp. Both sides sit
 below the random walk: EURUSD is mean-reverting at the half-pip scale, which penalises any entry.
 
-#### Subphase 1.2: Size the directional edge under live exits (E3)
+#### Subphase 1.2: Size the directional edge under live exits (E3) -- DONE
 
 - Change: `--invert-signal` runs on 2-4 spent windows with the live config, compared to the
   existing live runs.
 - Acceptance: pooled $/trade and reach % for signal vs inverted signal, per window.
+
+Result 1.2 (live config, production backtest, `--invert-signal`, 4 spent tight-spread windows):
+
+| Window | Signal $/tr | Inverted $/tr | Signal reach % | Inverted reach % |
+|---|---|---|---|---|
+| W1 | -0.019 | -0.210 | 34.4 | 28.6 |
+| W2 | -0.050 | -0.195 | 34.1 | 29.6 |
+| W40 | +0.005 | -0.034 | 34.1 | 32.6 |
+| W41 | -0.004 | -0.057 | 34.5 | 31.2 |
+| **Pooled (10,724 trades each)** | **-0.023** | **-0.153** | **34.2** | **30.0** |
+
+The signal's direction is real (4/4 windows, +$0.13/trade over its inverse), consistent with the
+barrier game. But it lifts the entry from the market's half-pip mean-reverting baseline (random
+direction ~ -$0.09/trade) only to about random-walk level, not past the 34.8% break-even.
 
 #### Subphase 1.3: Pick the hypothesis
 
