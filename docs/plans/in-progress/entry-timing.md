@@ -146,17 +146,45 @@ Screens: Test P1 (W25-W30) INCONCLUSIVE -- wide-spread period, 51 trades in 1 wi
 4/6 windows. ~1.5 SE; ~+$26 expected per 4-week window at 0.2 lots vs ~$10 risk per trade.
 Unseen and tight-spread for the production test: W49-W60 (2022). Reserve: 2021.
 
-### Phase 2: Implement the chosen rule in production
+### Phase 2: Build the M5 RSI-fade system in production (user decision 2026-09-26: build, one position at a time)
 
-- To be specified after 1.3. Default shape for an entry-timing rule: a condition inside
-  `SpreadWaitEntryStrategy` (it already holds the signal for up to 15 s on every tick), toggled by a
-  Config flag and a backtest `--flag on|off` that drives the real wrapper. A signal-selection rule
-  would be a new wrapper in `strategy_factory` in the same style.
+All behind Config flags defaulting OFF -- the live bot is unchanged until the user flips them.
+
+#### Subphase 2.1: Config tunables
+- `ENTRY_STRATEGY = "macd_vote"` (or `"rsi_fade"`), `RSI_FADE_PERIOD = 14`, `RSI_FADE_LOW = 30`,
+  `RSI_FADE_HIGH = 70`; `EXIT_FIXED_PIPS_ENABLED = False`, `EXIT_FIXED_TARGET_PIPS = 5.0`,
+  `EXIT_FIXED_STOP_PIPS = 5.0`; `MAX_OPEN_POSITIONS_PER_SYMBOL = None` (unlimited, as today).
+  Running the mode also needs `TF_ENTRY = M5`.
+
+#### Subphase 2.2: `RsiFadeSignalStrategy`
+- New base strategy: RSI(period) with Wilder smoothing on closes; RSI < low -> buy, > high -> sell,
+  and only on the first candle of a run (previous candle's raw signal differs) -- stateless, computed
+  from the candle list, so live and backtest agree. `strategy_factory` uses it instead of the MACD
+  vote when `ENTRY_STRATEGY == "rsi_fade"`; spread wait and session filter wrap it as today.
+
+#### Subphase 2.3: Fixed pip exits
+- New `FixedPipExitManager.check_exit_on_tick`: exit at +target / -stop pips from entry (bid for
+  buys, ask for sells), reasons `fixed_target` / `fixed_stop`. `ExitTradeConfig` gains
+  `fixed_pips_enabled`, `fixed_target_pips`, `fixed_stop_pips`; when enabled `ExitTrade.on_tick` uses
+  only this manager (no BE arming, cap or staircase). `TradeExecutor` then sets the broker-side SL/TP
+  to the same pips as a backstop (instead of DEFAULT_SL/TP_PIPS).
+
+#### Subphase 2.4: One position at a time
+- `TradeExecutor.execute_signals` skips a signal when `MAX_OPEN_POSITIONS_PER_SYMBOL` is set and the
+  symbol already has that many open positions.
+
+#### Subphase 2.5: Backtest support
+- `--rsi-fade-mode`: sets `TF_ENTRY = M5`, `ENTRY_STRATEGY = "rsi_fade"`, fixed-pip exits and one
+  position per symbol, all through the production objects; the full-lifecycle loop uses
+  `exit_trade._fixed_manager` when present; one-position is mirrored by skipping signals whose entry
+  falls before the previous simulated trade's exit tick.
+- Acceptance: on a spent window, with one-position OFF, trade count and win rate match the lab's M5
+  RSI-fade first-per-episode +/-5 numbers closely; with it ON, fewer trades, no overlaps.
 
 ### Phase 3: Pre-registered staged test (Test P)
 
-- Unseen windows (ticks verified): W25-W30 (2024-06-04 .. 2024-11-19) and W43-W48
-  (2023-01-17 .. 2023-07-04). Stages 4 -> 2 -> 4 -> 2 with order fixed at pre-registration, cumulative
+- Unseen tight-spread windows: W49-W60 (2022; W25-W30 and W43-W48 were used by the P1/P1b screens).
+  Stages 4 -> 2 -> 4 -> 2 with order fixed at pre-registration, cumulative
   bars >= 3/4, >= 5/6, >= 8/10, >= 9/12, each also requiring pooled $/trade better and total no
   worse than the live config. Fail at any stage -> stop.
 
