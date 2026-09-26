@@ -296,6 +296,11 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
 - **On PASS**: candidate to ship (flags: ENTRY_STRATEGY="rsi_fade", TF_ENTRY=M5,
   EXIT_FIXED_PIPS_ENABLED=True, MAX_OPEN_POSITIONS_PER_SYMBOL=1) -- user decision, with a demo check.
   **On FAIL**: document; M5 RSI fade does not clear costs.
+- **RESULT (2026-09-26): PASS.** RSI arm, all 24 windows: 945 trades, 53.9% win, +$0.745/trade,
+  +$704.20, t = +2.25. LIVE arm, same windows: 45,051 trades, +$0.013/trade, +$601.00 (t = +1.54 --
+  the live config was also profitable in 2021-2022). Early stop never triggered (+0.283 -> +0.563 ->
+  +0.591 -> +0.745). Risk: RSI max drawdown -$429 vs LIVE -$806; window-total sd $69 vs $127; 17 vs 13
+  positive windows. Write-up: entry-timing-and-rsi-fade-m5.md.
 
 ## Testing protocol from 2026-09-24: staged escalation
 

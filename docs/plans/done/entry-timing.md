@@ -1,6 +1,6 @@
 # Signal quality and entry timing
 
-Status: in-progress (branch `entry-timing`)
+Status: done (branch `entry-timing`; PR open, merge and switching the flags on are the user's call)
 
 ## Goal
 
@@ -207,7 +207,10 @@ Stage 4 (+W54, W60, W66, W72) RSI arm, all 24 windows: **945 trades, 53.9% win, 
 spreads); weak stretch late 2021 (W62-W65 negative), 2022 consistently positive. Criterion 3 (beat the
 LIVE arm's pooled total) pending the LIVE runs.
 
-### Phase 4: Write-up and PR (not merged until the user decides)
+**Test P2 verdict: PASS** -- RSI +$704.20 (+$0.745/trade, t = 2.25) vs LIVE +$601.00 on the same 24
+windows; see docs/test-results/entry-timing-and-rsi-fade-m5.md.
+
+### Phase 4: -- DONE (docs/test-results/entry-timing-and-rsi-fade-m5.md) Write-up and PR (not merged until the user decides)
 
 ## Open questions
 
