@@ -199,6 +199,9 @@ Stage 1 (W49, W52, W55, W58, W61, W64, W67, W70) RSI arm: 312 trades, 51.6% win,
 Stage 2 (+W50, W56, W62, W68) RSI arm, cumulative 12 windows: 446 trades, 52.9% win,
 **+$0.563/trade**, +$251.00, t = 1.17 -> continue.
 
+Stage 3 (+W51, W53, W57, W59, W63, W65, W69, W71) RSI arm, cumulative 20 windows: 804 trades, 53.1%
+win, **+$0.591/trade**, +$474.80, t = 1.64 -> continue.
+
 ### Phase 4: Write-up and PR (not merged until the user decides)
 
 ## Open questions
