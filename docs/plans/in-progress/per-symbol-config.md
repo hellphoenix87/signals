@@ -76,3 +76,17 @@ pairs start as a copy of EURUSD (the template) and change only what they need. F
   profit, entry price). EURUSD behaviour unchanged.
 - Phase 2: USDJPY config prints blocked hours 19-07 UTC and the template exits; lot sizing check at live
   prices: EURUSD 0.2 lot (unchanged), USDJPY 0.31 lot at 157.28 (was clamped to 0.01 before the fix).
+- Phase 3, development run 1 (USDJPY config as in Phase 2; live code, `--lot risk`, 08-18 UTC):
+
+  | window | trades | never BE | BE not ST | reached ST | ST % | $/trade | total |
+  |---|---|---|---|---|---|---|---|
+  | 2021-01-12 | 2,373 | 0 | 1,584 | 789 | 33.2 | -0.054 | -$127.14 |
+  | 2021-07-06 | 2,457 | 1 | 1,606 | 850 | 34.6 | +0.009 | +$20.94 |
+  | 2022-01-11 | 1,914 | 0 | 1,225 | 689 | 36.0 | -0.011 | -$20.28 |
+  | 2022-07-05 | 2,581 | 0 | 1,578 | 1,003 | 38.9 | +0.143 | +$368.58 |
+  | 2023-01-10 | 210 | 0 | 127 | 83 | 39.5 | +0.102 | +$21.32 |
+  | 2023-07-04 | 1,213 | 5 | 913 | 294 | 24.2 | -0.326 | -$394.84 |
+  | pooled | 10,748 | 6 | | | 34.5 | -0.012 | -$131.42 (t -0.67) |
+
+  Break-even overall; 3/6 windows positive; one window (2022-07) carries the gains and one (2023-07) the
+  losses. Zero-spread entries work (6 of 10,748 never reached BE). No config change made yet.
