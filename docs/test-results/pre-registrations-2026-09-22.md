@@ -239,6 +239,10 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
 - **Known risks**: ~$10 risk per trade at 0.2 lots vs ~$1 today; hours-long trades; the screen ignores
   overlapping positions (an episode can start while a previous trade is open).
 - Command: `PYTHONPATH=. pipenv run python scripts/signal_lab.py --p1-screen`
+- **RESULT (2026-09-26): INCONCLUSIVE.** W25-W29 (Jul-Nov 2024) produced 0-1 trades each: a
+  wide-spread period in which the zero-spread entry never fires. Only W30 (Jun 2024) counted: 50
+  trades, win 60.0%, net +0.94 pip/trade at +/-5 (+0.42 at +/-3). Pooled 51 trades, 1 counted window
+  (bar needs >= 3). Not a pass; the windows cannot answer the question.
 
 ## Testing protocol from 2026-09-24: staged escalation
 
