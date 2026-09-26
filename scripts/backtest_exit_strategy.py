@@ -484,6 +484,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Replace the real post-BE two-manager sequence (loss-manager cap, then -- only while profit stays positive -- the profit-manager trail) with a single combined stop (trigger = peak - max(--trail-gap-floor-money, --trail-gap-pct * peak)) checked every tick regardless of sign. Tests whether the real trail's '0 < profit' gate is what lets fast reversals skip past it into the separate, much looser loss cap. Pre-BE phase (arming/soft-SL/timeout) is the real, unchanged LossExitManager. Mutually exclusive with --full-lifecycle's own post-BE logic (this replaces it) and with --sweep-post-be-cap/--sweep-pre-be-threshold.",
     )
+    parser.add_argument("--allow-overlap", action="store_true", help="Only with --rsi-fade-mode: do NOT enforce one open position at a time (matches the signal lab's screen assumption).")
+    parser.add_argument(
+        "--rsi-fade-mode",
+        action="store_true",
+        help="Run the M5 RSI-fade system through the production objects: TF_ENTRY=M5, ENTRY_STRATEGY='rsi_fade' (RsiFadeSignalStrategy), fixed pip exits (FixedPipExitManager, Config.EXIT_FIXED_TARGET/STOP_PIPS) and one open position at a time (a signal whose entry falls before the previous trade's exit is skipped, mirroring MAX_OPEN_POSITIONS_PER_SYMBOL=1). Requires --full-lifecycle --single-timeframe.",
+    )
     parser.add_argument(
         "--spread-wait",
         choices=["on", "off"],
@@ -1182,6 +1188,7 @@ def simulate_full_lifecycle(
     state = PosState(anchor=0.0, prev_price=0.0)
     loss_manager = exit_trade._loss_manager
     profit_manager = exit_trade._profit_manager
+    fixed_manager = getattr(exit_trade, "_fixed_manager", None)
     profit_exits_on_tick = bool(getattr(exit_trade._config, "profit_exits_on_tick", True))
 
     profit = 0.0
@@ -1206,6 +1213,13 @@ def simulate_full_lifecycle(
 
         was_armed = getattr(state, "be_armed", False)
         tick_dict = to_tick_dict(t)
+        if fixed_manager is not None:
+            # Fixed-pip system: the production FixedPipExitManager is the only exit.
+            action = fixed_manager.check_exit_on_tick(position, tick_dict, state)
+            if action:
+                outcome = action.reason
+                break
+            continue
         action = loss_manager.check_exit_on_tick(position, tick_dict, state)
         if action:
             outcome = action.reason
@@ -1295,6 +1309,7 @@ def simulate_full_lifecycle(
         # Logged so spread gates can be graded from one ungated run: entry
         # spread is the strongest single predictor of a pre-BE timeout.
         "entry_spread_pips": _entry_spread_pips(entry_tick, pip_size),
+        "exit_time_msc": int(ticks[idx]["time_msc"]) if idx >= 0 else None,
         "cf_recovered_to_be": cf_recovered_to_be,
         "cf_ticks_to_recover": cf_ticks_to_recover,
         "cf_min_profit_after_exit": cf_min_profit_after_exit,
@@ -2438,6 +2453,8 @@ def run(
     spread_wait: Optional[str] = None,
     spread_wait_max_points: Optional[float] = None,
     spread_wait_seconds_override: Optional[float] = None,
+    rsi_fade_mode: bool = False,
+    allow_overlap: bool = False,
 ) -> None:
     # One terminal serves every process, and a batch of parallel backtests can
     # exhaust its connection slots -- which used to abort the run outright and
@@ -2538,6 +2555,8 @@ def run(
     spread_wait_active = bool(getattr(config, "USE_SPREAD_WAIT_ENTRY", False))
     spread_wait_window = float(getattr(config, "SPREAD_WAIT_SECONDS", 15.0))
     spread_wait_expired = 0
+    busy_until_msc = 0
+    skipped_position_open = 0
     point_size = float(broker.get_point_size(symbol) or 0.00001)
     if spread_wait_active and (not full_lifecycle or sweep_post_be_cap or sweep_staircase_cap or chain_on_cap or hedge_on_cap or staircase_trail or sweep_staircase_tiers or sweep_pre_be_threshold):
         print("Spread-wait entry (Config.USE_SPREAD_WAIT_ENTRY) is only wired into plain --full-lifecycle runs. "
@@ -2559,6 +2578,10 @@ def run(
         exit_overrides["max_loss_money"] = pre_be_loss_threshold
     if be_arming_ticks is not None:
         exit_overrides["be_arming_ticks"] = be_arming_ticks
+    if rsi_fade_mode:
+        exit_overrides["fixed_pips_enabled"] = True
+        exit_overrides["fixed_target_pips"] = float(getattr(Config, "EXIT_FIXED_TARGET_PIPS", 5.0))
+        exit_overrides["fixed_stop_pips"] = float(getattr(Config, "EXIT_FIXED_STOP_PIPS", 5.0))
     if exit_staircase is not None:
         # Toggles the REAL ProfitExitManager staircase
         # (Config.EXIT_STAIRCASE_TRAIL_ENABLED) rather than branching into this
@@ -2591,6 +2614,11 @@ def run(
         f"| strategy={'single-timeframe' if single_timeframe else 'MTF'} "
         f"| spread_wait={'on <=' + str(getattr(config, 'SPREAD_WAIT_MAX_POINTS', None)) + 'pt ' + str(spread_wait_window) + 's' if spread_wait_active else 'off'}"
     )
+    if getattr(_eff, "fixed_pips_enabled", False):
+        print(f"[{symbol}] FIXED-PIP EXITS ACTIVE: +{_eff.fixed_target_pips}/-{_eff.fixed_stop_pips} pips "
+              f"(BE arming, cap and staircase above are NOT used) | entry=RSI fade "
+              f"{getattr(config, 'RSI_FADE_PERIOD', 14)}/{getattr(config, 'RSI_FADE_LOW', 30)}/{getattr(config, 'RSI_FADE_HIGH', 70)} "
+              f"on TF_ENTRY={getattr(Config, 'TF_ENTRY', None)} | one position: {'off' if allow_overlap else 'on'}")
 
 
     chained_exit_trade = None
@@ -2659,6 +2687,11 @@ def run(
                     closed_by = datetime.datetime.fromtimestamp(entry_time_msc // 1000)
                 if final_signal not in ("buy", "sell"):
                     continue
+                if rsi_fade_mode and not allow_overlap:
+                    _entry_ms = entry_time_msc if entry_time_msc is not None else int(closed_by.timestamp() * 1000)
+                    if _entry_ms < busy_until_msc:
+                        skipped_position_open += 1
+                        continue
                 if invert_signal:
                     final_signal = "sell" if final_signal == "buy" else "buy"
 
@@ -2803,6 +2836,8 @@ def run(
                     )
                     if spread_wait_seconds is not None:
                         sim["spread_wait_seconds"] = spread_wait_seconds
+                    if rsi_fade_mode and sim.get("exit_time_msc"):
+                        busy_until_msc = int(sim["exit_time_msc"])
                 elif do_measure_entry_excursion:
                     sim = measure_entry_excursion(
                         symbol=symbol,
@@ -2865,6 +2900,8 @@ def run(
     finally:
         logging.disable(logging.NOTSET)
 
+    if rsi_fade_mode:
+        print(f"[{symbol}] one position at a time: {skipped_position_open} signals skipped while a trade was open")
     if spread_wait_active:
         _entered = sum(1 for r in results if r.get("spread_wait_seconds") is not None)
         print(f"[{symbol}] spread wait: {_entered} signals confirmed and entered, "
@@ -3080,7 +3117,7 @@ def write_full_lifecycle_csv(results: list[dict], symbol: str) -> None:
     fieldnames = [
         "time", "direction", "confidence", "adx", "m15_bias", "m5_confirm", "m1_entry", "pullback_completed",
         "num_indicators_agree", "indicator_votes", "rsi_value", "macd_hist_value", "atr_value", "atr_scale",
-        "outcome", "profit", "ticks_used", "entry_price", "entry_spread_pips", "spread_wait_seconds", "post_be_peak_profit", "be_arm_ticks",
+        "outcome", "profit", "ticks_used", "entry_price", "entry_spread_pips", "spread_wait_seconds", "exit_time_msc", "post_be_peak_profit", "be_arm_ticks",
         "cf_recovered_to_be", "cf_ticks_to_recover", "cf_min_profit_after_exit",
         "cf_recovered_to_neg1", "cf_ticks_to_recover_neg1",
         "cf_post_recovery_peak", "cf_reversed_after_recovery", "cf_ticks_to_reversal_after_recovery",
@@ -3539,6 +3576,14 @@ def main() -> None:
         print("--indicators is a single-timeframe ablation flag -- requires --single-timeframe. Aborting.")
         sys.exit(1)
     config = Config
+    if args.rsi_fade_mode:
+        if not (args.full_lifecycle and args.single_timeframe):
+            print("--rsi-fade-mode requires --full-lifecycle --single-timeframe. Aborting.")
+            sys.exit(1)
+        # TF_ENTRY is read from the module-level Config inside run(); the rest via `config`.
+        Config.TF_ENTRY = mt5.TIMEFRAME_M5
+        config = type("RsiFadeMode", (Config,), {"ENTRY_STRATEGY": "rsi_fade", "TF_ENTRY": mt5.TIMEFRAME_M5,
+                                                 "EXIT_FIXED_PIPS_ENABLED": True})
     if args.mtf_entry_indicator is not None:
         config = type("ConfigOverride", (Config,), {"MTF_ENTRY_INDICATOR": args.mtf_entry_indicator})
     run(
@@ -3594,6 +3639,8 @@ def main() -> None:
         spread_wait=args.spread_wait,
         spread_wait_max_points=args.spread_wait_max_points,
         spread_wait_seconds_override=args.spread_wait_seconds,
+        rsi_fade_mode=args.rsi_fade_mode,
+        allow_overlap=args.allow_overlap,
     )
 
 
