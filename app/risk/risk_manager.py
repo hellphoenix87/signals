@@ -36,12 +36,25 @@ class RiskManager:
 
         sl_distance = float(sl_pips) * float(pip)
 
-        lot = risk_amount / (sl_distance * contract_size) if sl_distance > 0 else 0.0
-
         info = mt5.symbol_info(symbol)
         if info is None:
             print(f"Failed to get symbol info for {symbol}")
             return 0.0
+
+        # A full stop's loss per lot, in the quote (profit) currency. For a pair
+        # quoted in another currency than the account's (USDJPY: yen) convert it,
+        # or the lot comes out ~price times too small. USD-quoted pairs (EURUSD)
+        # are unchanged.
+        loss_per_lot = sl_distance * contract_size
+        account = mt5.account_info()
+        account_currency = getattr(account, "currency", None)
+        if account_currency and getattr(info, "currency_profit", account_currency) != account_currency:
+            if getattr(info, "currency_base", None) == account_currency and symbol_price:
+                loss_per_lot /= float(symbol_price)
+            else:
+                print(f"Lot sizing for {symbol}: no conversion from {info.currency_profit} to {account_currency}.")
+
+        lot = risk_amount / loss_per_lot if loss_per_lot > 0 else 0.0
 
         lot = max(min(lot, info.volume_max), info.volume_min)
         lot = round(lot / info.volume_step) * info.volume_step

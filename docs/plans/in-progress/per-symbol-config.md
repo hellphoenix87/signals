@@ -30,11 +30,15 @@ pairs start as a copy of EURUSD (the template) and change only what they need. F
   (docs/test-results/session-filter-per-pair-analysis.md) found USDJPY's 08-18 block reproducibly *better*
   (both windows) -- the opposite of EURUSD -- and said that reusing EURUSD's block on USDJPY would be
   harmful.
-- **Money exits scaled to the same pip distances as EURUSD.** The exits are set in dollars. At 0.2 lot a
-  EURUSD pip is $2, but a USDJPY pip is about $1.36 (at ~147 yen). Scale factor 100/147 = 0.68:
-  post-BE cap $1.00 -> $0.68, staircase tier $2.00 -> $1.36, trail floor $2.00 -> $1.36, pre-BE soft SL
-  $5.00 -> $3.40. The factor drifts with the price (0.91 at 110 yen in 2021, 0.63 at 160 in 2024); pip-based
-  exits would remove that drift, but that is a change to the exit managers and is not part of this plan.
+- **Money exits unchanged ($1 cap, $2 staircase, $5 soft SL).** Live lot sizing (1% of the $1,000 sizing
+  basis over a 5-pip stop) gives USDJPY ~0.3 lot at ~150 yen, where a pip is worth ~$2 -- the same as
+  EURUSD at 0.2 lot. So the same dollars already mean the same pip distances. (An earlier draft scaled the
+  money exits by 0.68; that was wrong -- it only compensated for the backtest's fixed 0.2 lot.)
+- **Lot sizing fix (live code):** `RiskManager.calculate_lot_size` computed a stop's cost in the quote
+  currency, so a yen-quoted pair got a lot ~150x too small (clamped to the 0.01 minimum). It now converts
+  to the account currency when the base currency is the account's (USDJPY). EURUSD is unchanged.
+- **Backtest `--lot risk`:** sizes each window like the live code (real RiskManager at the window's first
+  close) instead of a fixed 0.2 lot. USDJPY runs use it.
 - **Unchanged from the template:** the entry signal and all its parameters, the spread-wait entry (zero
   spread within 15 s), the spread gate in points (a JPY point is 0.1 pip, the same as a EURUSD point), all
   pip-denominated settings.
@@ -54,7 +58,7 @@ pairs start as a copy of EURUSD (the template) and change only what they need. F
 ### Phase 3: USDJPY development run (live code)
 - Development windows: 28-day windows from 2021-2023 that do not overlap the usdjpy-test windows
   (2021-01-12, 2021-07-06, 2022-01-11, 2022-07-05, 2023-01-10, 2023-07-04).
-- `backtest_exit_strategy.py --full-lifecycle --single-timeframe --symbol USDJPY --start-date <w> --weeks 4`.
+- `backtest_exit_strategy.py --full-lifecycle --single-timeframe --symbol USDJPY --lot risk --start-date <w> --weeks 4`.
 - Report per window: trades, the outcome buckets (never reached BE / BE not staircase / staircase),
   $/trade, total. Changes to the USDJPY config are allowed here, one at a time, each recorded with its
   result.

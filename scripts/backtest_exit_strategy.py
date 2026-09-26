@@ -429,7 +429,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-pos", type=int, default=1, help="MT5 bars back from now to start the M1 window. DRIFTS: it counts back from the moment the run starts, so the same value covers a different window every run (~1.5%% of trades over a few hours) and two runs made at different times are NOT comparable. Prefer --start-date for anything you intend to compare.")
     parser.add_argument("--start-date", type=str, default=None, help="Pin the window to a wall-clock date (YYYY-MM-DD, or YYYY-MM-DD HH:MM) instead of bars-back-from-now. Makes a run reproducible and two variants exactly comparable. Ends at --end-date, or --weeks later.")
     parser.add_argument("--end-date", type=str, default=None, help="End of the pinned window (YYYY-MM-DD[ HH:MM]); defaults to --start-date plus --weeks.")
-    parser.add_argument("--lot", type=float, default=0.2, help="Fixed simulated lot size (default: 0.2, matching the current $1000 sizing basis)")
+    parser.add_argument("--lot", type=str, default="0.2", help="Fixed simulated lot size (default: 0.2, matching the current $1000 sizing basis), or 'risk': size the window like the live code -- the real RiskManager at the symbol's LOT_RISK_PERCENT / DEFAULT_SL_PIPS / RISK_SIZING_BALANCE_OVERRIDE, at the window's first close. Use 'risk' for non-USD-quoted pairs (USDJPY), where a fixed 0.2 lot is worth less per pip than live trades.")
     parser.add_argument("--max-ticks-per-trade", type=int, default=500, help="Max real ticks fetched per simulated trade (be_arming_ticks=90 by default, so this is a generous ceiling)")
     parser.add_argument("--counterfactual", action="store_true", help="For every soft_sl/timed_out trade, continue the same real tick stream as if only the broker-side wide SL existed, to see whether the early cut was actually a good call")
     parser.add_argument("--counterfactual-max-ticks", type=int, default=3000, help="Extended tick budget for the counterfactual continuation")
@@ -2394,7 +2394,7 @@ def run(
     symbol: str,
     weeks: float,
     start_pos: int,
-    lot: float,
+    lot: Optional[float],
     max_ticks: int,
     run_counterfactual: bool,
     counterfactual_max_ticks: int,
@@ -2517,6 +2517,17 @@ def run(
                else f", via --start-pos {start_pos} -- DRIFTS between runs")
             + ")"
         )
+
+    if lot is None:
+        # --lot risk: the lot the live TradeExecutor would size at this window's start.
+        lot = float(risk_manager.calculate_lot_size(
+            float(getattr(config, "RISK_SIZING_BALANCE_OVERRIDE", None) or 1000.0),
+            sl_pips,
+            symbol_price=float(_signal_candles[0]["close"]),
+            symbol=symbol,
+            risk_percent=float(getattr(config, "LOT_RISK_PERCENT", 1.0)),
+        ))
+        print(f"[{symbol}] --lot risk: {lot} lot at {_signal_candles[0]['close']}")
 
     m5_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_confirm]) for c in m5_candles]
     m15_close_times = [c["time"] + datetime.timedelta(seconds=TF_SECONDS[tf_bias]) for c in m15_candles]
@@ -3548,7 +3559,7 @@ def main() -> None:
         symbol,
         args.weeks,
         args.start_pos,
-        args.lot,
+        None if args.lot == "risk" else float(args.lot),
         args.max_ticks_per_trade,
         args.counterfactual,
         args.counterfactual_max_ticks,

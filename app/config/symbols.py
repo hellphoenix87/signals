@@ -10,7 +10,18 @@ from app.config.settings import Config
 
 
 class USDJPYConfig(Config):
-    """USDJPY: a copy of the EURUSD template."""
+    """USDJPY: the EURUSD template with these changes."""
+
+    # The per-pair session study (docs/test-results/session-filter-per-pair-analysis.md) found USDJPY's
+    # 08-18 UTC block reproducibly BETTER -- the opposite of EURUSD. So trade 08-18 and block 19-07.
+    SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL = {
+        **Config.SESSION_FILTER_BLOCKED_HOURS_UTC_BY_SYMBOL,
+        "USDJPY": list(range(19, 24)) + list(range(0, 8)),
+    }
+
+    # Money exits ($1 cap, $2 staircase, $5 soft SL) stay as in the template: live lot sizing
+    # (1% of the sizing balance over a 5-pip stop) gives USDJPY ~0.3 lot, where a pip is worth ~$2 --
+    # the same as EURUSD at 0.2 lot -- so the same dollars mean the same pip distances.
 
 
 SYMBOL_CONFIGS: dict[str, type[Config]] = {
