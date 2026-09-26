@@ -104,6 +104,9 @@ def _first_passage(px: np.ndarray, start: int, entry: float, side: int, up_pips:
     return np.nan
 
 
+_LAST_TICKS: list = []  # [bid, ask] of the most recent build_window call
+
+
 def build_window(md: MarketData, name: str, start_s: str, tf: int = mt5.TIMEFRAME_M1, geoms: list = None,
                  hours: str = "live") -> pd.DataFrame:
     """Per candle in the chosen hour set: OHLC history for rules + both-direction barrier outcomes."""
@@ -113,6 +116,7 @@ def build_window(md: MarketData, name: str, start_s: str, tf: int = mt5.TIMEFRAM
     candles = candles.set_index("time").sort_index()
     k = _ticks(start, end + dt.timedelta(days=1))
     tm, bid, ask = k.time_msc.to_numpy(), k.bid.to_numpy(), k.ask.to_numpy()
+    _LAST_TICKS[:] = [bid, ask]
     spread_pts = (ask - bid) / POINT
 
     c = candles.copy()
@@ -502,6 +506,149 @@ def _summarise_random(frames: list) -> dict:
             "rand%": round(100 * xs.rand.mean(), 2), "edge pp": 0.0, "windows +": "-"}
 
 
+# ---- exit grid (momentum-exit-grid plan): wider fixed exits and trailing exits, in pips ----
+EXIT_FIXED = [(t, s) for t in (1.0, 2.0, 3.0, 5.0) for s in (0.5, 1.0, 2.0, 3.0)]
+EXIT_TRAILS = [(1, 1, 1), (2, 2, 2), (3, 3, 3), (2, 1, 1), (3, 2, 2), (2, 2, 1), (5, 3, 3)]  # (stop, arm, dist)
+EXIT_KEYS = [f"fx+{t:g}/-{s:g}" for t, s in EXIT_FIXED] + [f"tr S{s}/A{a}/D{d}" for s, a, d in EXIT_TRAILS]
+TUNE_WINDOWS = ("W1", "W2", "W31", "W32", "W33", "W34", "W35")
+EXIT_GRID_MODE = "--exit-grid" in sys.argv
+
+
+def _exit_values(px: np.ndarray, start: int, entry: float, side: int) -> np.ndarray:
+    """Net pips for every exit in EXIT_KEYS from one entry (NaN = unresolved within CHUNKS).
+    Fixed: +target (less target slippage) or -stop (plus stop slippage), whichever comes first.
+    Trail: stop at -S until the peak reaches +A, then at max(-S, peak - D); exits fill at the
+    stop level less stop slippage."""
+    nf = len(EXIT_FIXED)
+    out = np.full(len(EXIT_KEYS), np.nan)
+    todo = list(range(len(EXIT_KEYS)))
+    for n in CHUNKS:
+        seg = (px[start:start + n] - entry) * side / PIP
+        peak = None
+        rest = []
+        for j in todo:
+            if j < nf:
+                tp, sl = EXIT_FIXED[j]
+                up = np.flatnonzero(seg >= tp - 1e-6)
+                dn = np.flatnonzero(seg <= -sl + 1e-6)
+                if len(up) or len(dn):
+                    win = len(up) > 0 and (len(dn) == 0 or up[0] < dn[0])
+                    out[j] = (tp - SLIP_TARGET) if win else -(sl + SLIP_STOP)
+                    continue
+            else:
+                if peak is None:
+                    peak = np.maximum.accumulate(seg)
+                st, arm, dist = EXIT_TRAILS[j - nf]
+                lvl = np.where(peak >= arm - 1e-6, np.maximum(-st, peak - dist), -st)
+                hit = np.flatnonzero(seg <= lvl + 1e-6)
+                if len(hit):
+                    out[j] = lvl[hit[0]] - SLIP_STOP
+                    continue
+            rest.append(j)
+        todo = rest
+        if not todo or start + n >= len(px):
+            break
+    return out
+
+
+def _window_exits(bid: np.ndarray, ask: np.ndarray, entry_idx: np.ndarray, index: pd.Index) -> pd.DataFrame:
+    """Both-direction exit values per candle (buy at ask judged on bid, sell at bid judged on ask)."""
+    b = np.full((len(entry_idx), len(EXIT_KEYS)), np.nan)
+    s_ = np.full((len(entry_idx), len(EXIT_KEYS)), np.nan)
+    for n in np.flatnonzero(entry_idx >= 0):
+        i = entry_idx[n]
+        b[n] = _exit_values(bid, i, ask[i], +1)
+        s_[n] = _exit_values(ask, i, bid[i], -1)
+    cols = {}
+    for j, k in enumerate(EXIT_KEYS):
+        cols[f"xb {k}"], cols[f"xs {k}"] = b[:, j], s_[:, j]
+    return pd.DataFrame(cols, index=index)
+
+
+def _exit_stats(frames: list, parts: list, key: str, windows: tuple, rnd: bool) -> dict:
+    xs = []
+    for f, d in zip(frames, parts):
+        if f.w.iloc[0] not in windows:
+            continue
+        q = f.assign(d=d.reindex(f.index).fillna(0).astype(int))
+        q = q[(q.d != 0) & q[f"xb {key}"].notna() & q[f"xs {key}"].notna()]
+        r = (q[f"xb {key}"] + q[f"xs {key}"]) / 2
+        v = r if rnd else pd.Series(np.where(q.d > 0, q[f"xb {key}"], q[f"xs {key}"]), index=q.index)
+        xs.append(pd.DataFrame({"w": q.w, "v": v, "r": r}))
+    xs = pd.concat(xs) if xs else pd.DataFrame({"w": [], "v": [], "r": []})
+    per = xs.groupby("w").agg(n=("v", "size"), v=("v", "mean"))
+    big = per[per.n >= BAR_MIN_TRADES]
+    return {"n": len(xs), "net": xs.v.mean() if len(xs) else np.nan,
+            "edge": (xs.v.mean() - xs.r.mean()) if len(xs) else np.nan,
+            "pos": int((big.v > 0).sum()), "cnt": len(big)}
+
+
+def exit_grid(md: MarketData) -> None:
+    """Momentum candidates x fixed/trailing exits; exits tuned on TUNE_WINDOWS, reported on the rest."""
+    path = Path(__file__).resolve().parent.parent / "backtest_results" / f"signal_lab_exitgrid_{HOURS}.pkl"
+    if CACHE_MODE and path.exists():
+        allc = pd.read_pickle(path)
+        frames = [allc[allc.w == name] for name in WINDOWS if (allc.w == name).any()]
+    else:
+        frames = []
+        for name, st in WINDOWS.items():
+            t0 = time.time()
+            f = build_window(md, name, st, geoms=[(1.0, 0.5)], hours=HOURS)
+            bid, ask = _LAST_TICKS
+            frames.append(pd.concat([f, _window_exits(bid, ask, f.entry_idx.to_numpy(), f.index)], axis=1))
+            print(f"{name}: {int((f.entry_idx >= 0).sum())} entries ({time.time() - t0:.0f}s)", flush=True)
+        pd.concat(frames).to_pickle(path)
+    mt5.shutdown()
+
+    x = pd.concat(frames)
+    ok = x["win_buy"].notna() & x["xb fx+1/-0.5"].notna()
+    agree = ((x.loc[ok, "xb fx+1/-0.5"] > 0) == (x.loc[ok, "win_buy"] > 0.5)).mean()
+    print(f"fixed +1/-0.5 agreement with the barrier outcome: {100 * agree:.2f}% of {int(ok.sum())} buys")
+    for key in EXIT_KEYS:
+        un = int((x.entry_idx >= 0).sum() - x[f"xb {key}"].notna().sum())
+        if un:
+            print(f"  unresolved buys for {key}: {un}")
+
+    cands = {}
+    for f in frames:
+        t, fl = momentum_triggers(f), strength_filters(f)
+        vx = fl["volexp1.3"]
+        for k in ("kama_slope", "keltner_break", "roc_break", "hull_slope"):
+            cands.setdefault(f"{k} + volexp", []).append(t[k].where(vx, 0))
+        cands.setdefault("kama_slope", []).append(t["kama_slope"])
+        cands.setdefault("keltner_break", []).append(t["keltner_break"])
+        cands.setdefault("RANDOM", []).append(pd.Series(1, index=f.index))
+        if MACD_MODE:
+            cands.setdefault("MACD_prod", []).append(production_macd_directions(f))
+
+    hold = tuple(w for w in WINDOWS if w not in TUNE_WINDOWS)
+    pd.set_option("display.width", 250)
+    summary = []
+    for name, parts in cands.items():
+        rows = []
+        for key in EXIT_KEYS:
+            tu = _exit_stats(frames, parts, key, TUNE_WINDOWS, name == "RANDOM")
+            ho = _exit_stats(frames, parts, key, hold, name == "RANDOM")
+            rows.append({"exit": key, "tune n": tu["n"], "tune net": round(tu["net"], 4),
+                         "tune edge": round(tu["edge"], 4), "tune w+": f"{tu['pos']}/{tu['cnt']}",
+                         "hold n": ho["n"], "hold net": round(ho["net"], 4), "hold edge": round(ho["edge"], 4),
+                         "hold w+": f"{ho['pos']}/{ho['cnt']}", "_tn": tu["net"], "_ho": ho})
+        t = pd.DataFrame(rows)
+        print(f"\n== {name} (hours={HOURS}; net pips/trade after slippage; edge = vs same-tick random) ==")
+        print(t.drop(columns=["_tn", "_ho"]).set_index("exit").to_string())
+        best = t.loc[t._tn.idxmax()]
+        ho = best._ho
+        rnd_ho = _exit_stats(frames, cands["RANDOM"], best.exit, hold, True)["net"]
+        passed = (name != "RANDOM" and ho["net"] > 0 and ho["cnt"] > 0 and ho["pos"] >= 5 / 7 * ho["cnt"]
+                  and ho["net"] > rnd_ho)
+        summary.append({"candidate": name, "tuned exit": best.exit, "tune net": round(best._tn, 4),
+                        "hold net": round(ho["net"], 4), "hold $/tr": round(2 * ho["net"], 3),
+                        "hold edge": round(ho["edge"], 4), "hold w+": f"{ho['pos']}/{ho['cnt']}",
+                        "hold RANDOM net": round(rnd_ho, 4), "SMOKE": "pass" if passed else ""})
+    print(f"\n== SUMMARY hours={HOURS}: exit tuned on {', '.join(TUNE_WINDOWS)}; reported on {', '.join(hold)} ==")
+    print(pd.DataFrame(summary).set_index("candidate").to_string())
+
+
 def main() -> None:
     for _ in range(10):
         if mt5.initialize():
@@ -513,6 +660,9 @@ def main() -> None:
     if P1_MODE or P1B_MODE:
         p1_screen(md, P1B_WINDOWS if P1B_MODE else P1_WINDOWS)
         mt5.shutdown()
+        return
+    if EXIT_GRID_MODE:
+        exit_grid(md)
         return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if SCALE_MODE:
