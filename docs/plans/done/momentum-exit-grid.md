@@ -1,6 +1,6 @@
 # Momentum exit grid: can momentum entries be ridden with wider exits?
 
-Status: in progress (branch `momentum-exit-grid`, stacked on `m1-momentum-entry` / PR #81; written 2026-09-26)
+Status: done 2026-09-26 -- no smoke pass (branch `momentum-exit-grid`, stacked on `m1-momentum-entry` / PR #81; written 2026-09-26)
 
 ## Goal
 
@@ -46,3 +46,12 @@ survives must be built as a production strategy and run through `--full-lifecycl
   production strategy + `--full-lifecycle` A/B (a separate plan, user decision).
 
 ## QA
+
+- Phase 1: the fixed +1/-0.5 column agrees 100% with the barrier outcome (196,866 entries).
+- Phase 2: no candidate passes the smoke bar in either hour set. The momentum edge does not grow with
+  exit width. The production MACD in ldn_ny does (+0.09..+0.14 pip edge at +/-3 pip exits, in both
+  halves), but only to about break-even. Added on request: an M5 extrapolation from candles
+  (`scripts/m5_candle_extrapolation.py`): momentum at M5 is negative in the live hours and below cost
+  in ldn_ny; fades are positive in the live hours. Report:
+  docs/test-results/momentum-exit-grid-and-m5.md.
+
