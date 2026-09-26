@@ -187,12 +187,11 @@ time: 45 trades (7 skipped), 62.2%, +$107.80. Exits `fixed_target` avg +$10.19, 
 -$10.40 (slippage in line with the lab model). RSI history: live keeps 203 candles; Wilder RSI on
 >= 200 matches long history exactly (strategy holds below 100).
 
-### Phase 3: Pre-registered staged test (Test P)
+### Phase 3: Test P2 -- production system, pooled over all 24 unseen windows
 
-- Unseen tight-spread windows: W49-W60 (2022; W25-W30 and W43-W48 were used by the P1/P1b screens).
-  Stages 4 -> 2 -> 4 -> 2 with order fixed at pre-registration, cumulative
-  bars >= 3/4, >= 5/6, >= 8/10, >= 9/12, each also requiring pooled $/trade better and total no
-  worse than the live config. Fail at any stage -> stop.
+- User decision 2026-09-26: pooled grading over all unseen data (W49-W72, Mar 2021 - Jan 2023),
+  stages 8 -> 4 -> 8 -> 4 with early stop on negative pooled $/trade; PASS = pooled $/trade > 0,
+  t >= 2, and total better than the live config. Pre-registered as Test P2.
 
 ### Phase 4: Write-up and PR (not merged until the user decides)
 

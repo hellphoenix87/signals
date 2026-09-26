@@ -265,6 +265,38 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   Shrank from the spent-window +7.9 pp / +0.51 pip; ~1.5 standard errors from zero. A screen pass
   licenses the production build, not a claim of edge.
 
+## Test P2 (2026-09-26, before running) -- production M5 RSI-fade system, pooled over all unseen data
+
+- **Hypothesis source**: Test P1b (lab screen, unseen 2023 H1): RSI(14) fade on M5, first entry per
+  episode, fixed +/-5 pips -- weak pass, +0.275 pip/trade net. Phase 2 built it in production (all
+  flags off by default); on spent W42 the production backtest matches the lab (52 / 61.5% / +1.14 pip
+  vs 50 / 62.0% / +1.14).
+- **Arms** (production code, live session filter, 15 s zero-spread wait, 0.15-pip gate):
+  - RSI: `--full-lifecycle --single-timeframe --rsi-fade-mode --max-entry-spread-pips 0.15
+    --full-lifecycle-max-ticks 200000` (TF_ENTRY=M5, RsiFadeSignalStrategy, FixedPipExitManager
+    +/-5 pips, one position at a time).
+  - LIVE: `--full-lifecycle --single-timeframe --max-entry-spread-pips 0.15
+    --full-lifecycle-max-ticks 10000` (the live config as merged).
+- **Why pooled, not window counts**: ~45 trades per window at +/-$10 each vs an expected edge of
+  ~+$0.55/trade -> a single window is positive only ~64% of the time even if the edge is real, and 12
+  windows give ~1.3 standard errors. Grading therefore uses pooled trade-level results over all unseen
+  data.
+- **Windows** (all 24 unseen four-week windows with tick data, none excluded by spread regime; wide
+  months simply trade little). Stage order fixed now, spread across time:
+  - Stage 1: W49 2022-12-20, W52 2022-09-27, W55 2022-07-05, W58 2022-04-12, W61 2022-01-18, W64 2021-10-26, W67 2021-08-03, W70 2021-05-11
+  - Stage 2: W50 2022-11-22, W56 2022-06-07, W62 2021-12-21, W68 2021-07-06
+  - Stage 3: W51 2022-10-25, W53 2022-08-30, W57 2022-05-10, W59 2022-03-15, W63 2021-11-23, W65 2021-09-28, W69 2021-06-08, W71 2021-04-13
+  - Stage 4: W54 2022-08-02, W60 2022-02-15, W66 2021-08-31, W72 2021-03-16
+- **Early stop**: after each stage, if the RSI arm's pooled $/trade (all windows so far) < 0 -> STOP,
+  FAIL.
+- **Final PASS requires all of** (all 24 windows): RSI pooled $/trade > 0; t = mean / (sd / sqrt(n))
+  >= 2.0 over RSI trades; RSI pooled total > LIVE pooled total over the same windows.
+- **Report**: per window and pooled -- trades, win %, $/trade, total for both arms; RSI trades
+  skipped for an open position.
+- **On PASS**: candidate to ship (flags: ENTRY_STRATEGY="rsi_fade", TF_ENTRY=M5,
+  EXIT_FIXED_PIPS_ENABLED=True, MAX_OPEN_POSITIONS_PER_SYMBOL=1) -- user decision, with a demo check.
+  **On FAIL**: document; M5 RSI fade does not clear costs.
+
 ## Testing protocol from 2026-09-24: staged escalation
 
 Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only
