@@ -86,6 +86,20 @@ direction ~ -$0.09/trade) only to about random-walk level, not past the 34.8% br
 
 #### Subphase 1.3: Pick the hypothesis
 
+User choice (2026-09-26): **signal lab** -- screen directional entry rules with a fast barrier-game
+screener (`scripts/signal_lab.py`) before any full backtest. Pass bar fixed before running: edge >=
++3 pp over the same-tick random direction pooled, positive in >= 10/12 windows with >= 100 trades,
+and better than the live MACD.
+
+Result (14 spent windows, live session hours, zero-spread entry, +1 / -0.5 pip barrier): **no rule
+passes.** Best: Bollinger fade +1.80 pp (7/10), live MACD against the 4h trend +1.69 (8/11), RSI fade
++1.60 (8/10), breakout-60 fade +1.37 (7/10); live MACD +1.32 (9/12, the most consistent). Every
+mean-reversion rule is positive and every momentum/trend rule negative (trend-following -0.4 to
+-0.7, breakout/RSI/Bollinger follow -1.1 to -1.8). Best absolute win rate 34.1% vs break-even ~34.8%.
+Reading: simple directional rules top out around +2 pp; the edge that exists is REVERSION, while the
++1 / -0.5 pip exit geometry asks for continuation. Next question (user decides): exit geometry for a
+reversion signal.
+
 - Change: write down the one or two candidate rules with the strongest, most consistent effect on
   reach %, and their expected trade-count cost. Recorded here; user picks before Phase 2.
 
