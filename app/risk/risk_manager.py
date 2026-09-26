@@ -1,6 +1,6 @@
 import MetaTrader5 as mt5
 
-from app.config.settings import Config
+from app.config.symbols import config_for
 
 
 def create_risk_manager(broker):
@@ -20,10 +20,10 @@ class RiskManager:
         """Return a lot size sized so a full stop-loss hit risks `risk_percent`
         of `account_balance`, clamped to the symbol's volume min/max/step.
 
-        `sl_pips` is floored to `Config.MIN_SL_PIPS` so an unrealistically
+        `sl_pips` is floored to the symbol's `MIN_SL_PIPS` so an unrealistically
         tight stop can't inflate the computed lot size.
         """
-        min_sl_pips = float(getattr(Config, "MIN_SL_PIPS", 5.0) or 5.0)
+        min_sl_pips = float(getattr(config_for(symbol), "MIN_SL_PIPS", 5.0) or 5.0)
         if sl_pips < min_sl_pips:
             print(
                 f"SL pips too small for {symbol}, adjusting to minimum {min_sl_pips}."

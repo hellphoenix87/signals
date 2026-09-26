@@ -131,6 +131,7 @@ from typing import Any, Optional
 import MetaTrader5 as mt5
 
 from app.config.settings import Config
+from app.config.symbols import config_for
 from app.data.market_data import MarketData
 from app.signals.signal_generation import strategy_factory, build_indicator
 from app.signals.indicators.rsi import _compute_latest_rsi
@@ -2460,7 +2461,8 @@ def run(
     broker = Broker(TradingMode.LIVE)
     risk_manager = create_risk_manager(broker)
     contract_size = broker.get_lot_value(symbol)
-    sl_pips = float(getattr(Config, "DEFAULT_SL_PIPS", 5.0) or 5.0)
+    symbol_cfg = config  # the per-symbol config, before any run-only overrides below
+    sl_pips = float(getattr(config, "DEFAULT_SL_PIPS", 5.0) or 5.0)
     pip_size = broker.get_pip_size(symbol)
     sl_price_distance = pip_size * sl_pips
     fetch_ticks = max_ticks
@@ -2475,9 +2477,9 @@ def run(
     if needs_conversion:
         print(f"[{symbol}] profit currency differs from account currency ({account_currency}) -- converting via live tick price each tick.")
 
-    tf_entry = getattr(Config, "TF_ENTRY", mt5.TIMEFRAME_M1)
-    tf_confirm = getattr(Config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
-    tf_bias = getattr(Config, "TF_BIAS", mt5.TIMEFRAME_M15)
+    tf_entry = getattr(config, "TF_ENTRY", mt5.TIMEFRAME_M1)
+    tf_confirm = getattr(config, "TF_CONFIRM", mt5.TIMEFRAME_M5)
+    tf_bias = getattr(config, "TF_BIAS", mt5.TIMEFRAME_M15)
     entry_seconds = TF_SECONDS[tf_entry]
 
     m1_count = int(weeks * M1_BARS_PER_TRADING_WEEK)
@@ -2566,21 +2568,21 @@ def run(
         # A/B run production code. Prefer this over --staircase-trail.
         exit_overrides["staircase_trail_enabled"] = exit_staircase == "on"
     _scaled_exit_trade_cache: dict[float, Any] = {}
-    exit_config = ExitTradeConfig(**exit_overrides) if exit_overrides else None
+    exit_config = ExitTradeConfig.for_config(symbol_cfg, **exit_overrides)
     resolved_trail_gap_pct = (
         trail_gap_pct if trail_gap_pct is not None
-        else float(getattr(Config, "EXIT_TRAIL_GAP_PCT", 0.6) or 0.6)
+        else float(exit_config.trail_gap_pct)
     )
     resolved_trail_gap_floor_money = (
         trail_gap_floor_money if trail_gap_floor_money is not None
-        else float(getattr(Config, "EXIT_TRAIL_GAP_FLOOR_MONEY", 2.0) or 2.0)
+        else float(exit_config.trail_gap_floor_money)
     )
     exit_trade = create_exit_trade(broker=broker, risk_manager=risk_manager, config=exit_config)
 
     # Print the EFFECTIVE exit settings, not just the CLI overrides: these
     # default from Config, so merging a Config change silently redefines what
     # an un-flagged "baseline" run means. A result should say what produced it.
-    _eff = exit_config or ExitTradeConfig()
+    _eff = exit_config
     print(
         f"[{symbol}] exit config: be_arming_ticks={_eff.be_arming_ticks} "
         f"max_loss_money=${_eff.max_loss_money} post_be_cap=${_eff.post_be_loss_cap_money} "
@@ -2598,7 +2600,7 @@ def run(
         chained_overrides = dict(exit_overrides)
         chained_overrides["post_be_loss_cap_money"] = chain_loss_cap
         chained_exit_trade = create_exit_trade(
-            broker=broker, risk_manager=risk_manager, config=ExitTradeConfig(**chained_overrides)
+            broker=broker, risk_manager=risk_manager, config=ExitTradeConfig.for_config(symbol_cfg, **chained_overrides)
         )
 
     original_exit_trade = None
@@ -2606,21 +2608,21 @@ def run(
         original_overrides = dict(exit_overrides)
         original_overrides["post_be_loss_cap_money"] = original_loss_cap
         original_exit_trade = create_exit_trade(
-            broker=broker, risk_manager=risk_manager, config=ExitTradeConfig(**original_overrides)
+            broker=broker, risk_manager=risk_manager, config=ExitTradeConfig.for_config(symbol_cfg, **original_overrides)
         )
 
     cap_sweep_trades: list[tuple[str, Any]] = []
     if full_lifecycle and (sweep_post_be_cap or sweep_staircase_cap):
         for c in FULL_LIFECYCLE_CAP_CANDIDATES:
             label = f"cap{str(c).replace('.', '_')}"
-            cfg = ExitTradeConfig(post_be_loss_cap_money=c)
+            cfg = ExitTradeConfig.for_config(symbol_cfg, post_be_loss_cap_money=c)
             cap_sweep_trades.append((label, create_exit_trade(broker=broker, risk_manager=risk_manager, config=cfg)))
 
     pre_be_sweep_trades: list[tuple[str, Any]] = []
     if sweep_pre_be_threshold:
         for c in PRE_BE_THRESHOLD_CANDIDATES:
             label = _pre_be_threshold_label(c)
-            cfg = ExitTradeConfig(max_loss_money=c)
+            cfg = ExitTradeConfig.for_config(symbol_cfg, max_loss_money=c)
             pre_be_sweep_trades.append((label, create_exit_trade(broker=broker, risk_manager=risk_manager, config=cfg)))
 
     results: list[dict] = []
@@ -3538,9 +3540,10 @@ def main() -> None:
     if args.indicators and not args.single_timeframe:
         print("--indicators is a single-timeframe ablation flag -- requires --single-timeframe. Aborting.")
         sys.exit(1)
-    config = Config
+    # The symbol's own config (app/config/symbols.py); EURUSD -> Config.
+    config = config_for(symbol)
     if args.mtf_entry_indicator is not None:
-        config = type("ConfigOverride", (Config,), {"MTF_ENTRY_INDICATOR": args.mtf_entry_indicator})
+        config = type("ConfigOverride", (config,), {"MTF_ENTRY_INDICATOR": args.mtf_entry_indicator})
     run(
         symbol,
         args.weeks,

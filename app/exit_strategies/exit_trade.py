@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -123,6 +124,26 @@ class ExitTradeConfig:
     profit_exits_on_candle_close: bool = bool(
         getattr(Config, "EXIT_PROFIT_EXITS_ON_CANDLE_CLOSE", False)
     )
+
+    @classmethod
+    def for_config(cls, cfg: Any, **overrides: Any) -> "ExitTradeConfig":
+        """The exit config for a per-symbol config class (`app.config.symbols`).
+
+        Every field whose setting `cfg` overrides relative to `Config` takes
+        `cfg`'s value; all others keep their defaults above. `overrides` (e.g.
+        backtest CLI flags) are applied last. For `cfg is Config` this is
+        exactly `ExitTradeConfig(**overrides)`.
+        """
+        changes: dict[str, Any] = {}
+        for f in dataclasses.fields(cls):
+            name = f.name.upper() if f.name.startswith("exit_") else f"EXIT_{f.name.upper()}"
+            missing = object()
+            value = getattr(cfg, name, missing)
+            if value is missing or value is None or value == getattr(Config, name, missing):
+                continue
+            changes[f.name] = type(f.default)(value)
+        changes.update(overrides)
+        return cls(**changes)
 
 
 class ExitTrade:

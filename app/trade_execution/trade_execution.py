@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.config.settings import Config
+from app.config.symbols import config_for
 from app.exit_strategies.exit_shared import pos_ticket, pos_profit
 
 
@@ -91,8 +92,9 @@ class TradeExecutor:
                 print(f"Skipping signal (no price available): {s!r}")
                 continue
 
-            sl_pips = float(s.get("sl_pips") or getattr(Config, "DEFAULT_SL_PIPS", 5.0))
-            tp_pips = float(s.get("tp_pips") or getattr(Config, "DEFAULT_TP_PIPS", 50.0))
+            cfg = config_for(str(symbol))
+            sl_pips = float(s.get("sl_pips") or getattr(cfg, "DEFAULT_SL_PIPS", 5.0))
+            tp_pips = float(s.get("tp_pips") or getattr(cfg, "DEFAULT_TP_PIPS", 50.0))
 
             lot = self._resolve_lot(
                 symbol=str(symbol), price=price, sl_pips=sl_pips, signal=s
@@ -146,14 +148,15 @@ class TradeExecutor:
 
     def _spread_ok(self, symbol: str) -> bool:
         """Return whether `symbol`'s current live spread is within
-        `Config.MAX_SPREAD_POINTS` (in MT5 points, via `broker.get_point_size`).
+        the symbol's `MAX_SPREAD_POINTS` (`config_for(symbol)`; MT5 points, via
+        `broker.get_point_size`).
 
         Fails open (returns `True`) if the gate is disabled (`<=0`, the
         default) or if a live tick/point size can't be resolved -- a
         transient data gap shouldn't block trading any more than it
         already does elsewhere in this class.
         """
-        max_spread_points = float(getattr(Config, "MAX_SPREAD_POINTS", 0) or 0)
+        max_spread_points = float(getattr(config_for(symbol), "MAX_SPREAD_POINTS", 0) or 0)
         if max_spread_points <= 0:
             return True
 
@@ -198,7 +201,7 @@ class TradeExecutor:
             sl_pips,
             symbol_price=price,
             symbol=symbol,
-            risk_percent=getattr(Config, "LOT_RISK_PERCENT", 1.0),
+            risk_percent=getattr(config_for(symbol), "LOT_RISK_PERCENT", 1.0),
         )
 
     def _resolve_sizing_balance(self) -> float:
