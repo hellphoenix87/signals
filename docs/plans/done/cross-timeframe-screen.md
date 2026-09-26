@@ -1,6 +1,6 @@
 # Cross-timeframe smoke screen: which timeframe (M5-H1) is eligible?
 
-Status: in progress (branch `cross-timeframe-screen`, off master; written 2026-09-26)
+Status: done 2026-09-26 -- 0/20 eligible (branch `cross-timeframe-screen`, off master; written 2026-09-26)
 
 ## Goal
 
@@ -46,3 +46,11 @@ profit pace ($/week) against drawdown (in weeks of profit), not win rate.
 ### Phase 2: Run and write up (docs/test-results/), PR (the user merges)
 
 ## QA
+
+- Phase 1: spot check -- an M15 RSI-fade buy (2015-01-02 09:30, 1.20377, 28.5-pip risk) touches its
+  target at 10:04 and never its stop in the raw M1 data, as simulated; a time exit lands exactly 24 bars
+  after entry. First 100 bars per series skipped (ATR warm-up).
+- Phase 2: 0/20 rule x timeframe combinations eligible. The reversion gross edge shrinks with the
+  timeframe (+0.07 R at M5 -> ~0 at H1) as fast as the cost does; momentum has no gross edge up to H1.
+  Report: docs/test-results/cross-timeframe-screen.md.
+
