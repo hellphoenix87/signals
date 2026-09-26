@@ -51,7 +51,10 @@ class RsiFadeSignalStrategy(BaseSignalStrategy):
         return "hold"
 
     def generate_signal(self, candles: List[dict], *args, **kwargs):
-        if not isinstance(candles, list) or len(candles) < self.period + 2:
+        # Wilder RSI needs ~100 candles of history to settle: at 60 it can be
+        # off by ~3 points (enough to move a 30/70 crossing), at 200 it matches
+        # a long history exactly. Live keeps MIN_CANDLES_FOR_INDICATORS + 1 = 203.
+        if not isinstance(candles, list) or len(candles) < max(100, self.period + 2):
             return {"final_signal": "hold", "raw_signal": "hold", "reason": "not_enough_candles"}
         closes = pd.Series([float(c["close"]) for c in candles])
         rsi = self._rsi(closes)

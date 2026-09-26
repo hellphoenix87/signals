@@ -16,6 +16,7 @@ from app.exit_strategies.exit_shared import (
 )
 from app.exit_strategies.managers.profit import ProfitExitManager
 from app.exit_strategies.managers.loss import LossExitManager
+from app.exit_strategies.managers.fixed import FixedPipExitManager
 
 
 def _config_or_default(name: str, default: Any) -> Any:
@@ -112,6 +113,12 @@ class ExitTradeConfig:
 
     be_arming_ticks: int = int(_config_or_default("EXIT_BE_ARMING_TICKS", 20))
 
+    # Fixed target/stop (M5 RSI-fade system) -- replaces BE arming, cap and
+    # staircase when enabled.
+    fixed_pips_enabled: bool = bool(getattr(Config, "EXIT_FIXED_PIPS_ENABLED", False))
+    fixed_target_pips: float = float(_config_or_default("EXIT_FIXED_TARGET_PIPS", 5.0))
+    fixed_stop_pips: float = float(_config_or_default("EXIT_FIXED_STOP_PIPS", 5.0))
+
     htf_filter_enabled: bool = bool(getattr(Config, "EXIT_HTF_FILTER_ENABLED", False))
     htf_stale_seconds: int = int(getattr(Config, "EXIT_HTF_STALE_SECONDS", 180) or 180)
     htf_use_m15: bool = bool(getattr(Config, "EXIT_HTF_USE_M15", True))
@@ -170,6 +177,16 @@ class ExitTrade:
             get_min_profit_pips=self._get_min_profit_pips,
             pips_to_price=self._pips_to_price,
             exit_action=self._exit_action,
+        )
+        self._fixed_manager = (
+            FixedPipExitManager(
+                config=self._config,
+                broker=self._broker,
+                pips_to_price=self._pips_to_price,
+                exit_action=self._exit_action,
+            )
+            if getattr(self._config, "fixed_pips_enabled", False)
+            else None
         )
 
     def update_bias(
@@ -242,6 +259,12 @@ class ExitTrade:
             state = self._state_by_ticket.setdefault(
                 ticket, PosState(anchor=0.0, prev_price=0.0)
             )
+            if self._fixed_manager is not None:
+                fixed_action = self._fixed_manager.check_exit_on_tick(pos, tick, state)
+                if fixed_action:
+                    self._log_exit_action(fixed_action, pos, tick)
+                    actions.append(fixed_action)
+                continue
             loss_action = self._loss_manager.check_exit_on_tick(pos, tick, state)
             if loss_action:
                 self._log_exit_action(loss_action, pos, tick)

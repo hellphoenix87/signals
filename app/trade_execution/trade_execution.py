@@ -86,6 +86,10 @@ class TradeExecutor:
                 print(f"Skipping signal (spread too wide): {s!r}")
                 continue
 
+            if not self._position_slot_free(str(symbol)):
+                print(f"Skipping signal (max open positions for {symbol} reached): {s!r}")
+                continue
+
             price = self._resolve_price(symbol=str(symbol), direction=direction, signal=s)
             if price is None:
                 print(f"Skipping signal (no price available): {s!r}")
@@ -93,6 +97,12 @@ class TradeExecutor:
 
             sl_pips = float(s.get("sl_pips") or getattr(Config, "DEFAULT_SL_PIPS", 5.0))
             tp_pips = float(s.get("tp_pips") or getattr(Config, "DEFAULT_TP_PIPS", 50.0))
+            if getattr(Config, "EXIT_FIXED_PIPS_ENABLED", False):
+                # Fixed-pip system: the tick-driven FixedPipExitManager exits at
+                # these levels; the broker-side SL/TP sit at the same levels as a
+                # backstop, and lot sizing follows the real stop distance.
+                sl_pips = float(getattr(Config, "EXIT_FIXED_STOP_PIPS", sl_pips))
+                tp_pips = float(getattr(Config, "EXIT_FIXED_TARGET_PIPS", tp_pips))
 
             lot = self._resolve_lot(
                 symbol=str(symbol), price=price, sl_pips=sl_pips, signal=s
@@ -143,6 +153,19 @@ class TradeExecutor:
 
         print(f"Skipping malformed signal (unknown direction/side={side!r}): {s!r}")
         return None
+
+    def _position_slot_free(self, symbol: str) -> bool:
+        """False when `Config.MAX_OPEN_POSITIONS_PER_SYMBOL` is set and `symbol`
+        already has that many open positions. None (the default) = unlimited.
+        Fails open if positions can't be read."""
+        limit = getattr(Config, "MAX_OPEN_POSITIONS_PER_SYMBOL", None)
+        if limit is None:
+            return True
+        try:
+            positions = self.broker.get_open_positions(symbol)
+        except Exception:
+            return True
+        return len(positions or []) < int(limit)
 
     def _spread_ok(self, symbol: str) -> bool:
         """Return whether `symbol`'s current live spread is within
