@@ -66,3 +66,17 @@ USDJPY outcome is looked at.
 ### Phase 3: Write-up, PR (the user merges)
 
 ## QA
+
+- Phase 1: lab adapted; the EURUSD `--cached` table is unchanged (boll_fade +1.80, breakout60_follow -1.37).
+- Phase 2, H1-H3 (lab, judged once as pre-registered; `backtest_results/signal_lab_hyp_USDJPY_g5_*`):
+
+  | hyp | trades | win % | net pip/tr | edge vs random | windows net + | verdict |
+  |---|---|---|---|---|---|---|
+  | H1 live STF vote ("MACD_prod") M1 +3/-3 | 32,025 | 47.18 | -0.236 | +0.082 | 1/11 | FAIL |
+  | H2 KAMA + vol exp M1 +3/-3 | 11,558 | 45.93 | -0.311 | +0.012 | 1/11 | FAIL |
+  | H3 KAMA + vol exp M5 +5/-5 | 4,588 | 46.64 | -0.402 | -0.089 | 2/11 | FAIL |
+  | random, M1 ticks, +3/-3 | 132,128 | 46.06 | -0.304 | 0 | 0/11 | -- |
+  | random, M5 ticks, +5/-5 | 26,458 | 47.23 | -0.343 | 0 | 0/11 | -- |
+
+  J9 (2025-04, 18-point spread) gave 7 / 0 / 2 trades, as expected. Label note: "MACD_prod" is the live
+  single-timeframe vote (MACD 1.0 + SMA 5/20 1.0 + RSI(7) 2.5), not MACD alone.
