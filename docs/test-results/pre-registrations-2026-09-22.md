@@ -244,6 +244,22 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
   trades, win 60.0%, net +0.94 pip/trade at +/-5 (+0.42 at +/-3). Pooled 51 trades, 1 counted window
   (bar needs >= 3). Not a pass; the windows cannot answer the question.
 
+## Test P1b (2026-09-26, before running) -- Test P1 re-run on tight-spread unseen windows
+
+- **Why**: Test P1 was INCONCLUSIVE -- its windows (W25-W30, Jul-Nov 2024) were a wide-spread period in
+  which the zero-spread entry never fires. Spread regime of older data was checked WITHOUT looking at
+  any outcome (zero-spread tick share on one mid-window day): W43-W48 (2023 H1) 80.7-84.9%; 2022
+  mostly 66-90%.
+- **Rule, exit, slippage, pass bar**: identical to Test P1 (RSI(14) fade on M5, first entry per
+  episode, live session hours, 15 s zero-spread entry, fixed +/-5 pip graded / +/-3 secondary; PASS =
+  pooled net > 0, pooled edge over same-tick random > 0, >= 2/3 of counted windows net-positive,
+  window counts at >= 20 trades, >= 3 counted windows, else INCONCLUSIVE).
+- **Windows** (unseen): W43 2023-06-06, W44 05-09, W45 04-11, W46 03-14, W47 02-14, W48 01-17.
+- **On PASS**: production build, then a pre-registered staged full-lifecycle test on W49-W60
+  (2022-01-18 .. 2022-12-20 window starts), which stay unseen until then; 2021 in reserve.
+  **On FAIL**: stop this line.
+- Command: `PYTHONPATH=. pipenv run python scripts/signal_lab.py --p1b-screen`
+
 ## Testing protocol from 2026-09-24: staged escalation
 
 Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only

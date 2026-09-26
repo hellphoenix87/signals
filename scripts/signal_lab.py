@@ -173,16 +173,20 @@ def score(frame: pd.DataFrame, direction: pd.Series) -> pd.DataFrame:
 
 GEOMETRY_MODE = "--geometry" in sys.argv
 P1_MODE = "--p1-screen" in sys.argv
+P1B_MODE = "--p1b-screen" in sys.argv
+# Test P1b (pre-registered 2026-09-26): UNSEEN tight-spread windows, used only by --p1b-screen.
+P1B_WINDOWS = {"W43": "2023-06-06", "W44": "2023-05-09", "W45": "2023-04-11",
+               "W46": "2023-03-14", "W47": "2023-02-14", "W48": "2023-01-17"}
 # Test P1 (pre-registered 2026-09-26): UNSEEN windows, used only by --p1-screen.
 P1_WINDOWS = {"W25": "2024-10-22", "W26": "2024-09-24", "W27": "2024-08-27",
               "W28": "2024-07-30", "W29": "2024-07-02", "W30": "2024-06-04"}
 
 
-def p1_screen(md: MarketData) -> None:
+def p1_screen(md: MarketData, windows: dict = None) -> None:
     """Test P1 exactly as pre-registered: RSI(14) fade on M5, first entry per episode, +/-5 pip."""
     geoms = [(5.0, 5.0), (3.0, 3.0)]
     rows, pooled = [], {g: [] for g in geoms}
-    for name, st in P1_WINDOWS.items():
+    for name, st in (windows or P1_WINDOWS).items():
         f = build_window(md, name, st, mt5.TIMEFRAME_M5, geoms)
         d = rules(f)["rsi_fade"]
         d = d.where(d != d.shift(1).fillna(0), 0)          # first candle of each same-direction run
@@ -314,8 +318,8 @@ def main() -> None:
     else:
         sys.exit("MT5 initialization failed")
     md = MarketData()
-    if P1_MODE:
-        p1_screen(md)
+    if P1_MODE or P1B_MODE:
+        p1_screen(md, P1B_WINDOWS if P1B_MODE else P1_WINDOWS)
         mt5.shutdown()
         return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
