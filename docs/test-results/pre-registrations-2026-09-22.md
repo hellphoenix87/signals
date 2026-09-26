@@ -212,6 +212,34 @@ Windows (never used for tuning): W4 full re-run (86401) + W5..W12 = start-pos 11
 - **Known risks**: in wide-spread regimes both TIGHT and WAIT mostly abstain (graded on total, near
   ties). Demo-account spreads -- on a real account zero-spread ticks may be rare.
 
+## Test P1 (2026-09-26, before running) -- lab screen: RSI fade on M5, +/-5 pip fixed exits
+
+- **Hypothesis source** (exploratory, 14 spent windows; docs/plans/in-progress/entry-timing.md):
+  at M1 scale every signal's edge (~+0.02-0.03 pip) is smaller than friction (~0.1 pip). Reversion
+  signals' edge grows with horizon faster than friction; RSI fade on M5 with +/-5 pip barriers, first
+  entry per episode: win 55.7%, edge +7.9 pp over same-tick random, net +0.51 pip/trade, positive in
+  8/12 windows (below the 75% bar set for that scan). Spent windows are NOT graded.
+- **Rule (exact)**: EURUSD M5 candles; RSI(14), Wilder smoothing on close (`signal_lab._rsi`). At a
+  candle close, RSI < 30 -> buy, RSI > 70 -> sell; keep only the first candle of each consecutive
+  same-direction run (one entry per episode). Entry only in live session hours (DST-correct filter,
+  08-18 UTC blocked) at the first tick within 15 s of the candle close whose spread <= 0.5 point;
+  otherwise no trade.
+- **Exit (screen model)**: fixed +5 / -5 pip barrier from the entry tick; buy entered at ask and
+  judged on bid, sell entered at bid and judged on ask. Net pips = win x (5 - 0.04) - loss x
+  (5 + 0.09) (measured fill slippage). Reported alongside: same-tick random direction; +/-3 pips
+  (secondary, not graded).
+- **Windows** (unseen for any test; ticks verified): W25 2024-10-22, W26 09-24, W27 08-27, W28 07-30,
+  W29 07-02, W30 06-04 (each start + 28 days). One stage.
+- **PASS requires all of**: pooled net > 0 pip/trade; pooled edge over same-tick random > 0; and at
+  least 2/3 of counted windows net-positive, where a window counts if it has >= 20 trades and at
+  least 3 windows count. Fewer than 3 counted windows -> INCONCLUSIVE (spread regime too wide).
+- **On PASS**: build it in production (M5 RSI-fade entry + fixed pip exits, which production lacks)
+  and run a pre-registered full-lifecycle test on unseen W43-W48 (2023-01-17 .. 2023-07-04) and older
+  2022 windows. **On FAIL**: stop this line; write up that M1-scale entry work is friction-bound.
+- **Known risks**: ~$10 risk per trade at 0.2 lots vs ~$1 today; hours-long trades; the screen ignores
+  overlapping positions (an episode can start while a previous trade is open).
+- Command: `PYTHONPATH=. pipenv run python scripts/signal_lab.py --p1-screen`
+
 ## Testing protocol from 2026-09-24: staged escalation
 
 Full 12-window runs cost hours. From here, hypotheses escalate through window sets, and only

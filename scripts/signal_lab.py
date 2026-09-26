@@ -172,6 +172,49 @@ def score(frame: pd.DataFrame, direction: pd.Series) -> pd.DataFrame:
 
 
 GEOMETRY_MODE = "--geometry" in sys.argv
+P1_MODE = "--p1-screen" in sys.argv
+# Test P1 (pre-registered 2026-09-26): UNSEEN windows, used only by --p1-screen.
+P1_WINDOWS = {"W25": "2024-10-22", "W26": "2024-09-24", "W27": "2024-08-27",
+              "W28": "2024-07-30", "W29": "2024-07-02", "W30": "2024-06-04"}
+
+
+def p1_screen(md: MarketData) -> None:
+    """Test P1 exactly as pre-registered: RSI(14) fade on M5, first entry per episode, +/-5 pip."""
+    geoms = [(5.0, 5.0), (3.0, 3.0)]
+    rows, pooled = [], {g: [] for g in geoms}
+    for name, st in P1_WINDOWS.items():
+        f = build_window(md, name, st, mt5.TIMEFRAME_M5, geoms)
+        d = rules(f)["rsi_fade"]
+        d = d.where(d != d.shift(1).fillna(0), 0)          # first candle of each same-direction run
+        for tp, sl in geoms:
+            b, s_ = f[f"win_buy_{tp}_{sl}"], f[f"win_sell_{tp}_{sl}"]
+            x = f.assign(dirn=d, wb=b, ws=s_)
+            valid = (x.dirn != 0) & (x.entry_idx >= 0)
+            unres = int((valid & (x.wb.isna() | x.ws.isna())).sum())
+            x = x[valid & x.wb.notna() & x.ws.notna()]
+            win = pd.Series(np.where(x.dirn > 0, x.wb, x.ws), index=x.index)
+            net = win * (tp - SLIP_TARGET) - (1 - win) * (sl + SLIP_STOP)
+            rnd = (x.wb + x.ws) / 2
+            pooled[(tp, sl)].append(pd.DataFrame({"w": name, "win": win, "rand": rnd, "net": net}))
+            rows.append({"window": name, "barrier": f"+/-{tp:g}", "trades": len(x), "unresolved": unres,
+                         "win%": round(100 * win.mean(), 1) if len(x) else None,
+                         "edge pp": round(100 * (win.mean() - rnd.mean()), 2) if len(x) else None,
+                         "net pips/tr": round(net.mean(), 3) if len(x) else None})
+        print(f"{name} done", flush=True)
+    pd.set_option("display.width", 200)
+    print(pd.DataFrame(rows).set_index(["barrier", "window"]).sort_index().to_string())
+    for g, parts in pooled.items():
+        x = pd.concat(parts)
+        per = x.groupby("w").agg(n=("net", "size"), net=("net", "mean"))
+        counted = per[per.n >= 20]
+        pos = int((counted.net > 0).sum())
+        p = x.win.mean()
+        verdict = ("INCONCLUSIVE" if len(counted) < 3 else
+                   "PASS" if (x.net.mean() > 0 and p - x.rand.mean() > 0 and pos >= 2 * len(counted) / 3) else "FAIL")
+        tag = "GRADED" if g == (5.0, 5.0) else "secondary"
+        print(f"POOLED +/-{g[0]:g} [{tag}]: trades {len(x)}, win {100 * p:.1f}%, edge {100 * (p - x.rand.mean()):+.2f} pp, "
+              f"net {x.net.mean():+.3f} pip/tr (${2 * x.net.mean():+.2f} at 0.2 lot), windows net+ {pos}/{len(counted)} counted"
+              + (f" -> {verdict}" if g == (5.0, 5.0) else ""))
 SCALE_MODE = "--scale" in sys.argv
 SCALE_GEOMS = [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (5.0, 5.0)]
 
@@ -271,6 +314,10 @@ def main() -> None:
     else:
         sys.exit("MT5 initialization failed")
     md = MarketData()
+    if P1_MODE:
+        p1_screen(md)
+        mt5.shutdown()
+        return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if SCALE_MODE:
         live = pd.read_pickle(Path(args[0])) if args else None
