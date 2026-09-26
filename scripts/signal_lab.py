@@ -40,7 +40,7 @@ UP, DN = 1.0 * PIP, 0.5 * PIP          # staircase first tier ($2) / post-BE cap
 WIN_PAYOFF, LOSS_PAYOFF = 2.216, 1.184  # measured average live fills (14 windows)
 BREAKEVEN = LOSS_PAYOFF / (WIN_PAYOFF + LOSS_PAYOFF)
 POINT = 0.00001
-CHUNKS = (400, 4000, 40000)             # scan lengths for the first-passage search
+CHUNKS = (400, 4000, 40000, 200000)     # scan lengths for the first-passage search
 # --geometry mode: (target pips, stop pips). Fill slippage measured on live runs: stops fill
 # ~0.09 pip past the level (cap -$1.18 vs -$1.00), targets ~0.04 pip short ($2 tier fills +$1.92).
 GEOMETRIES = [(1.0, 0.5), (0.5, 0.5), (0.5, 1.0), (0.75, 0.75), (1.0, 1.0)]
@@ -91,11 +91,11 @@ def _first_passage(px: np.ndarray, start: int, entry: float, side: int, up_pips:
     return np.nan
 
 
-def build_window(md: MarketData, name: str, start_s: str) -> pd.DataFrame:
+def build_window(md: MarketData, name: str, start_s: str, tf: int = mt5.TIMEFRAME_M1, geoms: list = None) -> pd.DataFrame:
     """Per live-hours candle: OHLC history for rules + both-direction barrier outcomes."""
     start = dt.datetime.fromisoformat(start_s)
     end = start + dt.timedelta(days=28)
-    candles = pd.DataFrame(md.get_candles_range("EURUSD", mt5.TIMEFRAME_M1, start - dt.timedelta(days=3), end))
+    candles = pd.DataFrame(md.get_candles_range("EURUSD", tf, start - dt.timedelta(days=3 if tf == mt5.TIMEFRAME_M1 else 10), end))
     candles = candles.set_index("time").sort_index()
     k = _ticks(start, end + dt.timedelta(days=1))
     tm, bid, ask = k.time_msc.to_numpy(), k.bid.to_numpy(), k.ask.to_numpy()
@@ -104,7 +104,8 @@ def build_window(md: MarketData, name: str, start_s: str) -> pd.DataFrame:
     c = candles.copy()
     c["in_window"] = c.index >= start
     c["live_hour"] = [(_SESSION._utc_hour(t.to_pydatetime()) not in BLOCKED) for t in c.index]
-    close_ms = np.array([(t.to_pydatetime() + dt.timedelta(minutes=1)).timestamp() * 1000 for t in c.index], dtype="int64")
+    tf_s = {mt5.TIMEFRAME_M1: 60, mt5.TIMEFRAME_M5: 300, mt5.TIMEFRAME_M15: 900}[tf]
+    close_ms = np.array([(t.to_pydatetime() + dt.timedelta(seconds=tf_s)).timestamp() * 1000 for t in c.index], dtype="int64")
     a = np.searchsorted(tm, close_ms, side="left")
     b = np.searchsorted(tm, close_ms + int(WAIT_S * 1000), side="right")
     entry_idx = np.full(len(c), -1)
@@ -114,14 +115,14 @@ def build_window(md: MarketData, name: str, start_s: str) -> pd.DataFrame:
             entry_idx[n] = a[n] + hit[0]
     c["entry_idx"] = entry_idx
     ok = entry_idx >= 0
-    for (tp, sl) in (GEOMETRIES if GEOMETRY_MODE else [(1.0, 0.5)]):
+    for (tp, sl) in (geoms or (GEOMETRIES if GEOMETRY_MODE else [(1.0, 0.5)])):
         buy = np.full(len(c), np.nan)
         sell = np.full(len(c), np.nan)
         for n in np.flatnonzero(ok):
             i = entry_idx[n]
             buy[n] = _first_passage(bid, i, ask[i], +1, tp, sl)
             sell[n] = _first_passage(ask, i, bid[i], -1, tp, sl)
-        if (tp, sl) == (1.0, 0.5):
+        if (tp, sl) == (1.0, 0.5) or "win_buy" not in c:
             c["win_buy"], c["win_sell"] = buy, sell
         c[f"win_buy_{tp}_{sl}"], c[f"win_sell_{tp}_{sl}"] = buy, sell
     c["w"] = name
@@ -171,6 +172,62 @@ def score(frame: pd.DataFrame, direction: pd.Series) -> pd.DataFrame:
 
 
 GEOMETRY_MODE = "--geometry" in sys.argv
+SCALE_MODE = "--scale" in sys.argv
+SCALE_GEOMS = [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (5.0, 5.0)]
+
+
+def production_macd_directions(c: pd.DataFrame) -> pd.Series:
+    """The live signal (production strategy_factory, STF, no session/spread wrappers -- the lab
+    applies those itself) evaluated candle by candle on whatever timeframe `c` holds."""
+    from app.signals.signal_generation import strategy_factory
+    cfg = type("LabCfg", (Config,), {"USE_SESSION_FILTER": False, "USE_SPREAD_WAIT_ENTRY": False,
+                                     "USE_MULTI_TIMEFRAME_SIGNALS": False})
+    strat = strategy_factory(config=cfg, symbol="EURUSD", use_multi=False)
+    recs = [{"time": t, "open": r.open, "high": r.high, "low": r.low, "close": r.close,
+             "tick_volume": getattr(r, "tick_volume", 0), "symbol": "EURUSD"} for t, r in c.iterrows()]
+    out = np.zeros(len(recs), dtype=int)
+    import logging, contextlib, io
+    logging.disable(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            for i in np.flatnonzero(c.entry_idx.to_numpy() >= 0):
+                sig = strat.generate_signal(recs[max(0, i - 400): i + 1])
+                fs = (sig or {}).get("final_signal", "hold") if isinstance(sig, dict) else "hold"
+                out[i] = 1 if fs == "buy" else (-1 if fs == "sell" else 0)
+    finally:
+        logging.disable(logging.NOTSET)
+    return pd.Series(out, index=c.index)
+
+
+def scale_table(sets: dict) -> None:
+    """sets: label -> (frames, {signal: [per-frame direction series]}, min_trades)"""
+    rows = []
+    for label, (frames, cand, min_n) in sets.items():
+        for k, parts in cand.items():
+            for tp, sl in SCALE_GEOMS:
+                xs = []
+                for f, v in zip(frames, parts):
+                    b, s_ = f[f"win_buy_{tp}_{sl}"], f[f"win_sell_{tp}_{sl}"]
+                    x = f.assign(dirn=v.reindex(f.index).fillna(0).astype(int), wb=b, ws=s_)
+                    x = x[(x.dirn != 0) & x.wb.notna() & x.ws.notna()]
+                    win = (x.wb + x.ws) / 2 if k == "RANDOM" else np.where(x.dirn > 0, x.wb, x.ws)
+                    xs.append(pd.DataFrame({"w": x.w, "win": win, "rand": (x.wb + x.ws) / 2}))
+                xs = pd.concat(xs)
+                if len(xs) == 0:
+                    continue
+                net = xs.win * (tp - SLIP_TARGET) - (1 - xs.win) * (sl + SLIP_STOP)
+                per = xs.assign(net=net).groupby("w").agg(n=("net", "size"), net=("net", "mean"))
+                big = per[per.n >= min_n]
+                p = xs.win.mean()
+                rows.append({"tf": label, "signal": k, "barrier": f"+/-{tp:g}", "trades": len(xs),
+                             "win%": round(100 * p, 2), "edge pp": round(100 * (p - xs.rand.mean()), 2),
+                             "gross pips/tr": round(p * tp - (1 - p) * sl, 4), "net pips/tr": round(net.mean(), 4),
+                             "net $/tr": round(2 * net.mean(), 3),
+                             "windows net+": f"{int((big.net > 0).sum())}/{len(big)}"})
+    t = pd.DataFrame(rows).set_index(["tf", "signal", "barrier"])
+    pd.set_option("display.width", 250)
+    print(f"\nSCALE SCAN (slippage: stops -{SLIP_STOP} pip, targets -{SLIP_TARGET} pip; unresolved barriers dropped)")
+    print(t.to_string())
 
 
 def geometry_table(frames: list, cand: dict) -> None:
@@ -215,6 +272,36 @@ def main() -> None:
         sys.exit("MT5 initialization failed")
     md = MarketData()
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if SCALE_MODE:
+        live = pd.read_pickle(Path(args[0])) if args else None
+        m1, m5 = [], []
+        for name, st in WINDOWS.items():
+            t0 = time.time()
+            m1.append(build_window(md, name, st, mt5.TIMEFRAME_M1, SCALE_GEOMS))
+            m5.append(build_window(md, name, st, mt5.TIMEFRAME_M5, SCALE_GEOMS))
+            print(f"{name}: M1 {int((m1[-1].entry_idx >= 0).sum())} / M5 {int((m5[-1].entry_idx >= 0).sum())} entries ({time.time() - t0:.0f}s)", flush=True)
+        c1, c5 = {}, {}
+        for f in m1:
+            r = rules(f)
+            for k in ("boll_fade", "rsi_fade"):
+                c1.setdefault(k, []).append(r[k])
+            c1.setdefault("RANDOM", []).append(pd.Series(1, index=f.index))
+            if live is not None:
+                lv = live[live.w == f.w.iloc[0]]
+                base = pd.Series(0, index=f.index)
+                idx = base.index.intersection(lv.time)
+                base.loc[idx] = np.where(lv.set_index("time").direction.reindex(idx) == "buy", 1, -1)
+                c1.setdefault("LIVE_macd", []).append(base)
+                c1.setdefault("LIVE_against_trend240", []).append(base.where(base == -r["trend_ret240"], 0))
+        for f in m5:
+            r = rules(f)
+            for k in ("boll_fade", "rsi_fade", "fade_last1"):
+                c5.setdefault(k, []).append(r[k])
+            c5.setdefault("RANDOM", []).append(pd.Series(1, index=f.index))
+            c5.setdefault("MACD_prod_on_M5", []).append(production_macd_directions(f))
+        mt5.shutdown()
+        scale_table({"M1": (m1, c1, 100), "M5": (m5, c5, 50)})
+        return
     live = pd.read_pickle(Path(args[0])) if args else None  # optional live-signal (w, time, direction)
     frames = []
     for name, s in WINDOWS.items():

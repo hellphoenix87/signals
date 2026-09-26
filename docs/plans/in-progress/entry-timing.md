@@ -115,6 +115,29 @@ pessimistic in absolute terms -- it ignores staircase tiers above $2; compare ro
 Only remaining lever on this evidence: SCALE (larger targets/stops, M5/M15 entries), where fixed pip
 frictions shrink relative to the move -- if the edge grows with horizon.
 
+User choice (2026-09-26): **scale scan** -- `scripts/signal_lab.py --scale`: M1 signals (live MACD,
+Bollinger/RSI fade, MACD against 4h trend) and M5 signals (production MACD on M5, Bollinger/RSI fade,
+fade last candle), symmetric barriers +/-1, 2, 3, 5 pips, same slippage model. Bar fixed before
+running: net > 0 pooled and positive in >= 75% of windows (>= 100 trades M1, >= 50 M5).
+
+Result: **nothing passes the bar**, but a coherent pattern. Random-direction friction grows with
+scale (net -0.10 pip at +/-1 -> -0.25 at +/-5: longer trades meet more spread spikes), yet the
+reversion signals' edge grows faster: RSI fade on M5 +4.7 -> +7.3 pp from +/-1 to +/-5 (net +0.47
+pip, 7/10 windows); RSI fade M1 +/-5 +4.5 pp (+0.22 pip, 5/10); MACD against 4h trend +/-5 +3.3 pp
+(+0.12 pip, 7/11); production MACD on M5 +/-5 +3.3 pp (+0.10 pip, 5/10). Live MACD as-is stays ~+2 pp
+at every scale; momentum rules ~0 or negative.
+
+Robustness, RSI fade M5: 1,248 entries are 445 episodes (RSI stays extreme for several candles).
+First entry per episode, +/-5 pips: win 55.7% (naive SE 2.4 pp), edge +7.87 pp, net +0.51 pip/trade
+(~$1.02 at 0.2 lots); positive in 8/12 windows (67% < 75% bar); W1 -0.13, W2 +0.87. +/-3: +4.2 pp,
++0.10 pip. No unresolved barriers.
+
+Candidate hypothesis (NOT passed): RSI(14) fade on M5 candles, first entry per episode, fixed +/-5 pip
+target/stop, zero-spread entry, live session hours. A different system: ~$10 risk per trade at 0.2
+lots (vs ~$1), hours-long trades, fixed pip exits production does not have. Proposed next: a
+pre-registered lab screen on unseen W25-W30, keeping W43-W48 and 2022 unseen for any later
+production test.
+
 - Change: write down the one or two candidate rules with the strongest, most consistent effect on
   reach %, and their expected trade-count cost. Recorded here; user picks before Phase 2.
 
