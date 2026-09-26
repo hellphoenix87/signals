@@ -202,6 +202,11 @@ Stage 2 (+W50, W56, W62, W68) RSI arm, cumulative 12 windows: 446 trades, 52.9% 
 Stage 3 (+W51, W53, W57, W59, W63, W65, W69, W71) RSI arm, cumulative 20 windows: 804 trades, 53.1%
 win, **+$0.591/trade**, +$474.80, t = 1.64 -> continue.
 
+Stage 4 (+W54, W60, W66, W72) RSI arm, all 24 windows: **945 trades, 53.9% win, +$0.745/trade,
++$704.20, t = +2.25** (criteria 1 and 2 met). 17 of 23 trading windows positive (W72: 0 trades, wide
+spreads); weak stretch late 2021 (W62-W65 negative), 2022 consistently positive. Criterion 3 (beat the
+LIVE arm's pooled total) pending the LIVE runs.
+
 ### Phase 4: Write-up and PR (not merged until the user decides)
 
 ## Open questions
